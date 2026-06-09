@@ -144,6 +144,12 @@ stress structure (so they run as a post-pass): **breaking** (stressed penult `a/
 `ao/ea/uo`) and **nasalization** (vowel + lost coda nasal; long vowels take a combining
 tilde). So `zelā→zealō`, `serdā→heardō`, `bendā→mẽdō`, `kamtón→gãtõ`, `nūn→nū̃`.
 
+The **rule language itself** also expresses stress- and cluster-conditioned changes directly:
+stress is written with an acute accent (`á é í ó ú`) and a multi-segment context distinguishes
+open from closed syllables, so `á > a o / _ C V` breaks `kása→kaosa` but leaves the closed
+`kásta` untouched. A worked ruleset ships as `lib/breaking.sca`, run with
+`latte sca --file lib/breaking.sca kása kásta` (see `docs/scars-sound-changes.md`).
+
 ## The hosted Ligurian page (Hymn + Facet + SCArs + fonts)
 
 `lib/site/index.facet` is served by Hymn at `/`. **No Heart Speech word is written into
@@ -320,7 +326,10 @@ right, because the page POSTs to a small dynamic API that Hymn now exposes:
 - `POST /api/save` / `GET /api/load` — persist and recover the in-memory document
 - `GET /api/files`, `GET`/`POST /api/file?path=NAME.facet` — list, open, and **edit the
   actual Facet page files** in the site root (path-checked to stay inside the root)
-- `POST /api/run` — the Oberon-style tool runner (below)
+- `POST /api/run` — the Oberon-style command runner (below)
+- `GET /api/sources`, `GET`/`POST /api/source?name=NAME` — **list, open, and recompile the
+  system's own Latte modules** in place (the Oberon edit→compile→run loop on real source)
+- `POST /api/compile` — compile a `core NAME …` module into the running system
 
 The document model is itself a Latte app — `lib/editor.lat`, a Mocha app whose state is
 the document — so a saved document is durable and can sync across machines just like any
@@ -331,25 +340,67 @@ like `ɣ`, `ā`, `ē` round-trip through edit, save, and render byte-for-byte.
 
 ### Oberon-style System GUI
 
-`/system` is a tiled, text-centric command environment in the spirit of Oberon: a
-*Commander* viewer where you type tool commands, put the caret on one, and **Execute** it
-(Ctrl+Enter); the *Log* viewer accumulates the output. Commands post to `/api/run`:
+`/` (and `/system`) is a tiled, text-centric command environment built in the spirit of the
+Oberon system. The screen is split into two vertical **tracks** of **viewers** that tile and
+never overlap; each viewer has a one-line **menu** of executable commands and a body.
 
-- `eval <expr>` — run a Latte expression with the std, mold, num, tensor, plan and ml
-  libraries linked, so every numeric tool is reachable (`eval (fit_demo 2000)`,
-  `eval (tdot …)`)
-- `type <expr>` — infer an expression's type
-- `sca <words>` — evolve Solar words into Heart Speech
+Every body is an Oberon-style **text frame**: editable text that is *also* the command
+interface. **Text is the user interface** — point at any `Module.command args` line (in a
+tool text, a source frame, even the Log) and **middle-click** to execute it; or put the caret
+on it and press **Ctrl/⌘+Enter**; or **select** any command text and run that. The frame
+under the pointer is located by line, so the same gesture works everywhere. Output
+accumulates in the **System.Log** (itself a text frame — you can re-run a line from it), and a
+**Modules** viewer lists the loaded modules (click one to open its source).
 
-A *Tools* panel drops starter commands for each tool and links to the Facet editor. The
-stateful/networked tools (the Mocha apps and `team`) run as nodes from the CLI.
+Commands fall into three families:
+
+- **`System.*`** — the display/OS commands, handled in the browser: `System.Open NAME`
+  (open a module's source in a new frame), `System.Close`, `System.Grow`, `System.Copy`,
+  `System.Clear`, `System.New NAME`, `System.Modules`, `System.Chess` (open the board). A
+  viewer can be **marked** (click it; it shows `✷`); commands with `*` act on the marked one.
+- **`Compiler.Compile *` / `Compiler.Store *`** — compile the marked source frame into the
+  running system (`/api/compile`), or compile **and persist** it to its `lib/NAME.lat` file
+  (`/api/source`). No binary rebuild — the new definitions are live immediately.
+- **everything else** → `/api/run`: `Module.command args` (calls a Latte arm), plus the tools
+  surfaced as verbs — `eval`, `type`, `libs`, `sca`/`evolve` (Ligurian Solar→Heart), **`scar`
+  (the general SCArs rule engine, `scar kasa k>g s>z/a_a → gaza`)**, **`plan` (the economic
+  planner report)**, and `icomb`. The command set is itself Latte source you can open and edit.
+
+The command set ships as Latte in **`lib/tool.lat`** (`core tool`): `Tool.fib`, `Tool.fact`,
+`Tool.gcd`, `Tool.primes`, `Tool.collatz`, `Tool.greet`, … The default desktop has a
+**System.Tool** text, an editable **hello.Mod** source frame, the **System.Log**, and the
+**Modules** list — so the edit→compile→run loop is a gesture away: mark `hello.Mod`, run
+**Compile**, then middle-click `hello.fib 20`.
+
+### Chess (graphical game frontend)
+
+`/chess` is an interactive board (rules and the learned opponent are Latte: `lib/chess.lat`,
+`lib/chessml.lat`). You can play **against the model** (greedy, or the gradient-descent-learned
+*Minerva* evaluator), **local two-player** on one board, or **against another user on a
+connected machine**. The game runs as a Mocha app (`lib/chessgame.lat`) on a gossip Node, so
+each move is a durable, replicated event: two GUI servers that peer with one another share one
+converging board. Illegal pokes are no-ops, so the shared game can never be corrupted.
 
 ```sh
-latte gui --listen 127.0.0.1:8088 --store /tmp/editor    # open http://127.0.0.1:8088/editor
+# play locally / vs the model:
+latte gui --listen 127.0.0.1:8088                        # open http://127.0.0.1:8088/chess
+# two connected machines sharing a game (open /chess on each, pick opposite colours):
+latte gui --listen :8088 --chess-listen 127.0.0.1:9601 --peer 127.0.0.1:9602   # machine A
+latte gui --listen :8089 --chess-listen 127.0.0.1:9602 --peer 127.0.0.1:9601   # machine B
+```
+
+The board talks to `POST /api/chess` (`state` | `new` | `move FROM TO` | `ai greedy|ml`),
+which reads the gossiped position from the node and computes legality, status, and the model's
+replies on the fast unbounded engine.
+
+```sh
+latte gui --listen 127.0.0.1:8088 --store /tmp/editor    # open http://127.0.0.1:8088/
 ```
 
 This is the system's GUI: there is no native windowing toolkit (Orpheus is dependency-free
-and the web stack via Hymn is the display layer), so the GUI is delivered in the browser.
+and the web stack via Hymn is the display layer), so the GUI is delivered in the browser, but
+the *logic* — the command set, the modules, the compiler loop, the chess rules — lives in
+Latte on the Loom.
 
 ## What's implemented vs. the full spec
 
@@ -394,12 +445,19 @@ and the web stack via Hymn is the display layer), so the GUI is delivered in the
   flow, entirely by interaction. `(mul (add 2 3) 2)` reduces to 10 and
   `if (lt 2 3) then (add 10 5) else (mul 100 100)` to 15, both matching Loom; two 200-formula
   randomized batteries (nested `+`/`*`, and `+`/`*`/`<`/`if`) are cross-checked against the
-  interpreter, alongside the annihilation, commutation, erasure-cascade, and confluence tests. `latte net "<expr>"` compiles a real Latte expression (its supported fragment) to a net and reduces it, printing the result and the interaction-step count next to the interpreter's answer.
+  interpreter, alongside the annihilation, commutation, erasure-cascade, and confluence tests. `latte net "<expr>"` compiles a real Latte expression (its supported fragment) to a net and reduces it, printing the result and the interaction-step count next to the interpreter's answer. Beyond the bare `+`/`*`/`<`/`if` primitives the lowering now accepts a richer fragment — `let`, `+()`, `==`, **let-bound user functions** (inlined), and `loop … again(…)` (**bounded unrolling**, the net's form of recursion) — and the `if` is **lazy**: the (closed) condition is evaluated and only the *taken* branch is built into the net, so the untaken branch is never reduced (`docs/interaction-nets.md`).
 - **The GUI opens in a window from GNOME.** Started in a desktop session, `latte`/`latte gui`
   pops a browser window (app-mode if available, else `xdg-open`); a `orpheus.desktop` entry and
   icon ship for the app grid. `--no-open` disables it; headless use is unaffected.
 - **Adding your own library** is documented in `docs/adding-libraries.md` (with the worked
   `lib/vec.lat` example); data viz and ML modelling in `docs/visualization-and-ml.md`; building and running on Ubuntu and Windows in `docs/building-and-running.md`.
+- **Language references, readable in the GUI.** The languages are documented in full:
+  `docs/latte-language.md` (Latte — values, syntax, modules, semantics), `docs/facet-language.md`
+  (Facet — the markup language with tool-call holes), `docs/scars-sound-changes.md` (the SCArs
+  sound-change rule language, including stress- and cluster-conditioned changes), and
+  `docs/interaction-nets.md` (the interaction-net engine and its compiled fragment). All of the
+  manuals are also served **inside the running GUI at `/docs`** (sidebar + rendered Markdown), and
+  reachable from the System page's `Docs` link or the `System.Docs` command.
 - **Adaptive JIT compilation is the default.** Formulas are *interpreted while cold* and
   compiled to closures only once they get *hot* (re-entered past a threshold), so compilation is
   the default exactly when it pays for itself — including compile time. A one-shot like
@@ -472,11 +530,13 @@ and the web stack via Hymn is the display layer), so the GUI is delivered in the
   right-nested layout corrupted addressing past ~64 arms) and arm lookup is shallower/faster.
 - **The planner has a GUI** (`/plan`, `/api/plan`): enter a final demand and iteration depth and
   get the labour values and gross outputs computed in `lib/plan.lat` on the (now JIT-compiled) VM.
-- - Not yet: extending the interaction-net compiler past its current fragment (literals, `+`,
-  `*`, `<`, and `if` now compile and are verified) to **recursion and user-defined functions**
-  (Loom rule 9), which needs net-level fixpoints, and a lazy `if` (the current one eagerly
-  reduces both branches and erases the unused one); a *native desktop* GUI (the browser GUI
-  in a window stands in); and the most intricate stress/cluster/ending sound changes.
+- - Not yet: **unbounded** general recursion on the interaction-net engine via net-level
+  fixpoints (the net now does `let`, user functions, and *bounded* recursion by unrolling, and a
+  lazy `if` that builds only the taken branch — but a fully dynamic lazy `if` for non-constant
+  conditions still needs interaction-net boxes); bit-for-bit self-hosting of the whole compiler in
+  Latte; and a *native desktop* tiling GUI (the browser GUI in a window stands in). The most
+  intricate stress/cluster sound changes are now expressible — see `lib/breaking.sca` and
+  `latte sca --file`.
 
 ## Files
 
@@ -490,7 +550,9 @@ and the web stack via Hymn is the display layer), so the GUI is delivered in the
 | `src/mocha.rs` `lib/mocha.lat` `lib/todo.lat` `lib/lexicon.lat` `lib/forge.lat` | Mocha environment + apps (Latte); Forge = team coding |
 | `src/repl.rs`    | the self-hosting Latte environment (`latte repl`) |
 | `lib/editor.lat` `lib/site/editor.html` | the WYSIWYG Facet editor: Latte document app + web page (Facet-file editing, Unicode) |
-| `lib/site/system.html` | the Oberon-style System console (tiled command viewers) |
+| `lib/tool.lat` | the system **command set**, written in Latte (`Tool.fib`, `Tool.primes`, …) — editable/recompilable from the GUI |
+| `lib/site/system.html` | the Oberon-style System GUI: tiled text frames in tracks, middle-click-to-execute, marked viewers, Log, live module list, edit→compile→run |
+| `lib/chessgame.lat` `lib/site/chess.html` | networked chess as a Mocha app (moves gossip between machines) + the interactive board page |
 | `src/numerics.rs` `lib/num.lat` `lib/tensor.lat` `lib/ml.lat` | signed numbers, n-d tensors, ML training (Latte) |
 | `src/viz.rs` `lib/plot.lat` `lib/site/chart.html` | data visualization: Latte layout → SVG, + chart GUI |
 | `src/loom.rs` | the VM: 12-rule interpreter **and** the JIT (compile-to-closures, the default) |
@@ -500,6 +562,12 @@ and the web stack via Hymn is the display layer), so the GUI is delivered in the
 | `src/rustgen.rs` | Anvil: the optimizing Latte → Rust compiler (`latte rustc`) |
 | `lib/chessml.lat` | chess evaluator with piece values learned by gradient descent in Latte; human-vs-machine play |
 | `docs/adding-libraries.md` | guide to writing and registering a new Latte library |
+| `docs/latte-language.md` | the Latte language reference (values, syntax, modules, semantics) |
+| `docs/facet-language.md` | the Facet markup-language reference (holes, directives, tool calls) |
+| `docs/scars-sound-changes.md` | the SCArs sound-change rule-language reference |
+| `docs/interaction-nets.md` | the interaction-net engine + its compiled Latte fragment |
+| `lib/site/docs.html` | the in-GUI documentation viewer (sidebar + Markdown pane, served at `/docs`) |
+| `lib/breaking.sca` | a worked stress- and cluster-conditioned ruleset (`latte sca --file`) |
 | `dist/orpheus.desktop` `dist/orpheus.svg` | GNOME app-grid launcher + icon (opens the GUI in a window) |
 | `docs/visualization-and-ml.md` | guide to charting and ML model design in Latte |
 | `src/plan.rs` `lib/plan.lat` | planning calculations, *Towards a New Socialism* |

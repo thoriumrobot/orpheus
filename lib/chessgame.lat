@@ -1,0 +1,49 @@
+:: ===========================================================================
+:: chessgame.lat — chess as a Mocha *application*: a poke/peek app whose state is
+:: a live game. Because it runs on the Node, every move is a durable, gossiped
+:: event, so two machines that peer with each other share one converging board —
+:: that is how "play against another user on a connected machine" works. The
+:: rules themselves are `import chess` (Latte), so each machine validates and
+:: folds every move identically.
+::
+::   state  = [board [side 0]]              (the chess engine's state)
+::   action = [%new 0] | [%move [from [to 0]]]
+::   query  = [%board|%side|%status|%legal|%state 0]
+:: ===========================================================================
+import std
+import chess
+core chessgame
+  :: an empty node starts at state 0; treat that as the opening position
+  cur = fn [s] -> if (s == 0) then (initial 0) else s
+
+  :: is move m one of the legal moves of state st?  (0 = yes)
+  islegal = fn [st m] ->
+    loop with [c = (legal st)] :
+      if (c == 0) then 1
+      else if ((head c) == m) then 0
+      else again((tail c))
+    end
+
+  :: apply m if legal, else leave the state unchanged (illegal pokes are no-ops,
+  :: so divergent or stale clients can never corrupt the shared game)
+  domove = fn [st m] ->
+    if ((islegal st m) == 0) then (apply (nth st 0) (nth st 1) m) else st
+
+  poke = fn [action state] ->
+    let st  = (cur state) in
+    let tag = (head action) in
+    let arg = (tail action) in
+    if (tag == %new)  then [ 0 (initial 0) ]
+    else if (tag == %move) then [ 0 (domove st arg) ]
+    else [ 0 st ]
+
+  peek = fn [query state] ->
+    let st = (cur state) in
+    let q  = (head query) in
+    if (q == %board)  then (nth st 0)
+    else if (q == %side)   then (nth st 1)
+    else if (q == %status) then (status st)
+    else if (q == %legal)  then (legal st)
+    else if (q == %state)  then st
+    else 0
+end

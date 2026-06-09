@@ -241,7 +241,7 @@ fn main() {
   latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
   latte plan [--iters N]             planning calc (Towards a New Socialism)
   latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ml [--iters N]               train a model by gradient descent (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] the GUI: console + WYSIWYG editor + charts\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ml [--iters N]               train a model by gradient descent (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
             );
         }
     }
@@ -253,6 +253,8 @@ fn cmd_gui(args: &[String]) {
     let mut root = "lib/site".to_string();
     let mut store: Option<String> = None;
     let mut open: Option<bool> = None; // None = auto (open iff a desktop session is present)
+    let mut chess_listen = String::new();
+    let mut chess_peers: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -261,6 +263,8 @@ fn cmd_gui(args: &[String]) {
             "--store" => { i += 1; store = Some(args[i].clone()); }
             "--open" => { open = Some(true); }
             "--no-open" => { open = Some(false); }
+            "--chess-listen" => { i += 1; chess_listen = args[i].clone(); }
+            "--peer" => { i += 1; chess_peers.push(args[i].clone()); }
             other => { eprintln!("gui: unknown arg {}", other); return; }
         }
         i += 1;
@@ -282,12 +286,22 @@ fn cmd_gui(args: &[String]) {
         None => net::Node::new(0xED170, agent),
     };
     let editor = serve::Editor::new(node, q);
+
+    // The chess board's game runs as a Mocha app on its own Node, so moves gossip to any
+    // peer machines (`--peer ADDR`). Standalone (no peers) it still backs vs-model and
+    // local two-player. `--chess-listen` opens it for other machines to connect to.
+    let chess = build_chess_node(&chess_listen, &chess_peers, store.as_deref());
+
     let url = format!("http://{}/", listen);
     println!("Orpheus GUI — open these in a browser:");
     println!("  {}          the System console (instructions + run every tool)", url);
     println!("  http://{}/editor    the WYSIWYG Facet editor", listen);
+    println!("  http://{}/chess     play chess (vs the model, local 2-player, or networked)", listen);
     println!("  http://{}/chart     data visualization", listen);
     println!("  http://{}/plan      economic planner", listen);
+    if !chess_listen.is_empty() || !chess_peers.is_empty() {
+        println!("  chess node: listen='{}' peers={:?}", chess_listen, chess_peers);
+    }
     // When launched from a desktop session (e.g. GNOME), pop the GUI in a window.
     if open.unwrap_or_else(desktop_session_present) {
         let u = url.clone();
@@ -296,7 +310,42 @@ fn cmd_gui(args: &[String]) {
             open_in_window(&u);
         });
     }
-    serve::serve_gui(&listen, &root, editor);
+    serve::serve_gui(&listen, &root, editor, chess);
+}
+
+/// Build the chess Mocha node (rules in Latte: `lib/chessgame.lat`), start its networking,
+/// and wrap it as a `ChessHandle`. Returns `None` only if the chess app fails to compile.
+fn build_chess_node(listen: &str, peers: &[String], store: Option<&str>) -> Option<serve::ChessHandle> {
+    let src = mocha::CHESSGAME_LAT;
+    let agent = match agent::Agent::from_source(src, "chessgame") {
+        Ok(a) => a,
+        Err(e) => { eprintln!("gui: chess app failed to compile: {}", e); return None; }
+    };
+    let q = match mocha::Mocha::load(src) {
+        Ok(q) => q,
+        Err(e) => { eprintln!("gui: chess app: {}", e); return None; }
+    };
+    // a fixed id keeps the durable store stable; the agent cid is shared across machines
+    let node = match store.map(|d| format!("{}/chess", d)) {
+        Some(dir) => match net::Node::open(0xC4E55, agent, &dir, 0) {
+            Ok(n) => n,
+            Err(_) => net::Node::new(
+                0xC4E55,
+                agent::Agent::from_source(src, "chessgame").expect("chess app recompiles"),
+            ),
+        },
+        None => net::Node::new(0xC4E55, agent),
+    };
+    let node = std::sync::Arc::new(std::sync::Mutex::new(node));
+    let cfg = std::sync::Arc::new(net::Config {
+        name: "chess".to_string(),
+        listen: if listen.is_empty() { "127.0.0.1:0".to_string() } else { listen.to_string() },
+        peers: peers.to_vec(),
+        verbose: false,
+        compact_every: 0,
+    });
+    let peers_handle = net::start(node.clone(), cfg);
+    Some(serve::Chess::new(node, peers_handle, q))
 }
 
 /// True if we appear to be inside a graphical desktop session (X11 or Wayland).
@@ -355,13 +404,33 @@ fn cmd_serve(args: &[String]) {
 }
 
 fn cmd_sca(args: &[String]) {
+    // `latte sca --file RULES.sca <word>..` applies a whole rule file (with `class` lines);
+    // `latte sca <word> <rule>..` applies inline rules.
+    if args.first().map(|s| s.as_str()) == Some("--file") {
+        let path = match args.get(1) {
+            Some(p) => p,
+            None => { eprintln!("usage: latte sca --file RULES.sca <word>.."); return; }
+        };
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("sca: cannot read {}: {}", path, e); return; }
+        };
+        for word in &args[2..] {
+            match sca::run_sca(word, &[src.clone()]) {
+                Ok(out) => println!("{}  -->  {}", word, out),
+                Err(e) => eprintln!("{} ! {}", word, e),
+            }
+        }
+        return;
+    }
     if args.is_empty() {
-        eprintln!("usage: latte sca <word> <rule>..");
+        eprintln!("usage: latte sca <word> <rule>..   |   latte sca --file RULES.sca <word>..");
         eprintln!("  rule syntax: FROM>TO/PRE_POST   (omit /PRE_POST for unconditional; empty TO deletes)");
         eprintln!("examples:");
         eprintln!("  latte sca kasa k>g s>z/a_a            => gaza");
         eprintln!("  latte sca apataka p>b/a_a t>d/a_a k>g/a_a   (intervocalic voicing) => abadaga");
         eprintln!("  latte sca anta t>/n_                  (delete t after n) => ana");
+        eprintln!("  latte sca --file lib/breaking.sca kása kásta   (stress/cluster breaking)");
         return;
     }
     let word = &args[0];

@@ -9,6 +9,71 @@
 use crate::knot::{cell, num, Knot, N};
 use crate::latte;
 use std::io::Write;
+use std::sync::OnceLock;
+
+// ---- a cached opponent for the GUI -----------------------------------------
+// The board UI asks the server to read the position and play moves. Compiling the chess
+// program (and training the evaluator) is done once and reused; the interpreter path is
+// fast and unbounded, unlike the node's fuel-bounded peek, so it is the source of truth
+// for legality, status, and the model's replies.
+fn rules_engine() -> Option<&'static Machine> {
+    static R: OnceLock<Option<Machine>> = OnceLock::new();
+    R.get_or_init(|| Machine::new(&["std", "chess"]).ok()).as_ref()
+}
+
+struct Ai {
+    ml: Machine,
+    weights: N,
+}
+fn ai() -> Option<&'static Ai> {
+    static A: OnceLock<Option<Ai>> = OnceLock::new();
+    A.get_or_init(|| {
+        let ml = Machine::new(&["std", "chess", "num", "chessml"]).ok()?;
+        let weights = ml.call("trained", num(250)).ok()?;
+        Some(Ai { ml, weights })
+    })
+    .as_ref()
+}
+
+/// Legal moves of `state` (`[board [side 0]]`) as (from,to) pairs, via the unbounded engine.
+pub fn legal_moves(state: &N) -> Vec<(u128, u128)> {
+    rules_engine()
+        .and_then(|r| r.call("legal", state.clone()).ok())
+        .map(|n| move_list(&n))
+        .unwrap_or_default()
+}
+
+/// Game status of `state`: 0 ongoing, 1 checkmate (side to move is mated), 2 stalemate.
+pub fn status_of(state: &N) -> u128 {
+    rules_engine()
+        .and_then(|r| r.call("status", state.clone()).ok())
+        .map(|n| u(&n))
+        .unwrap_or(0)
+}
+
+/// The board squares (64 piece codes) and side to move of `state`.
+pub fn board_side(state: &N) -> (Vec<u128>, u128) {
+    let board = head(state).map(|b| list_u(&b)).unwrap_or_default();
+    let side = tail(state).and_then(|t| head(&t)).map(|s| u(&s)).unwrap_or(1);
+    (board, side)
+}
+
+/// Choose a move for the side to move in `state`. With `ml`, use the Latte-learned evaluator
+/// (Minerva); otherwise the fast greedy chooser. `None` = no move (game over). Used by
+/// the GUI's `/api/chess` to play "against the model".
+pub fn ai_move(state: &N, ml: bool) -> Option<N> {
+    let mv = if ml {
+        let a = ai()?;
+        a.ml.call("choose_ml", cell(state.clone(), a.weights.clone())).ok()?
+    } else {
+        rules_engine()?.call("choose", state.clone()).ok()?
+    };
+    if mv.as_atom().is_some() {
+        None // the chooser returns an atom (0) when there is no legal move
+    } else {
+        Some(mv)
+    }
+}
 
 // ---- noun helpers ----------------------------------------------------------
 fn head(n: &N) -> Option<N> {
@@ -315,5 +380,47 @@ mod tests {
         let (p, n, b, r, q) = (w(0), w(1), w(2), w(3), w(4));
         assert!(q > r && r > n && n >= p, "expected Q>R>N>=P, got P{} N{} B{} R{} Q{}", p, n, b, r, q);
         assert!(b > p, "bishop should outweigh pawn");
+    }
+
+    // ---- the GUI-facing engine (used by /api/chess) ------------------------
+    use super::{ai_move, board_side, legal_moves, status_of};
+
+    #[test]
+    fn gui_engine_reads_opening_and_moves() {
+        let st = latte::run_with_libs("(initial 0)", &["std", "chess"]).unwrap();
+        let (board, side) = board_side(&st);
+        assert_eq!(board.len(), 64);
+        assert_eq!(side, 1);
+        assert_eq!(status_of(&st), 0);
+        let legal = legal_moves(&st);
+        assert_eq!(legal.len(), 20);
+        // the model picks a legal move for the side to move
+        let mv = ai_move(&st, false).expect("greedy move from the opening");
+        let from = super::u(&super::head(&mv).unwrap());
+        let to = super::u(&super::head(&super::tail(&mv).unwrap()).unwrap());
+        assert!(legal.iter().any(|&(f, t)| f == from && t == to), "ai move {}-{} must be legal", from, to);
+    }
+
+    #[test]
+    fn chessgame_app_validates_and_applies() {
+        // The networked board's rules are the Latte Mocha app (lib/chessgame.lat).
+        crate::latte::register_runtime_lib("chessgame", crate::mocha::CHESSGAME_LAT);
+        let libs = &["std", "chess", "chessgame"];
+        // an empty node (state 0) is the opening: 20 legal moves, ongoing
+        assert_eq!(
+            latte::run_with_libs("(len (peek [%legal 0] 0))", libs).unwrap().as_atom().unwrap().to_u128().unwrap(),
+            20
+        );
+        // e2e4 (52->36) applies: side flips to 2 and the pawn lands on 36
+        let side = latte::run_with_libs("(nth (tail (poke [%move [52 [36 0]]] 0)) 1)", libs)
+            .unwrap().as_atom().unwrap().to_u128().unwrap();
+        assert_eq!(side, 2);
+        let at36 = latte::run_with_libs("(nth (nth (tail (poke [%move [52 [36 0]]] 0)) 0) 36)", libs)
+            .unwrap().as_atom().unwrap().to_u128().unwrap();
+        assert_eq!(at36, 1);
+        // an illegal move (52->20) is a no-op: still White to move
+        let side2 = latte::run_with_libs("(nth (tail (poke [%move [52 [20 0]]] 0)) 1)", libs)
+            .unwrap().as_atom().unwrap().to_u128().unwrap();
+        assert_eq!(side2, 1);
     }
 }

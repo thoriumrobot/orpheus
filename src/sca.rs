@@ -592,4 +592,18 @@ mod tests {
         let rules = parse_sca_file(LIGURIAN_SCA).unwrap();
         assert!(rules.len() > 100, "expected class expansion, got {}", rules.len());
     }
+
+    #[test]
+    fn stress_and_cluster_conditioned_rules() {
+        // Stressed-vowel breaking fires only in an OPEN syllable (stressed V, one C, then V),
+        // so it is conditioned on both stress and the following cluster.
+        let break_rules = "class V = a e i o u\nclass C = p t k s n r l\ná > a o / _ C V";
+        assert_eq!(run_sca("kása", &[break_rules.to_string()]).unwrap(), "kaosa"); // open: breaks
+        assert_eq!(run_sca("kásta", &[break_rules.to_string()]).unwrap(), "kásta"); // closed: no break
+        // a cluster-conditioned onset deletion
+        assert_eq!(
+            run_sca("spata", &["class C = p t k\ns > / # _ C".to_string()]).unwrap(),
+            "pata"
+        );
+    }
 }

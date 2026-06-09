@@ -518,37 +518,214 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>), // if cond (Loobean) then a else b
 }
 
-/// Translate the supported fragment of the Latte AST into the net expression language. The
-/// interaction-net compiler handles naturals under `+`, `*`, `<`, and `if`; anything else
-/// (lists, cells, user calls, recursion, …) is reported as unsupported.
+/// Translate the supported fragment of the Latte AST into the net expression language.
+///
+/// The net's *primitive* agents are naturals under `+` (`add`), `*` (`mul`), `<` (`lt`) and
+/// `if`. On top of that, this lowering accepts a richer source fragment by **expanding it into
+/// those primitives at compile time**: `let`, `+(…)`, `==`, let-bound **user functions**
+/// (inlined), and `loop … again(…)` (**bounded unrolling**, the net's form of recursion).
+/// Operators with no native agent (`sub`, `dec`, `div`, `mod`) are constant-folded.
+///
+/// `if` is **lazy**: when the condition reduces to a constant (which it does for the closed
+/// expressions the net evaluates), only the *taken* branch is lowered, so the untaken branch is
+/// never built into the net and never reduced. Anything outside the fragment (lists, cells,
+/// cords, `case`, unbounded recursion) is reported as unsupported rather than mis-evaluated.
 pub fn latte_to_expr(a: &crate::latte::Ast) -> Result<Expr, String> {
+    let mut env = LowerEnv { vars: Vec::new(), funcs: Vec::new() };
+    match lower(a, &mut env, NET_FUEL)? {
+        Lowered::Val(e) => Ok(e),
+        Lowered::Again(_) => Err("`again` used outside of a `loop`".into()),
+    }
+}
+
+const NET_FUEL: u32 = 500_000;
+
+/// The result of lowering one node: either a value-expression, or an `again(…)` continuation
+/// (only meaningful as the tail of a `loop` body).
+enum Lowered {
+    Val(Expr),
+    Again(Vec<Expr>),
+}
+
+struct LowerEnv {
+    vars: Vec<(String, Expr)>,                       // let-/param-/loop-bound values
+    funcs: Vec<(String, Vec<String>, crate::latte::Ast)>, // let-bound gates (inlined on call)
+}
+
+/// Constant-fold a net expression if it is closed (used to decide `if`/`==` and the
+/// non-native arithmetic ops). Returns `None` only if a sub-term is non-constant.
+fn fold(e: &Expr) -> Option<u128> {
+    Some(match e {
+        Expr::Num(n) => *n,
+        Expr::Add(l, r) => fold(l)?.checked_add(fold(r)?)?,
+        Expr::Mul(l, r) => fold(l)?.checked_mul(fold(r)?)?,
+        Expr::Lt(l, r) => if fold(l)? < fold(r)? { 0 } else { 1 }, // Loobean: 0 = true
+        Expr::If(c, t, e) => if fold(c)? == 0 { fold(t)? } else { fold(e)? },
+    })
+}
+
+fn lower_val(a: &crate::latte::Ast, env: &mut LowerEnv, fuel: u32) -> Result<Expr, String> {
+    match lower(a, env, fuel)? {
+        Lowered::Val(e) => Ok(e),
+        Lowered::Again(_) => Err("`again` is only allowed as the tail of a `loop`".into()),
+    }
+}
+
+fn lower(a: &crate::latte::Ast, env: &mut LowerEnv, fuel: u32) -> Result<Lowered, String> {
     use crate::latte::Ast;
     match a {
-        Ast::Lit(n) => Ok(Expr::Num(*n)),
-        Ast::If(c, t, e) => Ok(Expr::If(
-            Box::new(latte_to_expr(c)?),
-            Box::new(latte_to_expr(t)?),
-            Box::new(latte_to_expr(e)?),
-        )),
+        Ast::Lit(n) => Ok(Lowered::Val(Expr::Num(*n))),
+        Ast::Nil => Ok(Lowered::Val(Expr::Num(0))),
+        Ast::Var(name) => env
+            .vars
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, e)| Lowered::Val(e.clone()))
+            .ok_or_else(|| format!("unbound variable '{}' on the net compiler", name)),
+        Ast::Inc(e) => Ok(Lowered::Val(Expr::Add(Box::new(lower_val(e, env, fuel)?), Box::new(Expr::Num(1))))),
+        Ast::Fast(_, body) => lower(body, env, fuel), // jet hint is irrelevant on the net
+        Ast::Eq(x, y) => {
+            let xv = lower_val(x, env, fuel)?;
+            let yv = lower_val(y, env, fuel)?;
+            match (fold(&xv), fold(&yv)) {
+                (Some(a), Some(b)) => Ok(Lowered::Val(Expr::Num(if a == b { 0 } else { 1 }))),
+                _ => Err("'==' on the net needs constant-foldable operands".into()),
+            }
+        }
+        Ast::If(c, t, e) => {
+            let cv = lower_val(c, env, fuel)?;
+            match fold(&cv) {
+                // lazy: build only the taken branch, so the other is never reduced
+                Some(0) => lower(t, env, fuel),
+                Some(_) => lower(e, env, fuel),
+                None => {
+                    // a non-constant condition: fall back to the strict net `if` (bundles both)
+                    let tv = lower_val(t, env, fuel)?;
+                    let ev = lower_val(e, env, fuel)?;
+                    Ok(Lowered::Val(Expr::If(Box::new(cv), Box::new(tv), Box::new(ev))))
+                }
+            }
+        }
+        Ast::Let(name, val, body) => match val.as_ref() {
+            // a let-bound gate becomes an inlinable user function
+            Ast::Gate(params, gbody) => {
+                env.funcs.push((name.clone(), params.clone(), (**gbody).clone()));
+                let r = lower(body, env, fuel);
+                env.funcs.pop();
+                r
+            }
+            _ => {
+                let v = lower_val(val, env, fuel)?;
+                env.vars.push((name.clone(), v));
+                let r = lower(body, env, fuel);
+                env.vars.pop();
+                r
+            }
+        },
+        Ast::Again(args) => {
+            let mut vs = Vec::with_capacity(args.len());
+            for a in args {
+                vs.push(lower_val(a, env, fuel)?);
+            }
+            Ok(Lowered::Again(vs))
+        }
+        Ast::Loop(binds, body) => {
+            let names: Vec<String> = binds.iter().map(|(n, _)| n.clone()).collect();
+            let mut vals: Vec<Expr> = Vec::with_capacity(binds.len());
+            for (_, v) in binds {
+                vals.push(lower_val(v, env, fuel)?);
+            }
+            let mut f = fuel;
+            loop {
+                if f == 0 {
+                    return Err("loop did not converge within the net compiler's unrolling budget".into());
+                }
+                f -= 1;
+                let base = env.vars.len();
+                for (n, v) in names.iter().zip(vals.iter()) {
+                    env.vars.push((n.clone(), v.clone()));
+                }
+                let r = lower(body, env, f);
+                env.vars.truncate(base);
+                match r? {
+                    Lowered::Val(e) => return Ok(Lowered::Val(e)),
+                    Lowered::Again(newvals) => {
+                        if newvals.len() != names.len() {
+                            return Err("`again` arity does not match the loop bindings".into());
+                        }
+                        vals = newvals;
+                    }
+                }
+            }
+        }
         Ast::Call(name, args) => {
-            let bin = |k: fn(Box<Expr>, Box<Expr>) -> Expr| -> Result<Expr, String> {
+            let bin = |env: &mut LowerEnv, k: fn(Box<Expr>, Box<Expr>) -> Expr| -> Result<Lowered, String> {
                 if args.len() != 2 {
                     return Err(format!("'{}' expects 2 arguments on the net compiler", name));
                 }
-                Ok(k(
-                    Box::new(latte_to_expr(&args[0])?),
-                    Box::new(latte_to_expr(&args[1])?),
-                ))
+                Ok(Lowered::Val(k(
+                    Box::new(lower_val(&args[0], env, fuel)?),
+                    Box::new(lower_val(&args[1], env, fuel)?),
+                )))
+            };
+            // fold an arithmetic op that has no native net agent
+            let folded2 = |env: &mut LowerEnv, op: fn(u128, u128) -> Option<u128>| -> Result<Lowered, String> {
+                if args.len() != 2 {
+                    return Err(format!("'{}' expects 2 arguments", name));
+                }
+                let a = lower_val(&args[0], env, fuel)?;
+                let b = lower_val(&args[1], env, fuel)?;
+                match (fold(&a), fold(&b)) {
+                    (Some(x), Some(y)) => op(x, y)
+                        .map(|v| Lowered::Val(Expr::Num(v)))
+                        .ok_or_else(|| format!("'{}' is undefined here (underflow / divide-by-zero)", name)),
+                    _ => Err(format!("'{}' on the net needs constant-foldable operands", name)),
+                }
             };
             match name.as_str() {
-                "add" => bin(Expr::Add),
-                "mul" => bin(Expr::Mul),
-                "lt" => bin(Expr::Lt),
-                other => Err(format!("unsupported operation '{}'", other)),
+                "add" => bin(env, Expr::Add),
+                "mul" => bin(env, Expr::Mul),
+                "lt" => bin(env, Expr::Lt),
+                "sub" => folded2(env, |x, y| x.checked_sub(y)),
+                "div" => folded2(env, |x, y| if y == 0 { None } else { Some(x / y) }),
+                "mod" => folded2(env, |x, y| if y == 0 { None } else { Some(x % y) }),
+                "dec" => {
+                    if args.len() != 1 {
+                        return Err("'dec' expects 1 argument".into());
+                    }
+                    let a = lower_val(&args[0], env, fuel)?;
+                    fold(&a)
+                        .and_then(|x| x.checked_sub(1))
+                        .map(|v| Lowered::Val(Expr::Num(v)))
+                        .ok_or_else(|| "'dec' on the net needs a constant-foldable, non-zero operand".into())
+                }
+                // a user-defined (let-bound) function: inline its body
+                other => {
+                    let func = env.funcs.iter().rev().find(|(n, _, _)| n == other).cloned();
+                    match func {
+                        Some((_, params, body)) => {
+                            if params.len() != args.len() {
+                                return Err(format!("'{}' expects {} argument(s)", other, params.len()));
+                            }
+                            let mut argv = Vec::with_capacity(args.len());
+                            for a in args {
+                                argv.push(lower_val(a, env, fuel)?);
+                            }
+                            let base = env.vars.len();
+                            for (p, v) in params.iter().zip(argv) {
+                                env.vars.push((p.clone(), v));
+                            }
+                            let r = lower(&body, env, fuel);
+                            env.vars.truncate(base);
+                            r
+                        }
+                        None => Err(format!("unsupported operation '{}' on the net compiler", other)),
+                    }
+                }
             }
         }
-        Ast::Eq(_, _) => Err("'==' is not supported by the net compiler".into()),
-        other => Err(format!("unsupported construct {:?}", std::mem::discriminant(other))),
+        other => Err(format!("unsupported construct {:?} on the net compiler", std::mem::discriminant(other))),
     }
 }
 
@@ -1120,5 +1297,41 @@ mod tests {
         }
         assert!(super::run_str("(reverse [1 [2 0]])").is_err());
         assert!(super::run_str("(len [1 0])").is_err());
+    }
+
+    #[test]
+    fn net_extended_fragment_matches_loom() {
+        // let, +(), ==, let-bound user functions (inlined), and loop/again (bounded unrolling)
+        // all lower into the add/mul/lt/if net and must agree with the interpreter.
+        for src in [
+            "let x = (add 2 3) in (mul x x)",                              // let
+            "+(+(40))",                                                    // +()
+            "if (5 == 5) then 7 else 9",                                   // ==
+            "let sq = fn [x] -> (mul x x) in (add (sq 3) (sq 4))",         // user function (inlined)
+            "loop with [acc = 0, i = 5] : if (i == 0) then acc else again((add acc i), (dec i)) end", // loop/again
+            "let dbl = fn [x] -> (add x x) in (dbl (dbl 6))",              // nested inlining
+        ] {
+            let (v, _) = super::run_str(src).expect(src);
+            let loom = crate::latte::run_with_libs(src, &["std"]).unwrap();
+            let want = loom.as_atom().and_then(|a| a.to_u128()).unwrap();
+            assert_eq!(v, want, "net vs loom for {}", src);
+        }
+        // sum 1..5 = 15
+        assert_eq!(super::run_str("loop with [acc = 0, i = 5] : if (i == 0) then acc else again((add acc i), (dec i)) end").unwrap().0, 15);
+    }
+
+    #[test]
+    fn net_if_is_lazy() {
+        // The untaken branch must never be built into the net. `mul 6 7` would be 42; if the
+        // `then` branch were built we'd see Mul/Succ agents and far more steps. With a lazy
+        // `if`, only `(add 1 1)` is compiled.
+        let e = super::latte_to_expr(&crate::latte::parse("if (lt 7 4) then (mul 6 7) else (add 1 1)").unwrap()).unwrap();
+        // the lowered expression is exactly the taken branch — no `if`, no `mul`
+        assert!(matches!(e, super::Expr::Add(_, _)), "lazy if should lower to just the taken branch");
+        let (v, _) = super::eval_net(&e);
+        assert_eq!(v, 2);
+        // and it agrees with the interpreter
+        let loom = crate::latte::run_with_libs("if (lt 7 4) then (mul 6 7) else (add 1 1)", &["std"]).unwrap();
+        assert_eq!(v, loom.as_atom().and_then(|a| a.to_u128()).unwrap());
     }
 }

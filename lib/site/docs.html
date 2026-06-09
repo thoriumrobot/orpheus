@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Docs</title>
+<style>
+ :root{--bg:#cfcab9;--ink:#1a1a2e;--paper:#f4f1e8;--title:#c9c4b4;--btn:#e8e4d8;--accent:#2a2d6e;--rule:#1a1a2e;--dim:#5b5848;--code:#efece1}
+ *{box-sizing:border-box}
+ body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;background:var(--bg);color:var(--ink);font-size:14px}
+ header{background:var(--ink);color:var(--paper);padding:6px 12px;display:flex;justify-content:space-between;align-items:center;font-size:13px}
+ header b{font-weight:600}
+ header a{color:#bcd;text-decoration:none;margin-left:12px}
+ header a:hover{text-decoration:underline}
+ .wrap{display:flex;height:calc(100vh - 34px)}
+ nav{width:240px;flex:0 0 240px;background:var(--paper);border-right:1.5px solid var(--rule);overflow:auto;padding:8px}
+ nav .h{font-weight:700;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px;margin:6px 6px 4px}
+ nav a{display:block;padding:5px 8px;color:var(--accent);text-decoration:none;border-radius:3px;cursor:pointer}
+ nav a:hover{background:#e7e3d6}
+ nav a.active{background:var(--title);font-weight:700}
+ main{flex:1;overflow:auto;padding:22px 30px;background:#fbfbf6}
+ article{max-width:820px;line-height:1.6}
+ article h1{font-size:26px;border-bottom:2px solid var(--rule);padding-bottom:6px}
+ article h2{font-size:20px;margin-top:28px;border-bottom:1px solid #cdc8b8;padding-bottom:3px}
+ article h3{font-size:16px;margin-top:20px}
+ article h4{font-size:14px;margin-top:16px;color:var(--dim)}
+ article code{background:var(--code);padding:1px 5px;border-radius:3px;font-size:13px}
+ article pre{background:#16182e;color:#e8e8f0;padding:12px 14px;border-radius:6px;overflow:auto}
+ article pre code{background:none;color:inherit;padding:0}
+ article table{border-collapse:collapse;margin:12px 0;font-size:13px}
+ article th,article td{border:1px solid #c9c4b4;padding:5px 9px;text-align:left;vertical-align:top}
+ article th{background:var(--title)}
+ article blockquote{border-left:4px solid #c9c4b4;margin:12px 0;padding:4px 14px;color:var(--dim);background:#f4f1e8}
+ article a{color:var(--accent)}
+ article hr{border:0;border-top:1px solid #cdc8b8;margin:22px 0}
+ article ul,article ol{padding-left:24px}
+ article li{margin:3px 0}
+</style></head>
+<body>
+<header>
+  <span><b>Orpheus · Docs</b> &nbsp;—&nbsp; the system's manuals, served from the running environment</span>
+  <span><a href="/">System</a><a href="/chess">Chess</a><a href="/editor">Editor</a><a href="/chart">Charts</a></span>
+</header>
+<div class="wrap">
+  <nav id="nav"><div class="h">Documents</div></nav>
+  <main><article id="doc">Loading…</article></main>
+</div>
+<script>
+"use strict";
+var TITLES={
+ 'latte-language':'The Latte Language','facet-language':'The Facet Language',
+ 'scars-sound-changes':'SCArs — Sound Changes','interaction-nets':'Interaction Nets',
+ 'adding-libraries':'Adding a Library','building-and-running':'Building & Running',
+ 'visualization-and-ml':'Visualization & ML'};
+function title(n){ return TITLES[n] || n.replace(/-/g,' '); }
+
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function inline(s){
+  s=esc(s);
+  s=s.replace(/`([^`]+)`/g,function(_,c){return '<code>'+c+'</code>';});
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/\[([^\]]+)\]\(([^)]+)\)/g,function(_,t,u){
+    var cls = /\.md$/.test(u) ? ' class="doclink"' : '';
+    return '<a href="'+u+'"'+cls+'>'+t+'</a>';
+  });
+  return s;
+}
+// A compact Markdown renderer — enough for these docs (headings, code, tables, lists, quotes, hr).
+function mdToHtml(md){
+  var lines=md.split('\n'), out=[], i=0;
+  function table(start){
+    var rows=[]; var j=start;
+    while(j<lines.length && /^\s*\|.*\|\s*$/.test(lines[j])){ rows.push(lines[j]); j++; }
+    if(rows.length<2) return null;
+    var cells=function(r){ return r.trim().replace(/^\||\|$/g,'').split('|').map(function(c){return c.trim();}); };
+    var head=cells(rows[0]);
+    var html='<table><thead><tr>'+head.map(function(h){return '<th>'+inline(h)+'</th>';}).join('')+'</tr></thead><tbody>';
+    for(var k=2;k<rows.length;k++){ html+='<tr>'+cells(rows[k]).map(function(c){return '<td>'+inline(c)+'</td>';}).join('')+'</tr>'; }
+    html+='</tbody></table>';
+    return {html:html,next:j};
+  }
+  while(i<lines.length){
+    var ln=lines[i];
+    if(/^```/.test(ln)){ var buf=[]; i++; while(i<lines.length && !/^```/.test(lines[i])){ buf.push(lines[i]); i++; } i++; out.push('<pre><code>'+esc(buf.join('\n'))+'</code></pre>'); continue; }
+    if(/^\s*\|.*\|\s*$/.test(ln)){ var t=table(i); if(t){ out.push(t.html); i=t.next; continue; } }
+    var h=ln.match(/^(#{1,4})\s+(.*)$/);
+    if(h){ var n=h[1].length; out.push('<h'+n+'>'+inline(h[2])+'</h'+n+'>'); i++; continue; }
+    if(/^\s*---\s*$/.test(ln)){ out.push('<hr>'); i++; continue; }
+    if(/^\s*>\s?/.test(ln)){ var q=[]; while(i<lines.length && /^\s*>\s?/.test(lines[i])){ q.push(lines[i].replace(/^\s*>\s?/,'')); i++; } out.push('<blockquote>'+inline(q.join(' '))+'</blockquote>'); continue; }
+    if(/^\s*[-*]\s+/.test(ln)){ var items=[]; while(i<lines.length && /^\s*[-*]\s+/.test(lines[i])){ items.push('<li>'+inline(lines[i].replace(/^\s*[-*]\s+/,''))+'</li>'); i++; } out.push('<ul>'+items.join('')+'</ul>'); continue; }
+    if(/^\s*\d+\.\s+/.test(ln)){ var oi=[]; while(i<lines.length && /^\s*\d+\.\s+/.test(lines[i])){ oi.push('<li>'+inline(lines[i].replace(/^\s*\d+\.\s+/,''))+'</li>'); i++; } out.push('<ol>'+oi.join('')+'</ol>'); continue; }
+    if(/^\s*$/.test(ln)){ i++; continue; }
+    var para=[]; while(i<lines.length && !/^\s*$/.test(lines[i]) && !/^```/.test(lines[i]) && !/^(#{1,4})\s/.test(lines[i]) && !/^\s*\|.*\|\s*$/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) && !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i])){ para.push(lines[i]); i++; }
+    out.push('<p>'+inline(para.join(' '))+'</p>');
+  }
+  return out.join('\n');
+}
+
+var current=null;
+function load(name){
+  current=name;
+  document.querySelectorAll('#nav a').forEach(function(a){ a.classList.toggle('active', a.dataset.name===name); });
+  fetch('/api/doc?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(md){
+    var art=document.getElementById('doc');
+    art.innerHTML=mdToHtml(md);
+    art.querySelectorAll('a.doclink').forEach(function(a){
+      a.addEventListener('click',function(e){ e.preventDefault(); load(a.getAttribute('href').replace(/\.md$/,'')); window.scrollTo(0,0); main().scrollTop=0; });
+    });
+    main().scrollTop=0;
+    location.hash=name;
+  });
+}
+function main(){ return document.querySelector('main'); }
+
+window.addEventListener('load', function(){
+  fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
+    var names=t.split('\n').filter(Boolean), nav=document.getElementById('nav');
+    names.forEach(function(n){
+      var a=document.createElement('a'); a.textContent=title(n); a.dataset.name=n; a.href='#'+n;
+      a.addEventListener('click',function(e){ e.preventDefault(); load(n); });
+      nav.appendChild(a);
+    });
+    var want=(location.hash||'').replace('#','');
+    load(names.indexOf(want)>=0 ? want : (names[0]||'latte-language'));
+  });
+});
+</script>
+</body></html>

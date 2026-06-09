@@ -35,16 +35,32 @@ impl Editor {
     }
 }
 
+/// The shared chess game backing the board GUI: a Mocha `chessgame` app on a networked
+/// Node. Moves are gossiped to peers, so two GUI servers that peer with one another share
+/// one converging board — the "play against another user on a connected machine" mode.
+pub struct Chess {
+    node: crate::net::NodeHandle,
+    peers: crate::net::Peers,
+    q: crate::mocha::Mocha,
+}
+pub type ChessHandle = std::sync::Arc<Chess>;
+impl Chess {
+    pub fn new(node: crate::net::NodeHandle, peers: crate::net::Peers, q: crate::mocha::Mocha) -> ChessHandle {
+        std::sync::Arc::new(Chess { node, peers, q })
+    }
+}
+
 pub fn serve(listen: &str, root: &str) {
-    serve_with(listen, root, None);
+    serve_with(listen, root, None, None);
 }
 
-/// Serve the GUI: the static site/Facet pages plus the live editor API, backed by `editor`.
-pub fn serve_gui(listen: &str, root: &str, editor: EditorHandle) {
-    serve_with(listen, root, Some(editor));
+/// Serve the GUI: the static site/Facet pages plus the live editor API, backed by `editor`,
+/// and the chess board, backed by `chess`.
+pub fn serve_gui(listen: &str, root: &str, editor: EditorHandle, chess: Option<ChessHandle>) {
+    serve_with(listen, root, Some(editor), chess);
 }
 
-fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>) {
+fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>, chess: Option<ChessHandle>) {
     let listener = match TcpListener::bind(listen) {
         Ok(l) => l,
         Err(e) => {
@@ -61,8 +77,9 @@ fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>) {
     for stream in listener.incoming().flatten() {
         let root = root.to_string();
         let editor = editor.clone();
+        let chess = chess.clone();
         std::thread::spawn(move || {
-            let _ = handle_conn(stream, &root, editor);
+            let _ = handle_conn(stream, &root, editor, chess);
         });
     }
 }
@@ -99,7 +116,7 @@ struct Response {
 }
 
 // ----- connection loop ------------------------------------------------------
-fn handle_conn(stream: TcpStream, root: &str, editor: Option<EditorHandle>) -> std::io::Result<()> {
+fn handle_conn(stream: TcpStream, root: &str, editor: Option<EditorHandle>, chess: Option<ChessHandle>) -> std::io::Result<()> {
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".into());
@@ -112,7 +129,7 @@ fn handle_conn(stream: TcpStream, root: &str, editor: Option<EditorHandle>) -> s
         };
         let keep = req.keep_alive;
         let resp = if req.path.starts_with("/api/") {
-            api_handle(&req, &editor, root)
+            api_handle(&req, &editor, &chess, root)
         } else if editor.is_some() && req.path == "/" {
             // the GUI's home is the System console
             respond_for(&req, resolve(root, "/system"))
@@ -266,7 +283,7 @@ fn content_type(ext: &str) -> Option<(&'static str, bool)> {
 
 // ----- the WYSIWYG editor API (dynamic) -------------------------------------
 /// Handle `/api/*`: live Facet rendering and document save/load for the editor.
-fn api_handle(req: &Request, editor: &Option<EditorHandle>, root: &str) -> Response {
+fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<ChessHandle>, root: &str) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
         // live preview: render submitted Facet source to HTML (errors shown inline)
         ("POST", "/api/render") => {
@@ -363,6 +380,99 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, root: &str) -> Respo
                 _ => simple(400, "text/plain; charset=utf-8", b"usage: first line = name, rest = source".to_vec()),
             }
         }
+        // ---- the system's own source (Oberon self-hosting) ----------------
+        // List the modules whose source can be opened/edited: built-ins, runtime-compiled,
+        // and any extra `*.lat` files in the library directory.
+        ("GET", "/api/sources") => {
+            let mut names: Vec<String> = crate::latte::builtin_lib_names();
+            names.extend(crate::latte::runtime_lib_names());
+            if let Some(dir) = lib_dir(root) {
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.extension().and_then(|x| x.to_str()) == Some("lat") {
+                            if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+                                names.push(stem.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            names.sort();
+            names.dedup();
+            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
+        }
+        // Read a module's current source: runtime override, else built-in, else file on disk.
+        ("GET", "/api/source") => match safe_lib_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                if let Some(src) = crate::latte::library_source(&name) {
+                    simple(200, "text/plain; charset=utf-8", src.into_bytes())
+                } else if let Some(p) = lib_dir(root).map(|d| d.join(format!("{}.lat", name))) {
+                    match std::fs::read(&p) {
+                        Ok(b) => simple(200, "text/plain; charset=utf-8", b),
+                        Err(_) => simple(404, "text/plain; charset=utf-8", b"no such module".to_vec()),
+                    }
+                } else {
+                    simple(404, "text/plain; charset=utf-8", b"no such module".to_vec())
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad module name".to_vec()),
+        },
+        // Compile a module's source into the running system and persist it to disk if possible.
+        // This is the GUI's edit -> compile -> run loop applied to the system's own modules.
+        ("POST", "/api/source") => {
+            let body = String::from_utf8_lossy(&req.body).into_owned();
+            match crate::latte::compile_and_register(&body) {
+                Ok(mut msg) => {
+                    // best-effort persist to <libdir>/NAME.lat (does not affect the live load)
+                    if let Some(name) = find_core_name(&body) {
+                        if let Some(p) = lib_dir(root).map(|d| d.join(format!("{}.lat", name))) {
+                            match std::fs::write(&p, body.as_bytes()) {
+                                Ok(_) => msg.push_str(" — saved to disk"),
+                                Err(_) => msg.push_str(" — (in-memory only; library dir not writable)"),
+                            }
+                        }
+                    }
+                    simple(200, "text/plain; charset=utf-8", msg.into_bytes())
+                }
+                Err(e) => simple(200, "text/plain; charset=utf-8", format!("compile error: {}", e).into_bytes()),
+            }
+        }
+        // ---- the documentation, served into the GUI ----------------------
+        ("GET", "/api/docs") => {
+            let mut names: Vec<String> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(docs_dir(root)) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                        if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+                            names.push(stem.to_string());
+                        }
+                    }
+                }
+            }
+            names.sort();
+            // a friendly default order: language references first
+            names.sort_by_key(|n| match n.as_str() {
+                "latte-language" => 0,
+                "facet-language" => 1,
+                "scars-sound-changes" => 2,
+                "interaction-nets" => 3,
+                "adding-libraries" => 4,
+                _ => 9,
+            });
+            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
+        }
+        ("GET", "/api/doc") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let p = docs_dir(root).join(format!("{}.md", name));
+                match std::fs::read(&p) {
+                    Ok(b) => simple(200, "text/markdown; charset=utf-8", b),
+                    Err(_) => simple(404, "text/plain; charset=utf-8", b"no such doc".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad doc name".to_vec()),
+        },
         // economic planning: body = "iters demand_steel demand_grain" (demand in thousandths)
         ("POST", "/api/plan") => {
             let body = String::from_utf8_lossy(&req.body);
@@ -382,15 +492,72 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, root: &str) -> Respo
             let vals: Vec<u128> = it.filter_map(|t| t.parse().ok()).collect();
             simple(200, "image/svg+xml; charset=utf-8", crate::viz::render_chart(kind, &vals).into_bytes())
         }
+        // ---- the chess board (graphical game frontend) --------------------
+        // Body is one line: `state` | `new` | `move FROM TO` | `ai greedy|ml`.
+        // The game lives in the chess Mocha node, so `move` events gossip to any peered
+        // machine — that is the "play against another user on a connected machine" mode.
+        ("POST", "/api/chess") => match chess {
+            None => simple(503, "text/plain; charset=utf-8", b"chess not enabled".to_vec()),
+            Some(ch) => {
+                let body = String::from_utf8_lossy(&req.body);
+                let mut it = body.split_whitespace();
+                let verb = it.next().unwrap_or("state");
+                match verb {
+                    "new" => {
+                        crate::net::submit(&ch.node, &ch.peers, crate::knot::cell(crate::knot::cord("new"), crate::knot::num(0)));
+                    }
+                    "move" => {
+                        if let (Some(f), Some(t)) = (it.next().and_then(|s| s.parse::<u128>().ok()), it.next().and_then(|s| s.parse::<u128>().ok())) {
+                            let mv = crate::knot::cell(crate::knot::num(f), crate::knot::cell(crate::knot::num(t), crate::knot::num(0)));
+                            crate::net::submit(&ch.node, &ch.peers, crate::knot::cell(crate::knot::cord("move"), mv));
+                        }
+                    }
+                    "ai" => {
+                        let ml = it.next() == Some("ml");
+                        let st = ch.node.lock().unwrap().state().unwrap_or_else(|_| crate::knot::num(0));
+                        // peek %state so an empty node resolves to the opening position
+                        let st = ch.q.peek(&chess_query("state"), &st).unwrap_or(st);
+                        if let Some(mv) = crate::game::ai_move(&st, ml) {
+                            crate::net::submit(&ch.node, &ch.peers, crate::knot::cell(crate::knot::cord("move"), mv));
+                        }
+                    }
+                    _ => {} // "state" or anything else: just report
+                }
+                simple(200, "application/json; charset=utf-8", chess_json(ch).into_bytes())
+            }
+        },
         _ => simple(404, "text/plain; charset=utf-8", b"404 (unknown /api route)".to_vec()),
     }
+}
+
+/// Build the `[tag 0]` query noun for a chessgame peek.
+fn chess_query(tag: &str) -> N {
+    crate::knot::cell(crate::knot::cord(tag), crate::knot::num(0))
+}
+
+/// Render the current chess game as JSON for the board UI. The position is read from the
+/// (gossiped) node, but legality and status are computed on the fast unbounded engine —
+/// the node's peek is fuel-bounded and cannot complete the heavy move generation.
+fn chess_json(ch: &Chess) -> String {
+    let raw = ch.node.lock().unwrap().state().unwrap_or_else(|_| crate::knot::num(0));
+    // peek %state normalises an empty node to the opening position
+    let st = ch.q.peek(&chess_query("state"), &raw).unwrap_or(raw);
+    let (board, side) = crate::game::board_side(&st);
+    let status = crate::game::status_of(&st);
+    let legal = crate::game::legal_moves(&st);
+    let board_s = board.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let legal_s = legal.iter().map(|(f, t)| format!("[{},{}]", f, t)).collect::<Vec<_>>().join(",");
+    format!(
+        "{{\"board\":[{}],\"side\":{},\"status\":{},\"legal\":[{}]}}",
+        board_s, side, status, legal_s
+    )
 }
 
 /// Run a one-line tool command (the Oberon-style "execute this command"):
 /// `eval <expr>`, `type <expr>`, or `sca <words>`.
 fn run_tool(cmd: &str) -> String {
     if cmd.is_empty() {
-        return "commands:\n  eval <expr>   run a Latte expression (std · mold · num · tensor · plan · ml)\n  type <expr>   infer an expression's type\n  sca  <words>  evolve Solar words into Heart Speech (SCArs)\n  icomb         reduce interaction combinators (Lafont γ/δ/ε)"
+        return "commands:\n  eval <expr>   run a Latte expression (std · mold · num · tensor · plan · ml · tool)\n  type <expr>   infer an expression's type\n  sca  <words>  evolve Solar words into Heart Speech (SCArs)\n  icomb         reduce interaction combinators (Lafont γ/δ/ε)\n  libs          list the libraries (modules) loaded in the running system\n  Module.cmd a  run arm `cmd` of a loaded Latte module on the argument(s) `a`"
             .into();
     }
     let (head, rest) = match cmd.split_once(char::is_whitespace) {
@@ -398,20 +565,7 @@ fn run_tool(cmd: &str) -> String {
         None => (cmd, ""),
     };
     match head {
-        "eval" => {
-            let libs: Vec<String> = crate::latte::all_libs();
-            let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-            // The optimizing compiler (Anvil) is the engine here too: compile→build(cached)→run,
-            // then render in the console's style. Fall back to the interpreter if that's not
-            // possible, so output is never wrong.
-            if let Some(n) = crate::rustgen::run_native_noun(rest, &refs) {
-                return render_noun(&n);
-            }
-            match latte::run_with_libs(rest, &refs) {
-                Ok(v) => render_noun(&v),
-                Err(e) => format!("error: {}", e),
-            }
-        }
+        "eval" => eval_expr(rest),
         "type" => match latte::parse(rest) {
             Ok(ast) => match check::check(&ast) {
                 Ok(ty) => format!("{} : {}", rest, ty.show()),
@@ -428,7 +582,80 @@ fn run_tool(cmd: &str) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => format!("unknown command '{}'. try: eval | type | sca", head),
+        // the general SCArs engine: apply arbitrary rules `FROM>TO/PRE_POST` to one word
+        "scar" => {
+            let mut parts = rest.split_whitespace();
+            match parts.next() {
+                None => "usage: scar <word> <rule>..  e.g.  scar kasa k>g s>z/a_a".into(),
+                Some(word) => {
+                    let rules: Vec<String> = parts.map(|s| s.to_string()).collect();
+                    match sca::run_sca(word, &rules) {
+                        Ok(out) => {
+                            let rs = if rules.is_empty() { "(no rules)".to_string() } else { rules.join("  ") };
+                            format!("{}  --[ {} ]-->  {}", word, rs, out)
+                        }
+                        Err(e) => format!("sca error: {}", e),
+                    }
+                }
+            }
+        }
+        // the economic planner: `plan [iters [demand_steel demand_grain]]` (thousandths)
+        "plan" => {
+            let nums: Vec<u128> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let iters = nums.first().copied().unwrap_or(60) as u64;
+            let ds = nums.get(1).copied().unwrap_or(0);
+            let dg = nums.get(2).copied().unwrap_or(1000);
+            crate::plan::plan_report(ds, dg, iters)
+        }
+        "libs" => {
+            let mut out = String::from("loaded modules:\n");
+            out.push_str("  built-in: ");
+            out.push_str(&latte::builtin_lib_names().join(" "));
+            let rt = latte::runtime_lib_names();
+            if !rt.is_empty() {
+                out.push_str("\n  compiled: ");
+                out.push_str(&rt.join(" "));
+            }
+            out
+        }
+        "help" => run_tool(""),
+        // Oberon-style `Module.command args`: call arm `command` of a loaded module on the
+        // parsed argument(s). Because every loaded library is linked into one namespace, the
+        // arm is reachable by name — so the system's command set is just Latte source.
+        _ if head.contains('.') && head.split('.').all(|p| is_ident(p)) => {
+            let arm = head.rsplit('.').next().unwrap_or(head);
+            let expr = if rest.is_empty() {
+                format!("({} 0)", arm)
+            } else {
+                format!("({} {})", arm, rest)
+            };
+            eval_expr(&expr)
+        }
+        // A bare parenthesised expression is also accepted as an expression to evaluate.
+        _ if head.starts_with('(') => eval_expr(cmd),
+        _ => format!(
+            "unknown command '{}'. try: eval | type | sca | icomb | libs, or Module.command args",
+            head
+        ),
+    }
+}
+
+/// True for a Latte identifier / module name component.
+fn is_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Evaluate a Latte expression with the whole library scope, via Anvil (native) with an
+/// interpreter fallback, and render the resulting noun for the console.
+fn eval_expr(expr: &str) -> String {
+    let libs: Vec<String> = crate::latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    if let Some(n) = crate::rustgen::run_native_noun(expr, &refs) {
+        return render_noun(&n);
+    }
+    match latte::run_with_libs(expr, &refs) {
+        Ok(v) => render_noun(&v),
+        Err(e) => format!("error: {}", e),
     }
 }
 
@@ -474,6 +701,53 @@ fn safe_facet_path(root: &str, name: Option<&str>) -> Option<std::path::PathBuf>
         return None;
     }
     Some(std::path::Path::new(root).join(name))
+}
+
+/// The library directory that holds the system's `*.lat` source. The GUI root is the site
+/// directory (`lib/site`); the libraries sit one level up (`lib`).
+fn lib_dir(root: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(root).parent().map(|p| p.to_path_buf())
+}
+
+/// The documentation directory (`docs/`), a sibling of the library directory.
+fn docs_dir(root: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(root)
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("docs"));
+    match p {
+        Some(d) if d.as_os_str().is_empty() == false && d.exists() => d,
+        _ => std::path::PathBuf::from("docs"),
+    }
+}
+
+/// A safe documentation name (identifier with hyphens; no separators or `..`).
+fn safe_doc_name(name: Option<&str>) -> Option<String> {
+    let name = name?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// A safe bare module name (identifier only — no path separators, no extension).
+fn safe_lib_name(name: Option<&str>) -> Option<String> {
+    let name = name?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Find the `core NAME` declared in a module source (for naming the on-disk file).
+fn find_core_name(src: &str) -> Option<String> {
+    let mut toks = src.split_whitespace();
+    while let Some(t) = toks.next() {
+        if t == "core" {
+            return toks.next().map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 // ----- the HTTP semantics (pure; unit-tested) -------------------------------
@@ -819,7 +1093,7 @@ mod tests {
             body: "<b>{{ SCArs.evolve(\"ligā\") }}</b>".as_bytes().to_vec(),
             query: String::new(),
         };
-        let r = api_handle(&req, &None, ".");
+        let r = api_handle(&req, &None, &None, ".");
         assert_eq!(r.status, 200);
         assert_eq!(String::from_utf8_lossy(&r.body), "<b>liɣō</b>");
     }
@@ -830,5 +1104,59 @@ mod tests {
         assert_eq!(httpdate(0), "Thu, 01 Jan 1970 00:00:00 GMT");
         // 784111777 = Sun, 06 Nov 1994 08:49:37 GMT (the RFC example)
         assert_eq!(httpdate(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
+    }
+
+    #[test]
+    fn module_command_dispatch() {
+        // `Module.cmd args` calls a Latte arm of a loaded module (the Oberon command model).
+        assert_eq!(run_tool("Tool.fib 10"), "55");
+        assert_eq!(run_tool("Tool.fact 5"), "120");
+        assert_eq!(run_tool("Tool.gcd [1071 462]"), "21");
+        assert_eq!(run_tool("Tool.greet"), "orpheus"); // a command that returns a cord
+        // a bare parenthesised expression evaluates too
+        assert_eq!(run_tool("(mul 6 7)"), "42");
+    }
+
+    #[test]
+    fn libs_lists_loaded_modules() {
+        let out = run_tool("libs");
+        assert!(out.contains("tool"));
+        assert!(out.contains("std"));
+    }
+
+    #[test]
+    fn tool_verbs_scar_and_plan() {
+        // the general SCArs engine: intervocalic voicing turns kasa into gaza
+        let out = run_tool("scar kasa k>g s>z/a_a");
+        assert!(out.contains("kasa"));
+        assert!(out.contains("gaza"));
+        // the planner produces its two-sector report
+        assert!(run_tool("plan 10 0 1000").to_lowercase().contains("economy"));
+        // the Ligurian evolve path is unchanged
+        assert_eq!(run_tool("sca ligā"), "ligā → liɣō");
+    }
+
+    #[test]
+    fn oberon_edit_compile_run_loop() {
+        // Compile a module into the running system, then call its arm by `Module.cmd`.
+        let src = "import std\ncore demo_loop\n  dl_op = fn [n] -> (add n n)\nend";
+        crate::latte::compile_and_register(src).unwrap();
+        assert_eq!(run_tool("demo_loop.dl_op 21"), "42");
+        // Recompile with a changed body — the new definition is live immediately.
+        let src2 = "import std\ncore demo_loop\n  dl_op = fn [n] -> (mul n 10)\nend";
+        crate::latte::compile_and_register(src2).unwrap();
+        assert_eq!(run_tool("demo_loop.dl_op 4"), "40");
+    }
+
+    #[test]
+    fn lib_name_and_dir_helpers() {
+        assert_eq!(safe_lib_name(Some("std")), Some("std".to_string()));
+        assert_eq!(safe_lib_name(Some("my_mod9")), Some("my_mod9".to_string()));
+        assert_eq!(safe_lib_name(Some("../etc/passwd")), None);
+        assert_eq!(safe_lib_name(Some("a/b")), None);
+        assert_eq!(safe_lib_name(Some("")), None);
+        assert_eq!(find_core_name("import std\ncore widget\n end"), Some("widget".to_string()));
+        // the library dir is the parent of the (site) root
+        assert_eq!(lib_dir("lib/site"), Some(std::path::PathBuf::from("lib")));
     }
 }

@@ -643,6 +643,8 @@ pub const PLOT_LAT: &str = include_str!("../lib/plot.lat");
 pub const VEC_LAT: &str = include_str!("../lib/vec.lat");
 pub const CHESS_LAT: &str = include_str!("../lib/chess.lat");
 pub const CHESSML_LAT: &str = include_str!("../lib/chessml.lat");
+/// System commands written in Latte (the Oberon-style command set), via `import tool`.
+pub const TOOL_LAT: &str = include_str!("../lib/tool.lat");
 
 
 fn builtin_lib(name: &str) -> Option<&'static str> {
@@ -658,6 +660,7 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "vec" => Some(VEC_LAT),
         "chess" => Some(CHESS_LAT),
         "chessml" => Some(CHESSML_LAT),
+        "tool" => Some(TOOL_LAT),
         _ => None,
     }
 }
@@ -733,6 +736,7 @@ pub fn runtime_lib_names() -> Vec<String> {
 pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
+        "tool",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -746,6 +750,25 @@ fn resolve_lib(name: &str) -> Option<String> {
         return Some(s.clone());
     }
     builtin_lib(name).map(|s| s.to_string())
+}
+
+/// The fixed set of built-in library names (sorted) — for listing the system's own modules.
+pub fn builtin_lib_names() -> Vec<String> {
+    let mut v: Vec<String> = [
+        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
+        "tool",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    v.sort();
+    v
+}
+
+/// Public view of a library's source (runtime override first, then built-in embedded source).
+/// Lets the GUI open the system's own modules, edit them, and recompile them in place.
+pub fn library_source(name: &str) -> Option<String> {
+    resolve_lib(name)
 }
 
 type Arm = (String, Vec<String>, Ast);
@@ -1165,6 +1188,18 @@ mod tests {
     use super::*;
     use crate::knot::{cell, num};
     use crate::loom::tar;
+
+    #[test]
+    fn tool_library_is_a_default_command_module() {
+        // The system's command set (lib/tool.lat) is Latte, loaded by default.
+        assert!(all_libs().contains(&"tool".to_string()));
+        assert!(builtin_lib_names().contains(&"tool".to_string()));
+        assert_eq!(run_with_libs("(fib 10)", &["std", "tool"]).unwrap(), num(55));
+        assert_eq!(run_with_libs("(countprimes 100)", &["std", "tool"]).unwrap(), num(25));
+        // its source is openable for live editing
+        assert!(library_source("tool").unwrap().contains("core tool"));
+        assert!(library_source("nope_not_a_lib").is_none());
+    }
 
     #[test]
     fn runtime_library_can_be_added_and_imported() {

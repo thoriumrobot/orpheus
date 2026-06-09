@@ -74,11 +74,19 @@ including subtle things like overflow and divide-by-zero behaving identically on
 
 **4. The interaction-net compiler.** This is the research corner. Orpheus implements Lafont's
 interaction combinators (the γ constructor, δ duplicator, ε eraser) as a confluent graph reducer,
-and compiles a fragment of Latte — naturals under `+`, `*`, `<`, and `if` — into interaction nets
-that *compute by local rewriting*. Multiplication duplicates an operand with the δ duplicator;
-`if` bundles its branches into a cell that a selector projects, erasing the unused branch with ε.
-`latte net "if (lt 7 4) then (add 1 1) else (mul 6 7)"` reduces to 42 on the net engine — and, of
-course, agrees with the interpreter. Two 200-formula randomized batteries keep it honest.
+and compiles a fragment of Latte into interaction nets that *compute by local rewriting*.
+Multiplication duplicates an operand with the δ duplicator; the unused parts of a computation are
+erased with ε. The net's primitive agents are naturals under `+`, `*`, `<`, and `if`, but the
+compiler now accepts a richer source fragment by expanding it into those primitives: `let`,
+`+(…)`, `==`, **let-bound user functions** (inlined at each call site), and `loop … again(…)`,
+which is the net's form of recursion — **bounded unrolling** to a fuel budget (a closed
+expression's loop conditions fold to constants, so it lowers to a finite net). The `if` is
+**lazy**: the compiler evaluates the closed condition and builds *only the taken branch* into the
+net, so the unused branch is never constructed and never reduced.
+`latte net "if (lt 7 4) then (add 1 1) else (mul 6 7)"` reduces to 42 on the net engine with the
+`add 1 1` absent entirely; `latte net "let sq = fn [x] -> (mul x x) in (add (sq 3) (sq 4))"`
+reduces to 25. Both agree with the interpreter, which — along with two 200-formula randomized
+batteries — is what keeps the net honest.
 
 ## A tour of the tools
 
@@ -100,12 +108,16 @@ Everything is a subcommand of `latte`:
 - `latte ml`, `latte tensor`, `latte chart`, `latte plan` — train a model, do n-dimensional
   tensor math, render an SVG chart, or solve a little planning problem, all computed in Latte
   libraries on the VM.
-- `latte sca <words>` — evolve words through ordered sound changes (for constructed languages).
+- `latte sca <words>` — evolve words through ordered sound changes (for constructed languages);
+  `latte sca --file rules.sca <words>` applies a whole rule file, including stress- and
+  cluster-conditioned changes (see `lib/breaking.sca`).
 - `latte team --as NAME --share CODE` — collaborative coding across machines, with attribution.
 - `latte cache [path|clear]` — manage the compiled-program cache.
 - `latte gui` — the web GUI: a System console, a WYSIWYG document editor, charts, the planner,
-  and an Oberon-style **module compiler page** where you paste a `core` module, compile it (with
-  line/column errors), and have it loaded live into the running system.
+  an Oberon-style **module compiler page** where you paste a `core` module, compile it (with
+  line/column errors), and have it loaded live into the running system — and the **manuals
+  themselves, served at `/docs`** (Latte, Facet, SCArs, and interaction nets, rendered in a
+  sidebar+pane viewer).
 - `latte node` — join a content-addressed, event-logged distributed runtime.
 
 ## Some engineering worth calling out
@@ -153,12 +165,16 @@ building-and-running guide.
 
 ## What's still open
 
-Orpheus is honest about its frontier. The interaction-net compiler handles a first-order
-arithmetic-and-control fragment, but general recursion and user-defined functions on the net (which
-need net-level fixpoints) are future work, as is a lazy `if` that doesn't eagerly reduce the unused
-branch. There's no native desktop GUI yet — the browser GUI stands in — and the most intricate
-stress- and cluster-conditioned sound changes aren't implemented. None of that detracts from the
-core idea, which the system already demonstrates end to end: that a complete, multi-engine,
+Orpheus is honest about its frontier. The interaction-net compiler now handles a first-order
+fragment with `let`, user-defined functions, bounded recursion (by unrolling), and a lazy `if`
+that builds only the taken branch — but **unbounded** general recursion on the net still needs
+net-level fixpoints (the affine-variable limit of pure interaction combinators, `λx.(x x)`, is
+exactly why Loom and not the net is the canonical core), and a fully *dynamic* lazy `if` for
+non-constant conditions awaits interaction-net boxes. There's no native desktop GUI yet — the
+browser GUI stands in — and bit-for-bit self-hosting of the whole compiler in Latte remains
+future work. (Stress- and cluster-conditioned sound changes, once listed here, are now
+expressible directly in SCArs rules; see `lib/breaking.sca`.) None of that detracts from the core
+idea, which the system already demonstrates end to end: that a complete, multi-engine,
 self-hosting functional environment can be small, dependency-free, deterministic, and verifiable —
 and still do real work, from playing chess to learning piece values to compiling itself to native
 code.

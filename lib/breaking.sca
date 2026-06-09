@@ -1,0 +1,23 @@
+:: ===========================================================================
+:: breaking.sca — stress- and cluster-conditioned sound changes for SCArs.
+::
+:: Demonstrates that the SCArs rule language expresses prosodic context, not just
+:: flat segmental rewrites. Stress is written with an acute accent on the vowel
+:: (á é í ó ú). A syllable is treated as OPEN when the stressed vowel is followed
+:: by a single consonant and then a vowel (… V́ C V …); the breaking rules fire
+:: only there, so the same vowel before a consonant CLUSTER (a closed syllable)
+:: is left untouched — i.e. the change is both stress- and cluster-conditioned.
+::
+:: Apply with:   latte sca --file lib/breaking.sca <word>..
+:: ===========================================================================
+
+class V = a e i o u ā ē ī ō ū
+class C = p t k b d g m n r l s h v w j ɣ
+
+:: --- Phase VI: stressed-vowel breaking in OPEN syllables (single C then V) ---
+á > a o / _ C V
+é > e a / _ C V
+ó > u o / _ C V
+
+:: --- a cluster-conditioned onset rule: s is lost before a word-initial stop ---
+s > / # _ C

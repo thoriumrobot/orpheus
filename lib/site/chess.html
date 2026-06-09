@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Chess</title>
+<style>
+ :root{--bg:#cfcab9;--ink:#1a1a2e;--paper:#f4f1e8;--title:#c9c4b4;--btn:#e8e4d8;--accent:#2a2d6e;
+   --light:#e9e2cf;--dark:#9a9374;--sel:#c9d98a;--tgt:#bcd29a;--last:#e4df7a;--rule:#1a1a2e}
+ *{box-sizing:border-box}
+ body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;background:var(--bg);color:var(--ink);font-size:13px}
+ header{background:var(--ink);color:var(--paper);padding:6px 12px;display:flex;justify-content:space-between;align-items:center}
+ header b{font-weight:600}
+ header a{color:#bcd;text-decoration:none;margin-left:12px}
+ header a:hover{text-decoration:underline}
+ .wrap{display:flex;gap:14px;padding:12px;flex-wrap:wrap;align-items:flex-start}
+ .boardbox{background:var(--paper);border:1.5px solid var(--rule);padding:10px}
+ #board{display:grid;grid-template-columns:repeat(8,56px);grid-template-rows:repeat(8,56px);border:2px solid var(--rule)}
+ .sq{display:flex;align-items:center;justify-content:center;font-size:40px;line-height:1;cursor:pointer;position:relative;user-select:none}
+ .sq.light{background:var(--light)} .sq.dark{background:var(--dark)}
+ .sq.sel{background:var(--sel)!important} .sq.last{box-shadow:inset 0 0 0 4px var(--last)}
+ .sq .dot{position:absolute;width:18px;height:18px;border-radius:50%;background:rgba(40,60,30,.45)}
+ .sq .ring{position:absolute;inset:3px;border:4px solid rgba(40,60,30,.45);border-radius:50%}
+ .sq .co{position:absolute;font-size:9px;color:#5b5848;bottom:1px;right:2px;font-weight:700}
+ .panel{background:var(--paper);border:1.5px solid var(--rule);min-width:240px;max-width:300px}
+ .panel .t{background:var(--title);border-bottom:1.5px solid var(--rule);padding:3px 8px;font-weight:700}
+ .panel .b{padding:10px}
+ .row{margin:6px 0}
+ label{display:block;font-size:11px;color:#5b5848;margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px}
+ select,button{font:13px ui-monospace,monospace;border:1px solid var(--rule);background:var(--btn);padding:5px 10px;cursor:pointer}
+ button:hover{background:#fff}
+ select{width:100%;cursor:pointer}
+ #status{font-weight:700;min-height:20px}
+ #sub{color:#5b5848;font-size:12px;min-height:18px}
+ .log{height:200px;overflow:auto;background:#fbfbf6;border:1px solid #c9c4b4;padding:6px;white-space:pre-wrap;font-size:12px;margin-top:6px}
+ .pill{display:inline-block;padding:1px 7px;border:1px solid var(--rule);border-radius:9px;font-size:11px;margin-left:6px}
+</style></head>
+<body>
+<header>
+  <span><b>Orpheus · Chess</b> &nbsp;—&nbsp; rules &amp; the learned opponent are Latte (lib/chess.lat · lib/chessml.lat) on the Loom</span>
+  <span><a href="/">System</a><a href="/editor">Editor</a><a href="/chart">Charts</a><a href="/plan">Planner</a></span>
+</header>
+<div class="wrap">
+  <div class="boardbox"><div id="board"></div></div>
+  <div class="panel">
+    <div class="t">Game</div>
+    <div class="b">
+      <div id="status">·</div>
+      <div id="sub"></div>
+      <div class="row">
+        <label>Opponent</label>
+        <select id="mode" onchange="onMode()">
+          <option value="greedy">Model — greedy (lib/chess.lat)</option>
+          <option value="ml">Model — learned/ML (Minerva, lib/chessml.lat)</option>
+          <option value="local">Local — two players, one board</option>
+          <option value="net">Networked — another machine (gossip)</option>
+        </select>
+      </div>
+      <div class="row" id="colorRow">
+        <label>You play</label>
+        <select id="color" onchange="onColor()">
+          <option value="1">White</option>
+          <option value="2">Black</option>
+        </select>
+      </div>
+      <div class="row">
+        <button onclick="newGame()">New game</button>
+        <button onclick="flip()">Flip</button>
+        <button onclick="resign()">Resign</button>
+      </div>
+      <div class="row" id="netHint" style="display:none;color:#5b5848;font-size:12px">
+        Networked: both machines run <code>latte gui</code> peered with each other
+        (<code>--chess-listen</code> / <code>--peer</code>). Moves gossip over the Node;
+        pick opposite colors. This board polls for the opponent's move.
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+var GLYPH=[ '', '\u2659','\u2658','\u2657','\u2656','\u2655','\u2654',
+                '\u265F','\u265E','\u265D','\u265C','\u265B','\u265A' ];
+var st={board:[],side:1,status:0,legal:[]};
+var sel=null, flipped=false, mode='greedy', myColor=1, prevBoard=null, lastMove=null, aiPending=false;
+
+function sqName(i){ return String.fromCharCode(97+(i%8)) + (8-Math.floor(i/8)); }
+function api(body){
+  return fetch('/api/chess',{method:'POST',headers:{'Content-Type':'text/plain'},body:body})
+    .then(function(r){return r.json();});
+}
+function logln(s){ var l=document.getElementById('log'); l.textContent+=s+'\n'; l.scrollTop=l.scrollHeight; }
+
+function legalFrom(i){ return st.legal.some(function(m){return m[0]===i;}); }
+function legalMove(f,t){ return st.legal.some(function(m){return m[0]===f&&m[1]===t;}); }
+function isOwn(i){ // side-to-move owns squares that appear as a legal `from`
+  return legalFrom(i);
+}
+
+function render(){
+  var b=document.getElementById('board');
+  b.innerHTML='';
+  var order=[];
+  for(var i=0;i<64;i++) order.push(i);
+  if(flipped) order.reverse();
+  order.forEach(function(i){
+    var d=document.createElement('div');
+    var r=Math.floor(i/8), c=i%8;
+    d.className='sq '+(((r+c)%2===0)?'light':'dark');
+    if(sel===i) d.className+=' sel';
+    if(lastMove&&(lastMove[0]===i||lastMove[1]===i)) d.className+=' last';
+    var p=st.board[i]||0;
+    if(p) d.textContent=GLYPH[p];
+    if(sel!==null && legalMove(sel,i)){
+      var mk=document.createElement('div'); mk.className=(p?'ring':'dot'); d.appendChild(mk);
+    }
+    if(c===(flipped?7:0)){ var co=document.createElement('div'); co.className='co'; co.style.left='2px'; co.style.right='auto'; co.textContent=(8-r); d.appendChild(co); }
+    if(r===(flipped?0:7)){ var cf=document.createElement('div'); cf.className='co'; cf.textContent=String.fromCharCode(97+c); d.appendChild(cf); }
+    d.onclick=function(){ click(i); };
+    b.appendChild(d);
+  });
+}
+
+function click(i){
+  if(st.status!==0) return;
+  if(mode==='net' && st.side!==myColor) return;        // networked: only move your color
+  if(sel===null){
+    if(isOwn(i)){ sel=i; render(); }
+    return;
+  }
+  if(i===sel){ sel=null; render(); return; }
+  if(legalMove(sel,i)){ doMove(sel,i); return; }
+  if(isOwn(i)){ sel=i; render(); return; }             // switch selection
+  sel=null; render();
+}
+
+function doMove(f,t){
+  logln((st.side===1?'White':'Black')+'  '+sqName(f)+sqName(t));
+  sel=null;
+  api('move '+f+' '+t).then(apply);
+}
+
+function apply(d){
+  // detect the move just played (two changed squares)
+  if(prevBoard){
+    var from=-1,to=-1;
+    for(var i=0;i<64;i++){ if(prevBoard[i]!==d.board[i]){ if(d.board[i]===0) from=i; else to=i; } }
+    if(from>=0&&to>=0) lastMove=[from,to];
+  }
+  prevBoard=d.board.slice();
+  st=d; render(); status();
+  maybeAi();
+}
+
+function status(){
+  var s=document.getElementById('status'), sub=document.getElementById('sub');
+  var stm=(st.side===1?'White':'Black');
+  if(st.status===1){ s.textContent=(st.side===1?'Black':'White')+' wins — checkmate'; sub.textContent=''; }
+  else if(st.status===2){ s.textContent='Draw — stalemate'; sub.textContent=''; }
+  else {
+    s.innerHTML=stm+' to move <span class="pill">'+st.legal.length+' legal</span>';
+    sub.textContent = describeTurn();
+  }
+}
+function describeTurn(){
+  if(mode==='local') return 'two players on this board';
+  if(mode==='net') return st.side===myColor ? 'your move' : 'waiting for the other machine…';
+  return st.side===myColor ? 'your move' : 'the model is thinking…';
+}
+
+function maybeAi(){
+  if((mode==='greedy'||mode==='ml') && st.status===0 && st.side!==myColor && !aiPending){
+    aiPending=true;
+    setTimeout(function(){ api('ai '+mode).then(function(d){ aiPending=false; apply(d); }); }, 250);
+  }
+}
+
+function refresh(){ return api('state').then(function(d){ st=d; if(!prevBoard) prevBoard=d.board.slice(); render(); status(); maybeAi(); }); }
+
+function newGame(){ lastMove=null; prevBoard=null; sel=null; api('new').then(function(d){ prevBoard=d.board.slice(); apply(d); }); logln('— new game —'); }
+function flip(){ flipped=!flipped; render(); }
+function resign(){ logln('You resigned.'); document.getElementById('status').textContent='You resigned'; }
+function onMode(){
+  mode=document.getElementById('mode').value;
+  document.getElementById('netHint').style.display=(mode==='net')?'block':'none';
+  document.getElementById('colorRow').style.display=(mode==='local')?'none':'block';
+  status(); maybeAi();
+}
+function onColor(){ myColor=parseInt(document.getElementById('color').value,10); status(); maybeAi(); }
+
+window.addEventListener('load', function(){
+  onMode();
+  refresh();
+  // poll so the opponent's (networked) or the model's move appears
+  setInterval(function(){ if(mode==='net' || (mode!=='local' && st.side!==myColor)) refresh(); }, 1500);
+});
+</script>
+</body></html>

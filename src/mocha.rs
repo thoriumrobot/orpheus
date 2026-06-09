@@ -21,6 +21,8 @@ pub const TODO_LAT: &str = include_str!("../lib/todo.lat");
 pub const LEXICON_LAT: &str = include_str!("../lib/lexicon.lat");
 pub const FORGE_LAT: &str = include_str!("../lib/forge.lat");
 pub const EDITOR_LAT: &str = include_str!("../lib/editor.lat");
+/// Networked chess as a Mocha app (moves gossip between connected machines).
+pub const CHESSGAME_LAT: &str = include_str!("../lib/chessgame.lat");
 
 fn app_source(name: &str) -> Option<&'static str> {
     match name {
@@ -28,6 +30,7 @@ fn app_source(name: &str) -> Option<&'static str> {
         "lexicon" => Some(LEXICON_LAT),
         "forge" => Some(FORGE_LAT),
         "editor" => Some(EDITOR_LAT),
+        "chessgame" => Some(CHESSGAME_LAT),
         _ => None,
     }
 }

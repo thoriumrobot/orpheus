@@ -4,94 +4,321 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Orpheus · System</title>
 <style>
- body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#d8d4c8; color:#1a1a1a; }
- /* Oberon-style: tiled bordered "viewers" on a tiling background */
- header { background:#1a1a2e; color:#f4f1e8; padding:8px 14px; font-size:14px; letter-spacing:.4px; display:flex; justify-content:space-between; }
- header a { color:#bcd; text-decoration:none; margin-left:14px; }
- header a:hover { text-decoration:underline; }
- .grid { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 200px; gap:6px; padding:6px; height: calc(100vh - 84px); box-sizing:border-box; }
- .viewer { background:#f4f1e8; border:1px solid #1a1a2e; display:flex; flex-direction:column; min-height:0; }
- .title { background:#c9c4b4; border-bottom:1px solid #1a1a2e; padding:3px 8px; font-size:12px; font-weight:600; display:flex; justify-content:space-between; }
- .title button { font:11px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:1px 8px; }
- .title button:hover { background:#fff; }
- textarea, pre { flex:1; margin:0; border:0; padding:8px; font:13px/1.5 ui-monospace, monospace; background:#f4f1e8; color:#1a1a1a; resize:none; outline:none; overflow:auto; white-space:pre-wrap; }
- .tools { grid-column:1 / 3; }
- .tools .body { padding:8px; overflow:auto; }
- .tools button { font:12px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:3px 9px; margin:2px; }
- .tools button:hover { background:#fff; }
- .hint { color:#555; font-size:12px; margin:2px 0 8px; }
- code { background:#e8e4d8; padding:0 3px; }
+ :root{
+   --bg:#cfcab9; --ink:#1a1a2e; --paper:#f4f1e8; --title:#c9c4b4; --titlemark:#aeb0d8;
+   --btn:#e8e4d8; --accent:#2a2d6e; --rule:#1a1a2e; --dim:#5b5848; --cmd:#1a2e6e;
+   --lh:20px;
+ }
+ *{box-sizing:border-box}
+ html,body{height:100%}
+ body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;background:var(--bg);color:var(--ink);font-size:13px}
+ header{background:var(--ink);color:var(--paper);padding:6px 12px;display:flex;justify-content:space-between;align-items:center;font-size:13px;letter-spacing:.3px}
+ header b{font-weight:600}
+ header .links a{color:#bcd;text-decoration:none;margin-left:12px}
+ header .links a:hover{text-decoration:underline}
+ #screen{display:flex;height:calc(100vh - 34px);padding:4px;gap:4px}
+ .track{display:flex;flex-direction:column;gap:4px;min-width:0;height:100%}
+ #userTrack{flex:1 1 62%}
+ #sysTrack{flex:1 1 38%}
+ .viewer{display:flex;flex-direction:column;min-height:0;background:var(--paper);border:1.5px solid var(--rule);flex:1 1 0}
+ .viewer.grown{flex:8 1 0}
+ .menu{display:flex;align-items:center;background:var(--title);border-bottom:1.5px solid var(--rule);
+       padding:2px 6px;font-size:12px;cursor:default;user-select:none;flex-wrap:wrap}
+ .viewer.marked .menu{background:var(--titlemark)}
+ .menu .name{font-weight:700;margin-right:10px;white-space:nowrap}
+ .menu .star{margin-right:6px;width:12px;display:inline-block;text-align:center;color:var(--accent)}
+ .menu .cmd{color:var(--cmd);cursor:pointer;padding:0 6px;border-left:1px solid #b7b2a2}
+ .menu .cmd:first-of-type{border-left:0}
+ .menu .cmd:hover{background:#fff;text-decoration:underline}
+ .menu .spacer{flex:1}
+ .body{flex:1;min-height:0;display:flex}
+ /* A text frame: editable text that is also executable (the Oberon TUI). */
+ textarea.frame{flex:1;width:100%;border:0;margin:0;padding:6px 8px;resize:none;outline:none;
+       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:var(--lh);
+       background:var(--paper);color:var(--ink);white-space:pre;overflow:auto}
+ textarea.frame.log{background:#fbfbf6}
+ .mods{flex:1;overflow:auto;padding:6px 4px;font:13px/1.7 ui-monospace,monospace}
+ .mods .m{padding:1px 8px;cursor:pointer;border-radius:2px}
+ .mods .m:hover{background:#e7e3d6;text-decoration:underline}
+ .mods .m.rt{font-weight:700}
+ .foot{font-size:11px;color:var(--dim);padding:2px 8px;border-top:1px solid #bdb8a8;background:#efece1}
 </style></head>
 <body>
 <header>
-  <span>Orpheus · System &nbsp;—&nbsp; an Oberon-style command environment</span>
-  <span><a href="/editor">Facet editor</a><a href="/chart">Charts</a><a href="/plan">Planner</a><a href="/compile">Compiler</a><a href="/index.facet">Hosted page</a></span>
+  <span><b>Orpheus · System</b> &nbsp;—&nbsp; tiled text frames. <b>Execute</b> a command with <b>middle-click</b> on its line, or caret-on-line + <b>Ctrl/⌘+Enter</b>; a selection runs as one command. Every frame is editable.</span>
+  <span class="links">
+    <a href="/docs">Docs</a>
+    <a href="/chess">Chess</a>
+    <a href="#" onclick="openModule('tool');return false">open tool</a>
+    <a href="/editor">Editor</a><a href="/chart">Charts</a><a href="/plan">Planner</a>
+  </span>
 </header>
-<div class="grid">
-  <div class="viewer">
-    <div class="title"><span>Commander — put the caret on a line and Execute (Ctrl+Enter)</span><button onclick="execLine()">Execute ▸</button></div>
-    <textarea id="cmd" spellcheck="false">eval (add 2 3)
-eval (tdot (tfromnats [1 [2 [3 0]]]) (tfromnats [4 [5 [6 0]]]))
-eval (fit_demo 2000)
-type head [1 2]
-sca liga nivo mazda</textarea>
-  </div>
-  <div class="viewer">
-    <div class="title"><span>Log</span><button onclick="clearLog()">Clear</button></div>
-    <pre id="log"></pre>
-  </div>
-  <div class="viewer tools">
-    <div class="title"><span>Tools</span></div>
-    <div class="body">
-      <div style="font-weight:600; margin-bottom:4px">How to run the tools</div>
-      <div class="hint" style="margin-top:0">
-        <b>In this console</b> — type a line in the Commander, put the caret on it, press <code>Ctrl+Enter</code>:<br>
-        &nbsp;&nbsp;<code>eval (add 2 3)</code> — run any Latte expression (std · mold · num · tensor · plan · ml linked)<br>
-        &nbsp;&nbsp;<code>eval (fit_demo 2000)</code> — train the linear-regression model; learns <code>[w b]</code><br>
-        &nbsp;&nbsp;<code>eval (tdot (tfromnats [1 [2 [3 0]]]) (tfromnats [4 [5 [6 0]]]))</code> — tensor dot product<br>
-        &nbsp;&nbsp;<code>type head [1 2]</code> — infer an expression's type &nbsp;·&nbsp; <code>sca ligā</code> — sound change<br>
-        <b>Other pages</b> — <a href="/editor">/editor</a> (WYSIWYG Facet editor, edits the hosted pages) ·
-        <a href="/chart">/chart</a> (data visualization).<br>
-        <b>From a terminal</b> — <code>latte ml --iters 5000</code>, <code>latte tensor</code>,
-        <code>latte chart line 3 1 4 1 5</code>, <code>latte plan</code>,
-        <code>latte mocha --app forge …</code>, <code>latte team --as NAME …</code>, <code>latte repl</code>.
-      </div>
-      <div style="font-weight:600; margin:10px 0 2px">Quick commands</div>
-      <div class="hint" style="margin-top:0">Each button drops a starter command into the Commander. <code>eval</code> links the std, mold, num, tensor, plan and ml libraries, so the numeric tools are reachable through it.</div>
-      <button onclick="put('eval (add 2 3)')">eval</button>
-      <button onclick="put('type (if (a==0) then 1 else nil)')">typecheck</button>
-      <button onclick="put('sca liga nivo mazda benda')">SCArs (sound change)</button>
-      <button onclick="put('eval (tsum (tfromnats [1 [2 [3 [4 0]]]]))')">tensor</button>
-      <button onclick="put('eval (fit_demo 2000)')">ml (train)</button>
-      <button onclick="window.location='/plan'">planner →</button>
-      <button onclick="window.location='/chart'">charts →</button>
-      <button onclick="window.location='/editor'">WYSIWYG Facet editor →</button>
-      <div class="hint" style="margin-top:10px">Stateful/networked tools — the Mocha apps (<code>todo</code>, <code>lexicon</code>, <code>forge</code>) and the <code>team</code> collaborative coding tool — run as nodes from the CLI: <code>latte mocha --app forge …</code>, <code>latte team --as NAME …</code>.</div>
-    </div>
-  </div>
+
+<div id="screen">
+  <div class="track" id="userTrack"></div>
+  <div class="track" id="sysTrack"></div>
 </div>
+
 <script>
-var cmd = document.getElementById('cmd');
-var log = document.getElementById('log');
-function append(text){ log.textContent += text; log.scrollTop = log.scrollHeight; }
-function clearLog(){ log.textContent = ''; }
-function put(s){ cmd.value += (cmd.value.endsWith('\n') || cmd.value === '' ? '' : '\n') + s; cmd.focus(); }
-function currentLine(){
-  var v = cmd.value, p = cmd.selectionStart;
-  var start = v.lastIndexOf('\n', p - 1) + 1;
-  var end = v.indexOf('\n', p); if (end < 0) end = v.length;
-  return v.slice(start, end).trim();
+"use strict";
+/* ============================================================================
+   Oberon-style environment: tiled VIEWERS in two TRACKS, each viewer a TEXT
+   FRAME (an editable text that is also the command interface). Point the mouse
+   at any `Module.cmd args` line and middle-click to execute it; or put the
+   caret on it and press Ctrl/Cmd+Enter; or select command text and run that.
+
+   System.*  viewer/OS commands run in the browser (the display layer).
+   Compiler.* posts source to the running system (/api/compile, /api/source).
+   Everything else -> /api/run, calling a Latte arm: the command set of the
+   system is Latte source you can open, edit and recompile right here.
+   ============================================================================ */
+
+var viewers = [], marked = null, uid = 0;
+function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
+function track(name){ return document.getElementById(name==='sys'?'sysTrack':'userTrack'); }
+
+/* ---- a Viewer (a text frame, or the module list) ------------------------- */
+function makeViewer(opts){
+  // opts: {name, track, kind:'frame'|'log'|'mods', menu, content, foot}
+  var v = {id:++uid, name:opts.name, kind:opts.kind, grown:false};
+  var box = el('div','viewer'); v.box = box;
+  var menu = el('div','menu');
+  v.star = el('span','star',''); menu.appendChild(v.star);
+  menu.appendChild(el('span','name', opts.name));
+  (opts.menu||[]).forEach(function(c){
+    var b = el('span','cmd', c.label||c.cmd); b.title=c.cmd;
+    b.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); mark(v); exec(c.cmd, v); } };
+    menu.appendChild(b);
+  });
+  menu.appendChild(el('span','spacer'));
+  menu.onmousedown=function(e){ if(e.target===menu||e.target.classList.contains('name')||e.target.classList.contains('star')) mark(v); };
+  box.appendChild(menu);
+
+  var body = el('div','body');
+  if(opts.kind==='mods'){
+    var md = el('div','mods'); v.mods = md; body.appendChild(md);
+  } else {
+    var ta = el('textarea','frame'+(opts.kind==='log'?' log':'')); ta.spellcheck=false; ta.value=opts.content||'';
+    if(opts.kind==='log') ta.setAttribute('aria-label','log');
+    wireFrame(ta, v);
+    body.appendChild(ta); v.textarea = ta;
+  }
+  box.appendChild(body);
+  if(opts.foot) box.appendChild(el('div','foot', opts.foot));
+  track(opts.track).appendChild(box);
+  viewers.push(v);
+  return v;
 }
-function execLine(){
-  var line = currentLine();
-  if (!line) return;
-  append('▸ ' + line + '\n');
-  fetch('/api/run', {method:'POST', headers:{'Content-Type':'text/plain; charset=utf-8'}, body: line})
-    .then(function(r){ return r.text(); })
-    .then(function(out){ append(out + '\n\n'); });
+
+/* The text-frame mouse/keyboard model. */
+function wireFrame(ta, v){
+  ta.addEventListener('mousedown', function(e){
+    mark(v);
+    if(e.button===1){ e.preventDefault(); } // middle: suppress autoscroll; run on auxclick
+  });
+  ta.addEventListener('auxclick', function(e){
+    if(e.button===1){ e.preventDefault(); execText(v, lineAtPoint(ta, e.clientY)); }
+  });
+  ta.addEventListener('keydown', function(e){
+    if(e.key==='Enter' && (e.ctrlKey||e.metaKey)){
+      e.preventDefault();
+      var s = ta.value.substring(ta.selectionStart, ta.selectionEnd).trim();
+      execText(v, s || caretLine(ta));
+    }
+  });
 }
-cmd.addEventListener('keydown', function(e){
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); execLine(); }
+// Which text line is under vertical coordinate y? (monospace, no wrap -> exact)
+function lineAtPoint(ta, y){
+  var cs=getComputedStyle(ta), lh=parseFloat(cs.lineHeight)||20, pt=parseFloat(cs.paddingTop)||0;
+  var rel = y - ta.getBoundingClientRect().top - pt + ta.scrollTop;
+  var idx = Math.floor(rel/lh), lines = ta.value.split('\n');
+  return (idx>=0 && idx<lines.length) ? lines[idx] : '';
+}
+function caretLine(ta){
+  var s=ta.value, p=ta.selectionStart;
+  var a=s.lastIndexOf('\n',p-1)+1, b=s.indexOf('\n',p); if(b<0)b=s.length;
+  return s.slice(a,b);
+}
+// Run a line of frame text as a command (skip blanks and comments).
+function execText(v, lineText){
+  var t=(lineText||'').trim();
+  if(!t || t.charAt(0)==='#' || t.slice(0,2)==='::') return;
+  mark(v); exec(t, v);
+}
+
+function mark(v){
+  marked=v;
+  viewers.forEach(function(x){ x.box.classList.toggle('marked', x===v); x.star.textContent=(x===v?'\u2737':''); });
+}
+
+/* ---- the Log (a text frame commands write into) -------------------------- */
+function logView(){ return viewers.find(function(v){return v.kind==='log';}); }
+function appendLog(s){ var ta=logView().textarea; ta.value+=s; ta.scrollTop=ta.scrollHeight; }
+function logEcho(s){ appendLog('\u25B8 '+s+'\n'); }
+function logOut(s, isErr){ appendLog((isErr?'! ':'  ')+s+'\n\n'); }
+function clearLog(){ logView().textarea.value=''; }
+
+/* ---- the command interpreter -------------------------------------------- */
+function resolveArgs(line){
+  var sel=(window.getSelection && String(window.getSelection()))||'';
+  return line.replace(/\^/g, function(){ return sel.trim(); });
+}
+function exec(line, fromViewer){
+  if(!line) return; line=line.trim();
+  var sp=line.indexOf(' ');
+  var headTok = sp<0?line:line.slice(0,sp);
+  var rest = sp<0?'':line.slice(sp+1).trim();
+
+  // ---- System.* : the display/OS commands (browser side) ----
+  if(headTok==='System.Open'||headTok==='Edit.Open'){ logEcho(line); openModule(rest||'std'); return; }
+  if(headTok==='System.Close'){ logEcho(line); closeViewer(targetViewer(rest, fromViewer)); return; }
+  if(headTok==='System.Grow'){ logEcho(line); growViewer(targetViewer(rest, fromViewer)); return; }
+  if(headTok==='System.Copy'){ logEcho(line); copyViewer(targetViewer(rest, fromViewer)); return; }
+  if(headTok==='System.Clear'){ clearLog(); return; }
+  if(headTok==='System.Modules'||headTok==='System.Sources'){ logEcho(line); refreshModules(); return; }
+  if(headTok==='System.New'){ logEcho(line); newModuleViewer(rest||'mymod'); return; }
+  if(headTok==='System.Chess'||headTok==='Game.Chess'){ logEcho(line); window.location='/chess'; return; }
+  if(headTok==='System.Docs'||headTok==='System.Help'){ logEcho(line); window.location = rest ? ('/docs#'+rest) : '/docs'; return; }
+
+  // ---- Compiler.* : edit -> compile -> run, on the running system ----
+  if(headTok==='Compiler.Compile'){
+    logEcho(line);
+    var cv=targetViewer(rest, fromViewer);
+    if(!cv||!cv.textarea){ logOut('Compiler.Compile: mark a source frame first',true); return; }
+    post('/api/compile', cv.textarea.value, function(out){ logOut(out, /error/i.test(out)); refreshModules(); });
+    return;
+  }
+  if(headTok==='Compiler.Store'||headTok==='Edit.Store'){
+    logEcho(line);
+    var sv=targetViewer(rest, fromViewer);
+    if(!sv||!sv.textarea){ logOut('Store: mark a source frame first',true); return; }
+    var name=(sv.textarea.value.match(/\bcore\s+([A-Za-z0-9_]+)/)||[])[1];
+    if(!name){ logOut('Store: source has no `core NAME`',true); return; }
+    post('/api/source?name='+encodeURIComponent(name), sv.textarea.value, function(out){ logOut(out, /error/i.test(out)); refreshModules(); });
+    return;
+  }
+
+  // ---- everything else -> the running system (a Latte arm / tool verb) ----
+  logEcho(line);
+  post('/api/run', resolveArgs(line), function(out){ logOut(out, /^!|error/i.test(out)); });
+}
+
+function targetViewer(rest, fromViewer){
+  rest=(rest||'').trim();
+  if(rest===''||rest==='*') return marked||fromViewer;
+  var nm=rest.replace(/\.Mod$/,'');
+  return viewers.find(function(v){ return v.name===rest||v.name===nm||v.name===nm+'.Mod'; })||marked||fromViewer;
+}
+
+/* ---- viewer operations --------------------------------------------------- */
+function closeViewer(v){ if(!v||v.kind==='log') return; v.box.remove(); viewers=viewers.filter(function(x){return x!==v;}); if(marked===v) marked=null; }
+function growViewer(v){ if(!v) return; v.grown=!v.grown; v.box.classList.toggle('grown', v.grown); }
+function copyViewer(v){ if(!v||!v.textarea) return; mark(makeViewer({name:v.name, track:'user', kind:'frame', content:v.textarea.value, menu:sourceMenu})); }
+
+/* ---- opening a module's source as an editable text frame ----------------- */
+function openModule(name){
+  fetch('/api/source?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(src){
+    mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
+      foot:'editing module `'+name+'` — Compile loads it into the running system'}));
+  });
+}
+function newModuleViewer(name){
+  var src='import std\ncore '+name+'\n  greet = fn [_] -> %hello\nend\n';
+  mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
+    foot:'new module — edit, then Compiler.Compile'}));
+}
+
+/* ---- the loaded-module list (click a name to open its source) ------------ */
+function refreshModules(){
+  Promise.all([
+    fetch('/api/sources').then(function(r){return r.text();}),
+    fetch('/api/run',{method:'POST',headers:{'Content-Type':'text/plain'},body:'libs'}).then(function(r){return r.text();})
+  ]).then(function(res){
+    var names=res[0].split('\n').filter(Boolean);
+    var rt=(res[1].match(/compiled:\s*(.*)/)||[])[1]||'';
+    var rtset={}; rt.split(/\s+/).filter(Boolean).forEach(function(n){rtset[n]=1;});
+    var md=viewers.find(function(v){return v.kind==='mods';}).mods; md.innerHTML='';
+    names.forEach(function(n){
+      var d=el('div','m'+(rtset[n]?' rt':''), n+(rtset[n]?'  \u00B7compiled':''));
+      d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openModule(n); } };
+      md.appendChild(d);
+    });
+  });
+}
+
+function post(url, body, cb){
+  fetch(url,{method:'POST',headers:{'Content-Type':'text/plain; charset=utf-8'},body:body})
+    .then(function(r){return r.text();}).then(cb).catch(function(e){ cb('network error: '+e); });
+}
+
+/* ---- menu (command strip) presets ---------------------------------------- */
+var sourceMenu=[
+  {cmd:'Compiler.Compile *',label:'Compile'},{cmd:'Compiler.Store *',label:'Store'},
+  {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
+var toolMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'}];
+var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Grow'}];
+var modsMenu=[{cmd:'System.Modules',label:'Refresh'}];
+
+/* ---- the default desktop ------------------------------------------------- */
+var SYSTEM_TOOL =
+'# System.Tool — middle-click a command line to run it (or caret + Ctrl/Cmd+Enter).\n'+
+'# These call Latte arms in the `tool` module (lib/tool.lat): the command set\n'+
+'# is itself Latte source you can open, edit and recompile below.\n'+
+'Tool.fib 30\n'+
+'Tool.fact 10\n'+
+'Tool.primes 60\n'+
+'Tool.collatz 27\n'+
+'Tool.gcd [1071 462]\n'+
+'Tool.greet\n'+
+'eval (mul (add 3 4) 5)\n'+
+'eval (tdot (tfromnats [1 [2 [3 0]]]) (tfromnats [4 [5 [6 0]]]))\n'+
+'type head [1 2]\n'+
+'# tools, exposed in the system: SCArs, the general sound-change engine, the planner\n'+
+'sca liga nivo mazda\n'+
+'scar kasa k>g s>z/a_a\n'+
+'plan 40 0 1000\n'+
+'libs\n'+
+'#\n'+
+'# Read the manuals (Latte, Facet, SCArs, interaction nets) in the GUI:\n'+
+'System.Docs\n'+
+'System.Docs latte-language\n'+
+'#\n'+
+'# Play chess (vs the model, local, or a connected machine):\n'+
+'System.Chess\n'+
+'#\n'+
+'# Edit -> compile -> run (the Oberon loop):\n'+
+'#   1. middle-click into the hello.Mod frame to mark it\n'+
+'#   2. middle-click Compile in its menu (loads into the running system)\n'+
+'#   3. run an arm of it:\n'+
+'hello.fib 20\n'+
+'hello.shout\n'+
+'#\n'+
+'# Open the system\'s own source to edit it live:\n'+
+'System.Open tool\n'+
+'System.Open chessgame\n'+
+'System.New mymod\n';
+
+var HELLO_MOD =
+'import std\n'+
+'core hello\n'+
+'  :: edit me, then Compile (menu), then run  hello.fib 20  from the tool text\n'+
+'  fib   = fn [n] -> loop with [a = 0, b = 1, i = n] :\n'+
+'                      if (i == 0) then a else again(b, (add a b), (dec i))\n'+
+'                    end\n'+
+'  shout = fn [_] -> %hey\n'+
+'end\n';
+
+window.addEventListener('load', function(){
+  makeViewer({name:'System.Tool', track:'user', kind:'frame', content:SYSTEM_TOOL, menu:toolMenu,
+    foot:'a tool text — middle-click any command line to execute it'});
+  var h=makeViewer({name:'hello.Mod', track:'user', kind:'frame', content:HELLO_MOD, menu:sourceMenu,
+    foot:'editing module `hello` — Compile loads it into the running system'});
+  makeViewer({name:'System.Log', track:'sys', kind:'log', menu:logMenu,
+    foot:'output — you can middle-click a line here to run it again'});
+  makeViewer({name:'Modules', track:'sys', kind:'mods', menu:modsMenu});
+  mark(h);
+  refreshModules();
+  appendLog('Orpheus System ready. Middle-click a command line in System.Tool, or mark a frame and use its menu.\n\n');
 });
 </script>
 </body></html>
