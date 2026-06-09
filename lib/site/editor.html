@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Latte · Facet WYSIWYG editor</title>
+<style>
+ body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#0f1020; color:#e8e8f0; }
+ header { padding:10px 16px; background:#16182e; border-bottom:1px solid #2a2d50; }
+ header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.3px; }
+ .wrap { display:flex; gap:10px; padding:10px; height: calc(100vh - 112px); box-sizing:border-box; }
+ .pane { flex:1; min-width:0; display:flex; flex-direction:column; }
+ .pane .lbl { font-size:11px; color:#8a8ab0; margin:0 2px 6px; text-transform:uppercase; letter-spacing:.6px; }
+ textarea { flex:1; box-sizing:border-box; background:#0b0c1a; color:#cfe8ff; border:1px solid #2a2d50; border-radius:8px; padding:12px; font:13px/1.5 ui-monospace, monospace; resize:none; outline:none; }
+ #preview { flex:1; background:#fbfbfe; color:#16182e; border-radius:8px; padding:16px; overflow:auto; }
+ .bar { padding:10px 16px; background:#16182e; border-top:1px solid #2a2d50; display:flex; gap:10px; align-items:center; }
+ button { background:#3a3f7a; color:#fff; border:0; border-radius:6px; padding:7px 14px; cursor:pointer; font:13px ui-monospace,monospace; }
+ button:hover { background:#4a51a0; }
+ .muted { color:#8a8ab0; font-size:12px; }
+ #status { color:#7fd1a8; font-size:12px; min-width:60px; }
+</style></head>
+<body>
+<header><h1>Latte · Facet WYSIWYG — edit on the left, see it rendered live on the right</h1></header>
+<div class="wrap">
+  <div class="pane"><div class="lbl">Facet source</div><textarea id="src" spellcheck="false"></textarea></div>
+  <div class="pane"><div class="lbl">rendered (Hymn → Facet → Loom)</div><div id="preview"></div></div>
+</div>
+<div class="bar">
+  <select id="files" title="Facet pages in the site root"></select>
+  <button onclick="openFile()">Open page</button>
+  <button onclick="saveFile()">Save to page</button>
+  <input id="newname" placeholder="new-page.facet" size="16" spellcheck="false">
+  <button onclick="saveAs()">Save as new</button>
+  <span style="width:14px"></span>
+  <button onclick="save()">Quick-save</button>
+  <button onclick="load()">Quick-load</button>
+  <span id="status"></span>
+  <span class="muted">edits render live; Save persists through the Latte <code>editor</code> app (durable &amp; syncable)</span>
+</div>
+<script>
+var src = document.getElementById('src');
+var preview = document.getElementById('preview');
+var status = document.getElementById('status');
+var OB = '{' + '{', CB = '}' + '}';
+var DEFAULT =
+  '<h2>Heart Speech</h2>\n<table border=1 cellpadding=6>\n' +
+  OB + 'each w in ["ligā","nīvō","mazdā","bendā","genton"]' + CB + '\n' +
+  '  <tr><td>' + OB + 'w' + CB + '</td><td>' + OB + ' SCArs.evolve(w) ' + CB + '</td></tr>\n' +
+  OB + 'end' + CB + '\n</table>\n<p>' +
+  OB + 'if "1"' + CB + 'derived live by SCArs on Loom.' + OB + 'end' + CB + '</p>';
+var timer;
+function renderNow() {
+  fetch('/api/render', {method:'POST', headers:{'Content-Type':'text/plain'}, body: src.value})
+    .then(function(r){ return r.text(); })
+    .then(function(html){ preview.innerHTML = html; });
+}
+src.addEventListener('input', function(){ clearTimeout(timer); timer = setTimeout(renderNow, 200); });
+function flash(msg){ status.textContent = msg; setTimeout(function(){ status.textContent=''; }, 1500); }
+function save(){ fetch('/api/save', {method:'POST', headers:{'Content-Type':'text/plain'}, body: src.value}).then(function(){ flash('saved'); }); }
+function load(){ fetch('/api/load').then(function(r){ return r.text(); }).then(function(t){ if(t){ src.value = t; } renderNow(); flash('loaded'); }); }
+function refreshFiles(){
+  return fetch('/api/files').then(function(r){return r.text();}).then(function(t){
+    var sel = document.getElementById('files');
+    sel.innerHTML = '';
+    t.split('\n').filter(function(x){return x;}).forEach(function(name){
+      var o = document.createElement('option'); o.value = name; o.textContent = name; sel.appendChild(o);
+    });
+  });
+}
+function openFile(){
+  var name = document.getElementById('files').value;
+  if(!name) return;
+  fetch('/api/file?path=' + encodeURIComponent(name)).then(function(r){return r.text();}).then(function(t){
+    src.value = t; renderNow(); flash('opened ' + name);
+  });
+}
+function saveFile(){
+  var name = document.getElementById('files').value;
+  if(!name) return;
+  fetch('/api/file?path=' + encodeURIComponent(name), {method:'POST', headers:{'Content-Type':'text/plain; charset=utf-8'}, body: src.value})
+    .then(function(){ flash('saved ' + name); refreshFiles(); });
+}
+function saveAs(){
+  var name = document.getElementById('newname').value.trim();
+  if(!name) return;
+  if(name.indexOf('.facet') < 0) name = name + '.facet';
+  fetch('/api/file?path=' + encodeURIComponent(name), {method:'POST', headers:{'Content-Type':'text/plain; charset=utf-8'}, body: src.value})
+    .then(function(r){ return r.text(); })
+    .then(function(msg){
+      flash(msg === 'saved' ? 'created ' + name : msg);
+      refreshFiles().then(function(){ document.getElementById('files').value = name; });
+    });
+}
+window.addEventListener('load', function(){
+  refreshFiles();
+  fetch('/api/load').then(function(r){ return r.text(); }).then(function(t){
+    src.value = t && t.length ? t : DEFAULT; renderNow();
+  }).catch(function(){ src.value = DEFAULT; renderNow(); });
+});
+</script>
+</body></html>

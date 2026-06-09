@@ -1,0 +1,46 @@
+:: ===========================================================================
+:: ligurian.sca — Solar Speech (Sauleis Bazdā) -> Heart Speech (Mazdō-yō Heardō̃)
+:: for the conlang "Ligurian" (Snapshots of the Labyrinth).
+::
+:: This encodes the REGULAR, context-free + single-context subset of the
+:: Vulgar->Heart sound changes (Phases II-V). Stress-conditioned vowel breaking
+:: (Phase VI: a>ao, e>ea, o>uo in stressed open syllables) and several
+:: cluster/ending rules require syllable+stress structure beyond a segmental
+:: rewriter and are intentionally NOT modeled here.
+::
+:: Notation:  FROM > TO / PRE _ POST
+::   #  = word boundary       (empty side of _ = any)      empty TO = deletion
+::   V  = a vowel class (expanded host-side to its members)
+:: ===========================================================================
+
+class V = a e i o u ā ē ī ō ū
+
+:: --- Phase II: word-initial single stops & sibilant -----------------------
+p > b / # _
+t > d / # _
+k > g / # _
+b > m / # _
+d > n / # _
+s > h / # _
+
+:: --- Phase III: the drag chain (ORDER MATTERS: ō>ū before ā>ō) -------------
+ō > ū
+ā > ō
+ē > ī
+
+:: --- Phase IV: glide hardening --------------------------------------------
+w > v
+
+:: --- Phase Vb: s voicing before a voiced consonant ------------------------
+s > z / _ m
+s > z / _ n
+s > z / _ d
+s > z / _ b
+
+:: --- Phase V: intervocalic lenition (stop -> voiced fricative / voicing) ---
+s > z / V _ V
+p > v / V _ V
+b > v / V _ V
+d > ð / V _ V
+g > ɣ / V _ V
+k > ɣ / V _ V

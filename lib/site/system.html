@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · System</title>
+<style>
+ body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#d8d4c8; color:#1a1a1a; }
+ /* Oberon-style: tiled bordered "viewers" on a tiling background */
+ header { background:#1a1a2e; color:#f4f1e8; padding:8px 14px; font-size:14px; letter-spacing:.4px; display:flex; justify-content:space-between; }
+ header a { color:#bcd; text-decoration:none; margin-left:14px; }
+ header a:hover { text-decoration:underline; }
+ .grid { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 200px; gap:6px; padding:6px; height: calc(100vh - 84px); box-sizing:border-box; }
+ .viewer { background:#f4f1e8; border:1px solid #1a1a2e; display:flex; flex-direction:column; min-height:0; }
+ .title { background:#c9c4b4; border-bottom:1px solid #1a1a2e; padding:3px 8px; font-size:12px; font-weight:600; display:flex; justify-content:space-between; }
+ .title button { font:11px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:1px 8px; }
+ .title button:hover { background:#fff; }
+ textarea, pre { flex:1; margin:0; border:0; padding:8px; font:13px/1.5 ui-monospace, monospace; background:#f4f1e8; color:#1a1a1a; resize:none; outline:none; overflow:auto; white-space:pre-wrap; }
+ .tools { grid-column:1 / 3; }
+ .tools .body { padding:8px; overflow:auto; }
+ .tools button { font:12px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:3px 9px; margin:2px; }
+ .tools button:hover { background:#fff; }
+ .hint { color:#555; font-size:12px; margin:2px 0 8px; }
+ code { background:#e8e4d8; padding:0 3px; }
+</style></head>
+<body>
+<header>
+  <span>Orpheus · System &nbsp;—&nbsp; an Oberon-style command environment</span>
+  <span><a href="/editor">Facet editor</a><a href="/chart">Charts</a><a href="/plan">Planner</a><a href="/compile">Compiler</a><a href="/index.facet">Hosted page</a></span>
+</header>
+<div class="grid">
+  <div class="viewer">
+    <div class="title"><span>Commander — put the caret on a line and Execute (Ctrl+Enter)</span><button onclick="execLine()">Execute ▸</button></div>
+    <textarea id="cmd" spellcheck="false">eval (add 2 3)
+eval (tdot (tfromnats [1 [2 [3 0]]]) (tfromnats [4 [5 [6 0]]]))
+eval (fit_demo 2000)
+type head [1 2]
+sca liga nivo mazda</textarea>
+  </div>
+  <div class="viewer">
+    <div class="title"><span>Log</span><button onclick="clearLog()">Clear</button></div>
+    <pre id="log"></pre>
+  </div>
+  <div class="viewer tools">
+    <div class="title"><span>Tools</span></div>
+    <div class="body">
+      <div style="font-weight:600; margin-bottom:4px">How to run the tools</div>
+      <div class="hint" style="margin-top:0">
+        <b>In this console</b> — type a line in the Commander, put the caret on it, press <code>Ctrl+Enter</code>:<br>
+        &nbsp;&nbsp;<code>eval (add 2 3)</code> — run any Latte expression (std · mold · num · tensor · plan · ml linked)<br>
+        &nbsp;&nbsp;<code>eval (fit_demo 2000)</code> — train the linear-regression model; learns <code>[w b]</code><br>
+        &nbsp;&nbsp;<code>eval (tdot (tfromnats [1 [2 [3 0]]]) (tfromnats [4 [5 [6 0]]]))</code> — tensor dot product<br>
+        &nbsp;&nbsp;<code>type head [1 2]</code> — infer an expression's type &nbsp;·&nbsp; <code>sca ligā</code> — sound change<br>
+        <b>Other pages</b> — <a href="/editor">/editor</a> (WYSIWYG Facet editor, edits the hosted pages) ·
+        <a href="/chart">/chart</a> (data visualization).<br>
+        <b>From a terminal</b> — <code>latte ml --iters 5000</code>, <code>latte tensor</code>,
+        <code>latte chart line 3 1 4 1 5</code>, <code>latte plan</code>,
+        <code>latte mocha --app forge …</code>, <code>latte team --as NAME …</code>, <code>latte repl</code>.
+      </div>
+      <div style="font-weight:600; margin:10px 0 2px">Quick commands</div>
+      <div class="hint" style="margin-top:0">Each button drops a starter command into the Commander. <code>eval</code> links the std, mold, num, tensor, plan and ml libraries, so the numeric tools are reachable through it.</div>
+      <button onclick="put('eval (add 2 3)')">eval</button>
+      <button onclick="put('type (if (a==0) then 1 else nil)')">typecheck</button>
+      <button onclick="put('sca liga nivo mazda benda')">SCArs (sound change)</button>
+      <button onclick="put('eval (tsum (tfromnats [1 [2 [3 [4 0]]]]))')">tensor</button>
+      <button onclick="put('eval (fit_demo 2000)')">ml (train)</button>
+      <button onclick="window.location='/plan'">planner →</button>
+      <button onclick="window.location='/chart'">charts →</button>
+      <button onclick="window.location='/editor'">WYSIWYG Facet editor →</button>
+      <div class="hint" style="margin-top:10px">Stateful/networked tools — the Mocha apps (<code>todo</code>, <code>lexicon</code>, <code>forge</code>) and the <code>team</code> collaborative coding tool — run as nodes from the CLI: <code>latte mocha --app forge …</code>, <code>latte team --as NAME …</code>.</div>
+    </div>
+  </div>
+</div>
+<script>
+var cmd = document.getElementById('cmd');
+var log = document.getElementById('log');
+function append(text){ log.textContent += text; log.scrollTop = log.scrollHeight; }
+function clearLog(){ log.textContent = ''; }
+function put(s){ cmd.value += (cmd.value.endsWith('\n') || cmd.value === '' ? '' : '\n') + s; cmd.focus(); }
+function currentLine(){
+  var v = cmd.value, p = cmd.selectionStart;
+  var start = v.lastIndexOf('\n', p - 1) + 1;
+  var end = v.indexOf('\n', p); if (end < 0) end = v.length;
+  return v.slice(start, end).trim();
+}
+function execLine(){
+  var line = currentLine();
+  if (!line) return;
+  append('▸ ' + line + '\n');
+  fetch('/api/run', {method:'POST', headers:{'Content-Type':'text/plain; charset=utf-8'}, body: line})
+    .then(function(r){ return r.text(); })
+    .then(function(out){ append(out + '\n\n'); });
+}
+cmd.addEventListener('keydown', function(e){
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); execLine(); }
+});
+</script>
+</body></html>

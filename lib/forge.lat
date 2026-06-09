@@ -1,0 +1,24 @@
+:: Forge — a Mocha app for team coding across connected machines. State is a shared,
+:: append-only log of [author snippet] entries. Because every poke is a gossiped,
+:: durable event, all teammates' nodes converge on the same codebase log.
+import std
+import mocha
+core forge
+  poke = fn [action state] ->
+           let tag = head action in
+           let arg = tail action in
+           case tag of
+             %add   -> (ok [ arg state ]) ;   :: arg = [author snippet]
+             %clear -> (ok 0) ;
+             _      -> (ok state)
+           end
+  peek = fn [query state] ->
+           let tag = head query in
+           let arg = tail query in
+           case tag of
+             %count -> (len state) ;
+             %all   -> state ;
+             %last  -> (head state) ;
+             _      -> 0
+           end
+end

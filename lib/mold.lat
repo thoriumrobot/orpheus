@@ -1,0 +1,64 @@
+:: ===========================================================================
+:: mold.lat — a minimal mold/aura type system for Latte, written in Latte.
+::
+:: A mold is a noun describing a shape; auras label atoms for display.
+::   [0 aura]      atom mold (aura is a %term: ud ux ub t tas ...)
+::   [1 [mh mt]]   cell mold (a pair of molds)
+::   [2 me]        list mold (cons list of `me`, 0-terminated)
+::   [3 [ma mb]]   fork mold (either branch)
+::
+::   bunt m        the default value of a mold
+::   nest m n      does noun n fit mold m?            (loobean, 0 = yes)
+::   clam m n      coerce n into mold m               (total: never crashes)
+:: ===========================================================================
+import std
+core mold
+  :: constructors
+  matom = fn [aura] -> [ 0 aura ]
+  mcell = fn [a b] -> [ 1 [ a b ] ]
+  mlist = fn [e] -> [ 2 e ]
+  mfork = fn [a b] -> [ 3 [ a b ] ]
+
+  bunt = fn [m] ->
+    let t = (head m) in
+    if (t == 0) then 0
+    else if (t == 1) then let p = (tail m) in [ (bunt (head p)) (bunt (tail p)) ]
+    else if (t == 2) then 0
+    else (bunt (head (tail m)))
+
+  nestlist = fn [me n] ->
+    if (n == 0) then 0
+    else if (iscell n) then (if ((nest me (head n)) == 0) then (nestlist me (tail n)) else 1)
+    else 1
+
+  nest = fn [m n] ->
+    let t = (head m) in
+    if (t == 0) then (if (iscell n) then 1 else 0)
+    else if (t == 1) then
+      (if (iscell n) then
+        let p = (tail m) in
+        (if ((nest (head p) (head n)) == 0) then (nest (tail p) (tail n)) else 1)
+      else 1)
+    else if (t == 2) then (nestlist (tail m) n)
+    else
+      let p = (tail m) in
+      (if ((nest (head p) n) == 0) then 0 else (nest (tail p) n))
+
+  clamlist = fn [me n] ->
+    if (n == 0) then 0
+    else if (iscell n) then [ (clam me (head n)) (clamlist me (tail n)) ]
+    else 0
+
+  clam = fn [m n] ->
+    let t = (head m) in
+    if (t == 0) then (if (iscell n) then 0 else n)
+    else if (t == 1) then
+      let p = (tail m) in
+      (if (iscell n)
+        then [ (clam (head p) (head n)) (clam (tail p) (tail n)) ]
+        else [ (bunt (head p)) (bunt (tail p)) ])
+    else if (t == 2) then (clamlist (tail m) n)
+    else
+      let p = (tail m) in
+      (if ((nest (head p) n) == 0) then (clam (head p) n) else (clam (tail p) n))
+end

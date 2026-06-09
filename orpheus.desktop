@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Orpheus
+GenericName=Functional Environment
+Comment=Latte language, Facet markup and the Hymn server — opens the Orpheus GUI in a window
+Exec=latte gui
+Icon=orpheus
+Terminal=false
+Categories=Development;Utility;IDE;
+Keywords=latte;facet;orpheus;loom;repl;
+StartupNotify=true

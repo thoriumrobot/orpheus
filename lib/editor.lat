@@ -1,0 +1,21 @@
+:: The WYSIWYG editor's document model, as a Mocha app written in Latte. The whole
+:: document is a single cord (its Facet source); pokes replace it, peek returns it.
+:: Running on the Mocha runtime, the document is durable and can sync across machines.
+import std
+import mocha
+core editor
+  poke = fn [action state] ->
+           let tag = head action in
+           let arg = tail action in
+           case tag of
+             %set   -> (ok arg) ;
+             %clear -> (ok 0) ;
+             _      -> (ok state)
+           end
+  peek = fn [query state] ->
+           let tag = head query in
+           case tag of
+             %text -> state ;
+             _     -> 0
+           end
+end

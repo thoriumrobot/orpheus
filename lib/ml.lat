@@ -1,0 +1,53 @@
+:: ml.lat — training machine-learning models in Latte by gradient descent. Built on the
+:: tensor + signed-number libraries (so it has real signed fixed-point arithmetic). The
+:: worked model is linear regression  y = w·x + b  fit by batch gradient descent.
+import tensor
+core ml
+  predict = fn [w b x] -> (nadd (nmul w x) b)
+
+  :: one batch gradient-descent step; returns the updated [w b]
+  gradstep = fn [w b xs ys lr] ->
+    let cnt = (npos (mul (len xs) 1000)) in            :: number of points as a signed value
+    let sums =
+      loop with [px = xs, py = ys, sew = [0 0], se = [0 0]] :
+        if (px == 0) then [ sew se ]
+        else
+          let e = (nsub (nadd (nmul w (head px)) b) (head py)) in   :: error = (w·x+b) - y
+          again((tail px), (tail py), (nadd sew (nmul e (head px))), (nadd se e))
+      end in
+    let gw = (ndiv (head sums) cnt) in                 :: mean gradient wrt w
+    let gb = (ndiv (tail sums) cnt) in                 :: mean gradient wrt b
+    [ (nsub w (nmul lr gw)) (nsub b (nmul lr gb)) ]
+
+  train = fn [w b xs ys lr iters] ->
+    loop with [cw = w, cb = b, k = 0] :
+      if (k == iters) then [ cw cb ]
+      else
+        let nx = (gradstep cw cb xs ys lr) in
+        again((head nx), (tail nx), +(k))
+    end
+
+
+  :: mean squared error of the current model over the data (a signed number)
+  mse = fn [w b xs ys] ->
+    let cnt = (npos (mul (len xs) 1000)) in
+    let s = loop with [px = xs, py = ys, acc = [0 0]] :
+              if (px == 0) then acc
+              else
+                let e = (nsub (nadd (nmul w (head px)) b) (head py)) in
+                again((tail px), (tail py), (nadd acc (nmul e e)))
+            end in
+    (ndiv s cnt)
+
+  :: predictions for every x under the current model
+  predict_all = fn [w b xs] -> (map (fn [x] -> (predict w b x)) xs)
+
+  :: generic entry: fit from data, starting at w=b=0
+  fit = fn [xs ys lr iters] -> (train [0 0] [0 0] xs ys lr iters)
+
+  :: fit y = w·x + b to (1,3) (2,5) (3,7) (4,9); true w = 2, b = 1
+  fit_demo = fn [iters] ->
+    let xs = (tdata (tfromnats [1 [2 [3 [4 0]]]])) in
+    let ys = (tdata (tfromnats [3 [5 [7 [9 0]]]])) in
+    (train [0 0] [0 0] xs ys [0 200] iters)
+end

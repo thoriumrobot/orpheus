@@ -1,0 +1,70 @@
+:: tensor.lat — n-dimensional tensors in Latte. A tensor is [shape data]: `shape` is a
+:: list of dimension sizes and `data` is the elements in row-major order, each a signed
+:: fixed-point number (see num.lat). Built on std + num; arithmetic is jetted, so it is fast.
+import std
+import num
+core tensor
+  tshape = fn [t] -> head t
+  tdata  = fn [t] -> tail t
+
+  :: build a 1-D tensor from a list of plain naturals (each becomes the fixed-point value n.0)
+  tfromnats = fn [xs] -> [ [ (len xs) 0 ] (map (fn [v] -> [0 (mul v 1000)]) xs) ]
+
+  :: number of elements implied by a shape (product of the dimensions)
+  tsize = fn [shape] ->
+            loop with [s = shape, acc = 1] :
+              if (s == 0) then acc else again((tail s), (mul acc (head s)))
+            end
+
+  :: reinterpret the same data under a new shape
+  treshape = fn [t newshape] -> [ newshape (tdata t) ]
+
+  :: row-major flat offset of an index tuple under a shape
+  flatindex = fn [shape idxs] ->
+                loop with [sh = shape, ix = idxs, acc = 0] :
+                  if (sh == 0) then acc
+                  else again((tail sh), (tail ix), (add (mul acc (head sh)) (head ix)))
+                end
+  tget = fn [t idxs] -> (nth (tdata t) (flatindex (tshape t) idxs))
+
+  :: reductions
+  tsum = fn [t] ->
+           loop with [d = (tdata t), acc = [0 0]] :
+             if (d == 0) then acc else again((tail d), (nadd acc (head d)))
+           end
+  tdot = fn [a b] ->
+           loop with [x = (tdata a), y = (tdata b), acc = [0 0]] :
+             if (x == 0) then acc
+             else again((tail x), (tail y), (nadd acc (nmul (head x) (head y))))
+           end
+
+  :: elementwise maps
+  zipw = fn [f xs ys] ->
+           loop with [p = xs, q = ys, acc = 0] :
+             if (p == 0) then (reverse acc)
+             else again((tail p), (tail q), [ (f (head p) (head q)) acc ])
+           end
+  tmap  = fn [t f] -> [ (tshape t) (map f (tdata t)) ]
+  tzipw = fn [a b f] -> [ (tshape a) (zipw f (tdata a) (tdata b)) ]
+  tadd  = fn [a b] -> (tzipw a b (fn [x y] -> (nadd x y)))
+  tsub  = fn [a b] -> (tzipw a b (fn [x y] -> (nsub x y)))
+  thad  = fn [a b] -> (tzipw a b (fn [x y] -> (nmul x y)))
+  tscale = fn [t k] -> (tmap t (fn [x] -> (nmul x k)))
+
+  :: 2-D matrix multiply: [m k] · [k n] -> [m n]
+  mmcell = fn [a b i j k] ->
+             loop with [l = 0, acc = [0 0]] :
+               if (l == k) then acc
+               else again(+(l), (nadd acc (nmul (tget a [i [l 0]]) (tget b [l [j 0]]))))
+             end
+  tmatmul = fn [a b] ->
+              let m = (nth (tshape a) 0) in
+              let k = (nth (tshape a) 1) in
+              let n = (nth (tshape b) 1) in
+              let total = (mul m n) in
+              let data = loop with [p = 0, acc = 0] :
+                           if (p == total) then (reverse acc)
+                           else again(+(p), [ (mmcell a b (div p n) (mod p n) k) acc ])
+                         end
+              in [ [ m [ n 0 ] ] data ]
+end

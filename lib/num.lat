@@ -1,0 +1,31 @@
+:: num.lat — signed fixed-point numbers for Latte, since atoms are naturals only.
+:: A number is a cell [sign magnitude]: sign 0 = +, 1 = -, magnitude is fixed-point ×1000.
+:: All higher numeric libraries (tensor, ml) build on these. Arithmetic uses the jetted
+:: std ops, so it is fast.
+import std
+core num
+  nscale = fn [_] -> 1000
+  npos   = fn [m] -> [0 m]               :: a positive number from a fixed-point magnitude
+  nzero  = fn [_] -> [0 0]
+  nsign  = fn [x] -> head x
+  nmag   = fn [x] -> tail x
+  nnegate = fn [x] -> [ (if ((head x) == 0) then 1 else 0) (tail x) ]
+  nnorm  = fn [x] -> if ((tail x) == 0) then [0 0] else x   :: collapse -0 to +0
+  nadd = fn [a b] ->
+           let sa = (head a) in let ma = (tail a) in
+           let sb = (head b) in let mb = (tail b) in
+           if (sa == sb) then (nnorm [ sa (add ma mb) ])
+           else if (gte ma mb) then (nnorm [ sa (sub ma mb) ])
+           else (nnorm [ sb (sub mb ma) ])
+  nsub = fn [a b] -> (nadd a (nnegate b))
+  nmul = fn [a b] ->
+           let s = (if ((head a) == (head b)) then 0 else 1) in
+           (nnorm [ s (div (mul (tail a) (tail b)) (nscale 0)) ])
+  ndiv = fn [a b] ->
+           let s = (if ((head a) == (head b)) then 0 else 1) in
+           (nnorm [ s (div (mul (tail a) (nscale 0)) (tail b)) ])
+  nlt  = fn [a b] ->                       :: signed less-than -> loobean (0 = true)
+           if ((head a) == (head b))
+             then (if ((head a) == 0) then (lt (tail a) (tail b)) else (lt (tail b) (tail a)))
+             else (if ((head a) == 1) then 0 else 1)
+end

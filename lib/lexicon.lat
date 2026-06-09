@@ -1,0 +1,23 @@
+:: A Mocha lexicon app: state is a list of [solar heart] word pairs (0 = empty).
+:: The Heart form is derived by SCArs in the host at poke time; the app stores it.
+import std
+import mocha
+core lexicon
+  poke = fn [action state] ->
+           let tag = head action in
+           let arg = tail action in
+           case tag of
+             %add   -> (ok [ arg state ]) ;
+             %clear -> (ok 0) ;
+             _      -> (ok state)
+           end
+  peek = fn [query state] ->
+           let tag = head query in
+           let arg = tail query in
+           case tag of
+             %count -> (len state) ;
+             %all   -> state ;
+             %heart -> (assoc state arg) ;
+             _      -> 0
+           end
+end

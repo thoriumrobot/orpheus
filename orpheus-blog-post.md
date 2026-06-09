@@ -1,0 +1,164 @@
+# Orpheus: a whole functional computing environment in one dependency-free binary
+
+Most software today is an iceberg of dependencies. A "hello world" web service can pull in
+hundreds of packages; a language runtime drags along a garbage collector, a JIT, a standard
+library the size of a city. Orpheus is a deliberate experiment in the opposite direction: a
+complete, self-contained functional computing environment — a virtual machine, a programming
+language, a compiler, a web server, a GUI, a distributed runtime, and a pile of tools — written
+in pure Rust with **zero external crates**. It builds offline, runs deterministically, and fits
+in a single binary called `latte`.
+
+This post walks through what's inside and why it's interesting.
+
+## The shape of the system
+
+Orpheus is built in layers, each a small idea that the next one stands on:
+
+- **Knot** — the data. Every value is a *noun*: either an arbitrary-precision atom or a pair of
+  nouns (a cell). That's the whole type system. Lists, records, text, code, and serialized state
+  are all just nouns. Nouns serialize to bytes (`jam`) and back (`cue`), and every noun has a
+  content hash, which is what makes the distributed layer work.
+- **Loom** — the virtual machine. A tiny Nock-style combinator evaluator: twelve reduction rules
+  over nouns (slot, constant, apply, increment, equality, if, compose, push, invoke, edit, …).
+  It is the reference semantics for everything above it.
+- **Latte** — the language. A small functional language with pattern-style `case`, tail-recursive
+  `loop`/`again`, first-class lambdas (`fn [x] -> …`), and modules (`core`). Latte compiles down
+  to Loom formulas. Truth is Loobean (0 = true), lists are 0-terminated cells, and calls are
+  parenthesized: `(add (mul 6 7) 1)`.
+- **The libraries** — written in Latte itself: a standard library (`std`), signed fixed-point and
+  vector/tensor math (`num`, `tensor`, `vec`), a linear-regression learner (`ml`), an economic
+  planner (`plan`), plotting (`plot`), a full chess engine (`chess`), and a chess evaluator whose
+  piece values are *learned by gradient descent in Latte* (`chessml`).
+- **The surfaces** — Facet (a markup language), Hymn (a web server), a browser GUI, SCArs (a
+  sound-change engine for constructed languages), Mocha (an app environment), Forge (collaborative
+  coding), and a content-addressed distributed runtime.
+
+Everything is one program. The same `latte` binary is the VM, the compiler, the server, and the
+CLI for all of the above.
+
+## Four ways to run your code
+
+The most unusual thing about Orpheus is that a Latte expression can be executed by four different
+engines, and they all agree with each other — a property that is continuously checked by the test
+suite rather than hoped for.
+
+**1. The interpreter.** Loom walks the formula tree directly. This is the reference: simple,
+obviously correct, and the yardstick everything else is measured against.
+
+**2. The adaptive JIT.** Formulas are interpreted while *cold* and compiled to native closures only
+once they get *hot* — re-entered past a threshold. So compilation happens exactly when it pays for
+itself. A one-shot like `(add 2 3)` is never compiled; a 3000-iteration training loop is.
+
+**3. Anvil — the optimizing Latte→Rust compiler.** This is the headline tool. Anvil takes a Latte
+expression and its entire library closure and emits a **standalone Rust program** carrying a tiny
+self-contained noun runtime — no dependency on Orpheus itself. It constant-folds, lowers the
+arithmetic primitives to native `u128` operations, eliminates unreachable functions, turns
+`let` into Rust `let`, compiles tail-recursive `loop` into a real Rust loop, and compiles lambdas
+into native closures. The entire chess engine and the gradient-descent learner compile straight
+through. You can see the generated Rust (`latte rustc "<expr>"`), save it (`-o file.rs`), or build
+and run it (`--run`).
+
+Anvil is also the **default execution engine**: `latte eval`, the interactive `cli`, and the GUI
+console all compile your expression to native code, cache the built binary, and run it. The cache
+is content-addressed — keyed by a hash of the generated source and stored in a persistent per-user
+directory — so a program compiled once is reused across runs and reboots. Recompilation happens
+only when the code actually changes. A warm run is as fast as the interpreter; a cold one pays for
+`rustc` once. If `rustc` isn't installed, everything transparently falls back to the interpreter,
+so the system always works.
+
+How do we know Anvil is correct? Differential testing. For hundreds of expressions — arithmetic,
+lists, capturing closures, recursion, signed-number vectors, the whole chess engine, the learned
+evaluator, plus a randomized fuzzer of arbitrary nested formulas — the compiled-and-run output is
+checked against the interpreter, on both the values produced *and* which inputs fail. They match,
+including subtle things like overflow and divide-by-zero behaving identically on both sides.
+
+**4. The interaction-net compiler.** This is the research corner. Orpheus implements Lafont's
+interaction combinators (the γ constructor, δ duplicator, ε eraser) as a confluent graph reducer,
+and compiles a fragment of Latte — naturals under `+`, `*`, `<`, and `if` — into interaction nets
+that *compute by local rewriting*. Multiplication duplicates an operand with the δ duplicator;
+`if` bundles its branches into a cell that a selector projects, erasing the unused branch with ε.
+`latte net "if (lt 7 4) then (add 1 1) else (mul 6 7)"` reduces to 42 on the net engine — and, of
+course, agrees with the interpreter. Two 200-formula randomized batteries keep it honest.
+
+## A tour of the tools
+
+Everything is a subcommand of `latte`:
+
+- `latte eval "<expr>"` — evaluate an expression (compiled natively by default; `--interp` to
+  force the interpreter, `--rebuild` to ignore the cache).
+- `latte cli` — an interactive console: type expressions, `:type` to infer a type, `:rust` to
+  compile-and-run natively, `:libs` to list libraries.
+- `latte repl` — the *self-hosting* environment, where you define your own arms and introspect
+  them.
+- `latte rustc "<expr>" [--run] [-o f.rs]` — the Anvil compiler.
+- `latte net "<expr>"` — the interaction-net compiler.
+- `latte icomb` — a narrated tour of interaction-combinator reduction.
+- `latte jit "<expr>"` — compare interpreter / adaptive / forced-compile and time them.
+- `latte game chess [--human white]` — two machines play a full game to checkmate; the machine
+  player is its own compiled Orpheus core, and with `--human` you can play against the learned
+  evaluator by typing moves like `e2e4`.
+- `latte ml`, `latte tensor`, `latte chart`, `latte plan` — train a model, do n-dimensional
+  tensor math, render an SVG chart, or solve a little planning problem, all computed in Latte
+  libraries on the VM.
+- `latte sca <words>` — evolve words through ordered sound changes (for constructed languages).
+- `latte team --as NAME --share CODE` — collaborative coding across machines, with attribution.
+- `latte cache [path|clear]` — manage the compiled-program cache.
+- `latte gui` — the web GUI: a System console, a WYSIWYG document editor, charts, the planner,
+  and an Oberon-style **module compiler page** where you paste a `core` module, compile it (with
+  line/column errors), and have it loaded live into the running system.
+- `latte node` — join a content-addressed, event-logged distributed runtime.
+
+## Some engineering worth calling out
+
+**Zero dependencies, fully offline.** There is no `Cargo.lock` full of transitive packages. The
+SHA-3 hashing, the arbitrary-precision arithmetic, the HTTP server, the JSON-free wire format —
+all hand-written. This makes the whole thing auditable and reproducible: the source you read is
+the software you run.
+
+**Determinism and content-addressing.** Nouns serialize canonically and hash with SHA-3, so the
+same computation always produces the same bytes and the same hash. The distributed runtime is an
+event log of content-addressed actions; peers converge by replaying the same events.
+
+**Oberon-style live recompilation.** Libraries are Latte source, and you can edit and reload them
+*into a running system* — from the command line (`--lib NAME=FILE`), over the network, or from the
+GUI's compiler page — without rebuilding the binary. The whole system can then `import` the new
+module immediately.
+
+**A real bug, found and fixed.** Modules used to lay their function table out as a right-nested
+tree, which made the deepest function's address grow exponentially and silently corrupt addressing
+once a module passed ~64 functions. The fix was a *balanced* layout, so modules of any size compile
+correctly — a nice example of the kind of subtle issue that only shows up when you self-host a
+language's module system at scale.
+
+**Correctness by cross-checking.** Because there are multiple engines and a reference interpreter,
+"is it right?" has a concrete answer: run it both ways and compare. That discipline — differential
+testing against a simple reference — is what lets a one-person system layer a JIT, an optimizing
+native compiler, and an interaction-net reducer on top of the same language and trust all of them.
+
+## Trying it
+
+Orpheus builds on Ubuntu and Windows with nothing but a Rust toolchain (1.75+):
+
+```sh
+cargo build --offline --release
+./target/release/latte eval "(mul (add 3 4) 5)"   # → 35
+./target/release/latte game chess
+./target/release/latte gui                          # http://127.0.0.1:8088/
+```
+
+The distribution ships the prebuilt binary alongside the complete source, so you can run it
+immediately or rebuild it in place. Full platform instructions — including the Windows toolchain,
+the runtime `rustc` requirement for native execution, and the compiled-program cache — are in the
+building-and-running guide.
+
+## What's still open
+
+Orpheus is honest about its frontier. The interaction-net compiler handles a first-order
+arithmetic-and-control fragment, but general recursion and user-defined functions on the net (which
+need net-level fixpoints) are future work, as is a lazy `if` that doesn't eagerly reduce the unused
+branch. There's no native desktop GUI yet — the browser GUI stands in — and the most intricate
+stress- and cluster-conditioned sound changes aren't implemented. None of that detracts from the
+core idea, which the system already demonstrates end to end: that a complete, multi-engine,
+self-hosting functional environment can be small, dependency-free, deterministic, and verifiable —
+and still do real work, from playing chess to learning piece values to compiling itself to native
+code.

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Planner</title>
+<style>
+ body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#d8d4c8; color:#1a1a1a; }
+ header { background:#1a1a2e; color:#f4f1e8; padding:8px 14px; font-size:14px; display:flex; justify-content:space-between; }
+ header a { color:#bcd; text-decoration:none; margin-left:14px; }
+ .panel { background:#f4f1e8; border:1px solid #1a1a2e; margin:8px; }
+ .title { background:#c9c4b4; border-bottom:1px solid #1a1a2e; padding:4px 10px; font-size:12px; font-weight:600; }
+ .body { padding:12px; }
+ label { display:inline-block; min-width:140px; }
+ input { font:14px ui-monospace,monospace; padding:5px; width:90px; border:1px solid #1a1a2e; background:#fff; }
+ button { font:13px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:6px 14px; margin-top:8px; }
+ button:hover { background:#fff; }
+ pre { background:#fff; border:1px solid #c9c4b4; padding:12px; white-space:pre-wrap; margin-top:12px; font-size:13px; }
+ .hint { color:#555; font-size:12px; margin-top:8px; }
+</style></head>
+<body>
+<header>
+  <span>Orpheus · Planner &nbsp;—&nbsp; Towards a New Socialism (Cockshott &amp; Cottrell)</span>
+  <span><a href="/">System</a><a href="/chart">Charts</a><a href="/editor">Editor</a></span>
+</header>
+<div class="panel">
+  <div class="title">Final demand (units to deliver) and recurrence depth</div>
+  <div class="body">
+    <div><label>steel demand</label><input id="steel" value="0"></div>
+    <div style="margin-top:6px"><label>grain demand</label><input id="grain" value="1"></div>
+    <div style="margin-top:6px"><label>iterations</label><input id="iters" value="60"></div>
+    <button onclick="compute()">Compute plan</button>
+    <pre id="out">…</pre>
+    <div class="hint">The labour values and gross outputs are computed in Latte (<code>lib/plan.lat</code>)
+      on Loom — now JIT-compiled. Same engine as <code>latte plan --iters 60</code>.</div>
+  </div>
+</div>
+<script>
+function thousandths(v){ return Math.round(parseFloat(v || '0') * 1000); }
+function compute(){
+  var iters = parseInt(document.getElementById('iters').value || '60', 10);
+  var ds = thousandths(document.getElementById('steel').value);
+  var dg = thousandths(document.getElementById('grain').value);
+  fetch('/api/plan', {method:'POST', headers:{'Content-Type':'text/plain'}, body: iters + ' ' + ds + ' ' + dg})
+    .then(function(r){ return r.text(); })
+    .then(function(t){ document.getElementById('out').textContent = t; });
+}
+window.addEventListener('load', compute);
+</script>
+</body></html>

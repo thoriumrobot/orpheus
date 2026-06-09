@@ -1,0 +1,64 @@
+:: ===========================================================================
+:: sca.lat — SCArs's matching engine, written in Latte (runs on Loom).
+::
+:: A general multi-segment rewrite engine. The host compiles rules (with phoneme
+:: categories, correspondence, wildcards, boundaries) down to concrete rules of
+:: tagged tokens; this engine does the scanning and splicing.
+::
+::   token   = [tag payload]   tag 0 = literal (payload = grapheme cord)
+::                             tag 1 = wildcard (any one non-boundary segment)
+::                             tag 2 = boundary (#)
+::   segment = [tag payload]   tag 0 = phoneme,  tag 2 = boundary
+::   rule    = [from [to [pre-reversed post]]]   (sequences of tokens; 0 = empty)
+::   word    = cons list of segments, boundary-padded, terminated by 0
+:: ===========================================================================
+import std
+core sca
+  eqtok = fn [tok seg] ->
+    let tk = (head tok) in
+    let sk = (head seg) in
+    if (tk == 1) then (if (sk == 2) then 1 else 0)
+    else if (tk == sk) then (if (tk == 2) then 0 else (if ((tail tok) == (tail seg)) then 0 else 1))
+    else 1
+
+  :: does the token list match a prefix of segs?  ->  [ok rest]
+  matchseq = fn [tokens segs] ->
+    loop with [tks = tokens, ss = segs] :
+      if (tks == 0) then [ 0 ss ]
+      else if (ss == 0) then [ 1 0 ]
+      else if ((eqtok (head tks) (head ss)) == 0) then again((tail tks), (tail ss))
+      else [ 1 0 ]
+    end
+
+  :: push xs (in order) onto a reversed accumulator
+  pushall = fn [xs acc] -> loop with [c = xs, a = acc] : if (c == 0) then a else again((tail c), [ (head c) a ]) end
+
+  :: apply ONE rule across the word
+  applyrule = fn [word rule] ->
+    let from = (head rule) in
+    let to   = (head (tail rule)) in
+    let prer = (head (tail (tail rule))) in
+    let post = (tail (tail (tail rule))) in
+    loop with [acc = 0, cur = word] :
+      if (cur == 0) then (reverse acc)
+      else
+        let fm = (matchseq from cur) in
+        if ((head fm) == 0) then
+          let rest = (tail fm) in
+          if ((head (matchseq prer acc)) == 0) then
+            if ((head (matchseq post rest)) == 0) then
+              if (from == 0)
+                then again([ (head cur) (pushall to acc) ], (tail cur))
+                else again((pushall to acc), rest)
+            else again([ (head cur) acc ], (tail cur))
+          else again([ (head cur) acc ], (tail cur))
+        else again([ (head cur) acc ], (tail cur))
+    end
+
+  applyrules = fn [word rules] ->
+    loop with [rs = rules, w = word] :
+      if (rs == 0) then w else again((tail rs), (applyrule w (head rs)))
+    end
+
+  apply = fn [word rules] -> (applyrules word rules)
+end

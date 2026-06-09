@@ -1,0 +1,14 @@
+:: vec.lat — a tiny vector library, the worked example from docs/adding-libraries.md.
+:: Names are prefixed (v*) so the module links cleanly alongside any other library.
+import std
+core vec
+  :: sum of a 0-terminated list
+  vsum = fn [xs] -> (foldl (fn [a b] -> (add a b)) 0 xs)
+
+  :: dot product of two equal-length lists
+  vdot = fn [xs ys] ->
+           loop with [a = xs, b = ys, acc = 0] :
+             if (a == 0) then acc
+             else again((tail a), (tail b), (add acc (mul (head a) (head b))))
+           end
+end

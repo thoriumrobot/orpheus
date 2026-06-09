@@ -1,0 +1,66 @@
+:: ===========================================================================
+:: plan.lat — planning calculations from Cockshott & Cottrell, *Towards a New
+:: Socialism*: the iterative computation of labour values and of the gross outputs
+:: required to meet a final demand. All in Latte, over fixed-point naturals.
+::
+:: Fixed point: every quantity is an integer scaled by `scale` (= 1000), so 0.4 is
+:: stored as 400. A technology is a list of `recipes`, one per good; recipe_j is the
+:: column of the input matrix A — the amounts [A_1j .. A_nj] of each good i needed to
+:: make one unit of good j. `l` is the vector of direct labour per unit of good.
+::
+:: Labour values solve  v_j = l_j + Σ_i v_i A_ij , computed by the TANS recurrence
+::   v⁽⁰⁾ = l ,  v⁽ⁿ⁺¹⁾ = l + v⁽ⁿ⁾·A
+:: which converges from below for any productive (Hawkins–Simon) economy.
+:: ===========================================================================
+import std
+core plan
+  scale = fn [_] -> 1000
+
+  :: Σ_i a_i b_i over two equal-length fixed-point vectors (scaled² result)
+  dot = fn [v w] ->
+          loop with [a = v, b = w, acc = 0] :
+            if (a == 0) then acc
+            else again((tail a), (tail b), (add acc (mul (head a) (head b))))
+          end
+
+  :: elementwise sum of two equal-length vectors
+  vadd = fn [p q] ->
+           loop with [x = p, y = q, acc = 0] :
+             if (x == 0) then (reverse acc)
+             else again((tail x), (tail y), [ (add (head x) (head y)) acc ])
+           end
+
+  :: A·v : for each recipe (column of A), dot with v then rescale down by `scale`
+  matvec = fn [v recipes] ->
+             loop with [r = recipes, acc = 0] :
+               if (r == 0) then (reverse acc)
+               else again((tail r), [ (div (dot v (head r)) (scale 0)) acc ])
+             end
+
+  :: one Cockshott iteration of the labour-value recurrence
+  step = fn [l recipes v] -> (vadd l (matvec v recipes))
+
+  :: iterate the recurrence `iters` times from v = l
+  values = fn [l recipes iters] ->
+             loop with [v = l, k = 0] :
+               if (k == iters) then v
+               else again((step l recipes v), +(k))
+             end
+
+  :: matrix transpose (list of rows <-> list of columns), for the Leontief dual
+  heads = fn [m] -> (map (fn [r] -> head r) m)
+  tails = fn [m] -> (map (fn [r] -> tail r) m)
+  transpose = fn [m] ->
+                loop with [cur = m, acc = 0] :
+                  if ((head cur) == 0) then (reverse acc)
+                  else again((tails cur), [ (heads cur) acc ])
+                end
+
+  :: gross outputs to meet final demand y:  x = y + A·x  (iterated)
+  gross = fn [y recipes iters] ->
+            let at = (transpose recipes) in
+            loop with [x = y, k = 0] :
+              if (k == iters) then x
+              else again((vadd y (matvec x at)), +(k))
+            end
+end

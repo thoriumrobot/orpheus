@@ -1,0 +1,31 @@
+:: ===========================================================================
+:: mocha.lat — the Mocha application environment, written in Latte.
+::
+:: A Mocha *app* is a `core` module exposing two arms:
+::   poke = fn [action state] -> [effects state]   (a state transition)
+::   peek = fn [query  state] -> value             (a read-only view)
+:: Apps run on the Loom over the persistent, distributed runtime: every poke is a
+:: durable, gossiped event, so apps inherit persistence, convergence, time-travel,
+:: and log compaction for free. This library gives apps their higher-level vocabulary.
+:: ===========================================================================
+import std
+core mocha
+  ok   = fn [state] -> [ 0 state ]          :: a poke result with no effects
+  emit = fn [eff state] -> [ eff state ]    :: a poke result that emits an effect
+
+  :: remove every element equal to x from list lst (order preserved)
+  drop = fn [lst x] ->
+           loop with [cur = lst, acc = 0] :
+             if (cur == 0) then (reverse acc)
+             else if ((head cur) == x) then again((tail cur), acc)
+             else again((tail cur), [ (head cur) acc ])
+           end
+
+  :: assoc lookup over a list of [key value] pairs (0 if the key is absent)
+  assoc = fn [lst k] ->
+           loop with [cur = lst] :
+             if (cur == 0) then 0
+             else if ((head (head cur)) == k) then (tail (head cur))
+             else again((tail cur))
+           end
+end

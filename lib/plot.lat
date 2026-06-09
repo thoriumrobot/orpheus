@@ -1,0 +1,39 @@
+:: plot.lat — data visualization in Latte. The chart *layout* is computed here: data
+:: values are scaled to pixel geometry inside a W×H box (SVG's y-axis grows downward).
+:: The host turns this geometry into SVG. Coordinates are plain naturals, so it is jet-fast.
+import std
+core plot
+  :: largest value in a list (0 for the empty list)
+  maxof = fn [xs] ->
+            loop with [c = xs, m = 0] :
+              if (c == 0) then m
+              else again((tail c), (if (lt m (head c)) then (head c) else m))
+            end
+
+  :: bar rectangles, one [x y w h] per value, scaled to fill a W×H box
+  bars = fn [xs W H] ->
+           let n  = (len xs) in
+           let mm = (maxof xs) in
+           let m  = (if (mm == 0) then 1 else mm) in
+           let bw = (div W n) in
+           loop with [c = xs, i = 0, acc = 0] :
+             if (c == 0) then (reverse acc)
+             else
+               let h = (div (mul (head c) H) m) in
+               again((tail c), +(i), [ [ (mul i bw) [ (sub H h) [ bw [ h 0 ] ] ] ] acc ])
+           end
+
+  :: polyline / scatter points, one [x y] per value
+  points = fn [xs W H] ->
+             let n     = (len xs) in
+             let mm    = (maxof xs) in
+             let m     = (if (mm == 0) then 1 else mm) in
+             let denom = (if (lt n 2) then 1 else (sub n 1)) in
+             let stepx = (div W denom) in
+             loop with [c = xs, i = 0, acc = 0] :
+               if (c == 0) then (reverse acc)
+               else
+                 let y = (sub H (div (mul (head c) H) m)) in
+                 again((tail c), +(i), [ [ (mul i stepx) [ y 0 ] ] acc ])
+             end
+end

@@ -1,0 +1,184 @@
+:: ===========================================================================
+:: chess.lat — chess for the Orpheus boardgame tool, written entirely in Latte.
+::
+:: Board: a 0-terminated list of 64 squares, index = row*8 + col, row 0 = rank 8
+:: (Black's back rank), row 7 = rank 1 (White's). White moves toward row 0.
+:: Pieces: 0 empty; White 1=P 2=N 3=B 4=R 5=Q 6=K; Black 7=P 8=N 9=B 10=R 11=Q 12=K.
+:: State: [board side 0] with side 1 = White to move, 2 = Black.
+:: Move:  [from to 0]  (a pair of square indices). Pawns auto-promote to a queen.
+:: Simplifications (documented): no castling, no en passant.
+:: ===========================================================================
+import std
+core chess
+
+  :: ---- square / piece helpers ----
+  idx    = fn [r c] -> (add (mul r 8) c)
+  rowof  = fn [i] -> (div i 8)
+  colof  = fn [i] -> (mod i 8)
+  other  = fn [side] -> if (side == 1) then 2 else 1
+  colorof = fn [p] -> if (p == 0) then 0 else if (lt p 7) then 1 else 2
+  ptype   = fn [p] -> if (p == 0) then 0 else if (lt p 7) then p else (sub p 6)
+  pval    = fn [t] -> if (t == 1) then 1 else if (t == 2) then 3 else if (t == 3) then 3 else if (t == 4) then 5 else if (t == 5) then 9 else 0
+  mind    = fn [x] -> (min x (sub 7 x))
+
+  :: target square from (r,c) by a signed offset; sr/sc are 0=minus 1=plus,
+  :: mr/mc are magnitudes. Returns 64 when the move leaves the board.
+  target = fn [r c sr mr sc mc] ->
+    let nr = (if (sr == 0) then (if (lt r mr) then 99 else (sub r mr)) else (add r mr)) in
+    let nc = (if (sc == 0) then (if (lt c mc) then 99 else (sub c mc)) else (add c mc)) in
+    if (or (gt nr 7) (gt nc 7)) then 64 else (idx nr nc)
+
+  :: ---- list helper: replace element k of xs with v ----
+  setnth = fn [xs k v] ->
+    loop with [c = xs, i = k, acc = 0] :
+      if (i == 0) then (append (reverse acc) [ v (tail c) ])
+      else again((tail c), (dec i), [ (head c) acc ])
+    end
+
+  indexof = fn [xs v] ->
+    loop with [c = xs, i = 0] :
+      if (c == 0) then 64
+      else if ((head c) == v) then i else again((tail c), +(i))
+    end
+
+  :: ---- sliding ray from i in unit direction (sr,mr,sc,mc), for `side` ----
+  ray = fn [board i sr mr sc mc side] ->
+    loop with [cr = (rowof i), cc = (colof i), acc = 0] :
+      let t = (target cr cc sr mr sc mc) in
+      if (t == 64) then acc
+      else let col = (colorof (nth board t)) in
+        if (col == 0) then again((rowof t), (colof t), [ t acc ])
+        else if (col == side) then acc
+        else [ t acc ]
+    end
+
+  :: keep on-board targets that are not occupied by a friendly piece
+  okstep = fn [board side t] -> if (t == 64) then 1 else if ((colorof (nth board t)) == side) then 1 else 0
+
+  knightmoves = fn [board i side] ->
+    let r = (rowof i) in let c = (colof i) in
+    (filter (fn [t] -> (okstep board side t))
+      [ (target r c 0 2 0 1) [ (target r c 0 2 1 1) [ (target r c 0 1 0 2) [ (target r c 0 1 1 2)
+      [ (target r c 1 1 0 2) [ (target r c 1 1 1 2) [ (target r c 1 2 0 1) [ (target r c 1 2 1 1) 0 ] ] ] ] ] ] ] ])
+
+  kingmoves = fn [board i side] ->
+    let r = (rowof i) in let c = (colof i) in
+    (filter (fn [t] -> (okstep board side t))
+      [ (target r c 0 1 0 1) [ (target r c 0 1 1 0) [ (target r c 0 1 1 1) [ (target r c 1 0 0 1)
+      [ (target r c 1 0 1 1) [ (target r c 1 1 0 1) [ (target r c 1 1 1 0) [ (target r c 1 1 1 1) 0 ] ] ] ] ] ] ] ])
+
+  bishopmoves = fn [board i side] ->
+    (append (ray board i 0 1 0 1 side) (append (ray board i 0 1 1 1 side)
+      (append (ray board i 1 1 0 1 side) (ray board i 1 1 1 1 side))))
+
+  rookmoves = fn [board i side] ->
+    (append (ray board i 0 1 1 0 side) (append (ray board i 1 1 1 0 side)
+      (append (ray board i 1 0 1 1 side) (ray board i 1 0 0 1 side))))
+
+  queenmoves = fn [board i side] -> (append (bishopmoves board i side) (rookmoves board i side))
+
+  wpawn = fn [board r c] ->
+    let f1 = (if (lt r 1) then 0 else (if ((nth board (idx (sub r 1) c)) == 0) then [ (idx (sub r 1) c) 0 ] else 0)) in
+    let f2 = (if (r == 6) then (if (and ((nth board (idx 5 c)) == 0) ((nth board (idx 4 c)) == 0)) then [ (idx 4 c) 0 ] else 0) else 0) in
+    let cl = (if (or (lt r 1) (lt c 1)) then 0 else (if ((colorof (nth board (idx (sub r 1) (sub c 1)))) == 2) then [ (idx (sub r 1) (sub c 1)) 0 ] else 0)) in
+    let cr = (if (or (lt r 1) (gt c 6)) then 0 else (if ((colorof (nth board (idx (sub r 1) (add c 1)))) == 2) then [ (idx (sub r 1) (add c 1)) 0 ] else 0)) in
+    (append f1 (append f2 (append cl cr)))
+
+  bpawn = fn [board r c] ->
+    let f1 = (if (gt r 6) then 0 else (if ((nth board (idx (add r 1) c)) == 0) then [ (idx (add r 1) c) 0 ] else 0)) in
+    let f2 = (if (r == 1) then (if (and ((nth board (idx 2 c)) == 0) ((nth board (idx 3 c)) == 0)) then [ (idx 3 c) 0 ] else 0) else 0) in
+    let cl = (if (or (gt r 6) (lt c 1)) then 0 else (if ((colorof (nth board (idx (add r 1) (sub c 1)))) == 1) then [ (idx (add r 1) (sub c 1)) 0 ] else 0)) in
+    let cr = (if (or (gt r 6) (gt c 6)) then 0 else (if ((colorof (nth board (idx (add r 1) (add c 1)))) == 1) then [ (idx (add r 1) (add c 1)) 0 ] else 0)) in
+    (append f1 (append f2 (append cl cr)))
+
+  pawnmoves = fn [board i side] ->
+    let r = (rowof i) in let c = (colof i) in
+    if (side == 1) then (wpawn board r c) else (bpawn board r c)
+
+  :: destination squares for the piece on i (assumed friendly to `side`)
+  genmoves = fn [board i side] ->
+    let t = (ptype (nth board i)) in
+    if (t == 1) then (pawnmoves board i side)
+    else if (t == 2) then (knightmoves board i side)
+    else if (t == 3) then (bishopmoves board i side)
+    else if (t == 4) then (rookmoves board i side)
+    else if (t == 5) then (queenmoves board i side)
+    else if (t == 6) then (kingmoves board i side)
+    else 0
+
+  :: all pseudo-legal moves [from to] for `side`
+  pseudo = fn [board side] ->
+    (foldl (fn [acc i] ->
+              (if ((colorof (nth board i)) == side)
+                 then (append acc (map (fn [t] -> [ i [ t 0 ] ]) (genmoves board i side)))
+                 else acc))
+           0 (range 64))
+
+  :: every square attacked by `side`
+  attacks = fn [board side] ->
+    (foldl (fn [acc i] ->
+              (if ((colorof (nth board i)) == side)
+                 then (append acc (genmoves board i side))
+                 else acc))
+           0 (range 64))
+
+  findking = fn [board side] -> (indexof board (if (side == 1) then 6 else 12))
+
+  :: apply a move, returning the next state (auto-queen on promotion)
+  apply = fn [board side m] ->
+    let from = (nth m 0) in let to = (nth m 1) in let p = (nth board from) in
+    let promo = (if (and ((ptype p) == 1)
+                         (or (and (side == 1) ((rowof to) == 0)) (and (side == 2) ((rowof to) == 7))))
+                   then (if (side == 1) then 5 else 11) else p) in
+    [ (setnth (setnth board from 0) to promo) [ (other side) 0 ] ]
+
+  kingsafe = fn [board side] ->
+    (if ((member (findking board side) (attacks board (other side))) == 1) then 0 else 1)
+
+  legal = fn [state] ->
+    let board = (nth state 0) in let side = (nth state 1) in
+    (filter (fn [m] -> (kingsafe (nth (apply board side m) 0) side)) (pseudo board side))
+
+  incheck = fn [state] ->
+    let board = (nth state 0) in let side = (nth state 1) in
+    (member (findking board side) (attacks board (other side)))
+
+  :: 0 = ongoing, 1 = checkmate (side to move is mated), 2 = stalemate
+  status = fn [state] ->
+    if ((legal state) == 0) then (if ((incheck state) == 0) then 1 else 2) else 0
+
+  :: capture value (x100) plus a small centralization term
+  :: does a move by `side` leaving this board put the opponent in check?
+  gives_check = fn [board side] -> (member (findking board (other side)) (attacks board side))
+
+  :: capture value (x100) + centralization, with bonuses for giving check / checkmate
+  movescore = fn [board side m] ->
+    let to = (nth m 1) in
+    let base = (add (mul (pval (ptype (nth board to))) 100) (add (mind (rowof to)) (mind (colof to)))) in
+    let ns = (apply board side m) in
+    if ((gives_check (nth ns 0) side) == 0)
+      then (if ((status ns) == 1) then (add base 100000) else (add base 50))
+      else base
+
+  :: the machine's move: greedy by score over the legal moves
+  choose = fn [state] ->
+    let board = (nth state 0) in let side = (nth state 1) in
+    let ms = (legal state) in
+    if (ms == 0) then 0
+    else loop with [c = (tail ms), best = (head ms), bestsc = (movescore board side (head ms))] :
+           if (c == 0) then best
+           else let m = (head c) in let sc = (movescore board side m) in
+             if (gt sc bestsc) then again((tail c), m, sc) else again((tail c), best, bestsc)
+         end
+
+  initial = fn [_] ->
+    [ [ 10 8 9 11 12 9 8 10
+        7 7 7 7 7 7 7 7
+        0 0 0 0 0 0 0 0
+        0 0 0 0 0 0 0 0
+        0 0 0 0 0 0 0 0
+        0 0 0 0 0 0 0 0
+        1 1 1 1 1 1 1 1
+        4 2 3 5 6 3 2 4 0 ]
+      [ 1 0 ] ]
+end

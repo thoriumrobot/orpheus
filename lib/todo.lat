@@ -1,0 +1,23 @@
+:: A Mocha to-do app: state is a list of task cords (0 = empty).
+import std
+import mocha
+core todo
+  poke = fn [action state] ->
+           let tag = head action in
+           let arg = tail action in
+           case tag of
+             %add   -> (ok [ arg state ]) ;
+             %drop  -> (ok (drop state arg)) ;
+             %clear -> (ok 0) ;
+             _      -> (ok state)
+           end
+  peek = fn [query state] ->
+           let tag = head query in
+           let arg = tail query in
+           case tag of
+             %count -> (len state) ;
+             %list  -> state ;
+             %has   -> (member arg state) ;
+             _      -> 0
+           end
+end

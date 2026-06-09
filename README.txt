@@ -1,0 +1,517 @@
+# Orpheus
+
+**Orpheus** is a minimalist functional operating environment built from scratch with no
+external crates. Its layers:
+
+| Component | Name | What it is |
+|-----------|------|------------|
+| System | **Orpheus** | the whole environment |
+| Core VM | **Loom** | a 12-rule axiomatic virtual machine |
+| Datatype | **Knot** | the single universal datatype (atoms + cells) |
+| Language | **Latte** | a functional language with closures, modules & a standard library |
+| Markup | **Facet** | a markup language whose holes call environment tools |
+| Server | **Hymn** | a web server hosting Facet pages (static assets + fonts) |
+| Sound-change applier | **SCArs** | a fully-featured conlang sound-change engine, written in Latte |
+
+It keeps shared state across machines over the Internet (content-addressed event log,
+gossip, no blockchain), persists durably with safe upgrades, accelerates with audited
+jets, and ships a working application: a sound-change applier that a hosted web page
+calls to generate conlang vocabulary on the fly. Every release includes **Ubuntu and
+Windows binaries**.
+
+## Build, test, run
+
+```sh
+cargo build --release          # ./target/release/latte  (zero dependencies)
+cargo test                     # 57 unit tests across all layers
+./lattice eval "(mul 6 7)"     # 42   — standard library is linked automatically
+./lattice evolve serdā nūn     # SCArs: heardō   nū̃
+./lattice serve                # Hymn hosts ./lib/site at 127.0.0.1:8080
+```
+
+## Latte is a fully-featured language
+
+The core is tiny — the only arithmetic primitive Loom provides is `+` (successor). On top
+of that Latte has literals, tags, faces, cells, `head`/`tail`, `==`, `if`, `let`,
+`case`, `loop`/`again`, `core` modules, Lisp-style `(f x)` calls, `fn` closures and
+higher-order functions, `fast` jet hints, and positioned errors. The remaining "fully
+featured" surface comes from two things added in this phase:
+
+**A module / import system.** Several module sources link into one shared namespace; a
+user module can shadow library names. `import std` at the top of a module pulls in the
+standard library; bare `eval` links it automatically.
+
+```
+import std
+core mymath
+  double = fn [n] -> (mul n 2)
+  big    = fn [_] -> (gt (double 30) 50)   :: uses std mul + gt
+end
+```
+
+**A standard library** (`lib/std.lat`), written in Latte itself and built up from `+`:
+
+- arithmetic — `dec add sub mul div mod`
+- comparison & logic — `lt gt lte gte and or not min max`
+- lists (cons cells, `0`-terminated) — `len reverse append nth member range`
+- higher-order — `map filter foldl`
+
+```sh
+./lattice eval "(div 84 2)"          # 42
+./lattice eval "(max 17 42)"         # 42
+./lattice eval "(len [ 1 [ 2 [ 3 0 ] ] ])"   # 3
+```
+
+(Arithmetic on naturals is unary-cost; the hot operations are jettable, like `add`.)
+
+## Molds & auras — a type system on Loom
+
+`import mold` adds a small **type system**, written in Latte itself. A *mold* is a
+noun describing a shape; an *aura* labels an atom for display.
+
+```
+[0 aura]      atom mold (aura = a %term: ud ux ub t tas …)
+[1 [mh mt]]   cell mold        [2 me]   list mold        [3 [ma mb]]   fork mold
+```
+
+Three operations run on Loom over those descriptors:
+
+- `bunt m` — the default value of a mold
+- `nest m n` — does noun `n` fit mold `m`? (loobean)
+- `clam m n` — coerce `n` into mold `m` (total: never crashes; mismatches fall back to bunt)
+
+Auras drive how atoms print: the same atom `255` shows as `255` (`@ud`), `0xff` (`@ux`),
+`0b11111111` (`@ub`), or as text/term for cords (`@t`/`@tas`). The lexer now reads
+`0x…`/`0b…` literals, and `iscell` exposes Loom's cell test.
+
+```sh
+./lattice mold        # a guided tour
+# mold [@ud @ux]:  bunt = [0 0x0]   clam 7 = [0 0x0]   clam [9 250] = [9 0xfa]
+# mold (list @ud):  clam [1 [2 [3 0]]] = ~[1 2 3]
+```
+
+This is a *runtime* mold system (validation, defaults, coercion, aura display), not a
+static type checker — fitting for Loom's untyped noun substrate.
+
+## Static type checking
+
+`latte typecheck <expr>` runs a compile-time companion to the runtime molds. It infers
+a structural type over a small lattice that mirrors nouns — `@` (atom), `[T T]` (cell),
+and `*` (a noun of unknown shape, the top type) — and reports an error only when an
+operation is *provably* misapplied:
+
+```sh
+latte typecheck "[1 [2 3]]"                    # [1 [2 3]] : [@ [@ @]]
+latte typecheck "head [1 2]"                   # head [1 2] : @
+latte typecheck "head 5"                       # type error: `head` of an atom
+latte typecheck "+([1 2])"                     # type error: `+` expects an atom but got a cell
+latte typecheck "let x = 5 in head x"          # type error (the binding is an atom)
+latte typecheck "(add 1 2)"                    # (add 1 2) : *
+```
+
+The checker is sound but conservative: anything it cannot pin down — arm calls, loops,
+closures — becomes `*`, which is compatible with every operation, so a working program is
+never rejected, while argument errors are still caught inside an otherwise-`*` call. This
+is the honest static fragment over Loom's untyped substrate (molds remain the runtime
+enforcement; the checker adds an early, no-false-positive warning layer).
+
+## SCArs is a fully-featured sound-change applier
+
+The matching engine (`lib/sca.lat`) runs on Loom; the host compiles rules down to it.
+Rule syntax is `FROM > TO / PRE _ POST` (tokens are whitespace-separated; omit `/…` for
+no context). Supported:
+
+- **multi-segment** FROM and TO — clusters, endings, **metathesis** (`s p > p s`)
+- **deletion** (empty TO) and **insertion** (empty FROM: `> a / k _ t`)
+- **multi-segment context** on either side, with the word **boundary** `#`
+- **wildcard** `*` — any one segment
+- **multi-character graphemes** via longest-match tokenization
+- **phoneme categories** (named `class`es) and **category correspondence**:
+  `STOPV > STOPVD` maps `p→b, t→d, k→g` by index (`apataka → abadaga`)
+- ordered rule application
+
+```sh
+./lattice sca atta "t t > s t"                 # asta
+./lattice sca aspa "s p > p s"                 # apsa  (metathesis)
+./lattice sca akt " > a / k _ t"               # akat  (epenthesis)
+./lattice sca apataka "class STOPV = p t k" "class STOPVD = b d g" \
+                      "class V = a e i o u" "STOPV > STOPVD / V _ V"   # abadaga
+./sca_demo.sh                                  # full tour
+```
+
+On top of the segmental engine, SCArs adds two **prosodic** passes that need syllable and
+stress structure (so they run as a post-pass): **breaking** (stressed penult `a/e/o` →
+`ao/ea/uo`) and **nasalization** (vowel + lost coda nasal; long vowels take a combining
+tilde). So `zelā→zealō`, `serdā→heardō`, `bendā→mẽdō`, `kamtón→gãtõ`, `nūn→nū̃`.
+
+## The hosted Ligurian page (Hymn + Facet + SCArs + fonts)
+
+`lib/site/index.facet` is served by Hymn at `/`. **No Heart Speech word is written into
+the page** — the title, a 20-word dictionary, a nasal-vowel showcase, and a line of the
+Hymn to Wine are all produced at request time by `SCArs.evolve`. Hymn serves the bundled
+subset **Ligos** font (mark-positioning preserved) over `@font-face`, with correct MIME
+types and exact bytes, so stacked diacritics like `nū̃` and `ō̃` (macron + combining
+tilde) render.
+
+Hymn is a fully-featured HTTP/1.1 server: persistent **keep-alive** connections, header
+parsing, conditional GET (a content **`ETag`** via SHA3 + `If-None-Match` → `304`, plus
+`Last-Modified`/`If-Modified-Since`), byte **`Range`** requests (`206`/`416`,
+`Accept-Ranges`), `Date`/`Last-Modified` headers, `HEAD`, access logging, read timeouts,
+and `400`/`404`/`405` handling. Rendering is pure and deterministic with no shared mutable
+state, so concurrent requests use SCArs safely.
+
+## Distribution — Ubuntu & Windows binaries
+
+Each release ships binaries for **Ubuntu/Linux x86-64** and **Windows x86-64**. Orpheus
+has zero external crates and no platform-specific code, so the same sources build on both.
+
+- `.github/workflows/release.yml` — a two-OS CI matrix (`ubuntu-latest`, `windows-latest`)
+  that builds + tests on every `v*` tag and attaches both archives to the release.
+- `scripts/build-all.sh` — builds the native Linux binary and cross-compiles the Windows
+  binary (rustup target + `mingw-w64`) into `dist/`.
+- `dist/orpheus-linux-x86_64/` — a real, runnable Ubuntu build (binary + `lib/site`),
+  packaged with `SHA256SUMS`.
+
+See `DISTRIBUTION.md`. (The Windows `.exe` is produced by that pipeline; this build
+environment has the mingw cross-linker but cannot fetch the Windows `std`.)
+
+## Connecting machines, persistence, jets
+
+Each node keeps an append-only, content-addressed event log; state is the deterministic
+fold of an agent over the total order `(lamport, node_id, hash)`. Nodes sync by gossip +
+anti-entropy over TCP — convergence without consensus, with late-join catch-up,
+restart-and-rejoin from the durable log, and dead-peer pruning. Upgrading an agent
+re-folds the log instead of corrupting state. **Log compaction/GC** (`--compact-every N`)
+folds the event log into a durable *baseline* (state + watermark) and truncates it, bounding
+disk and memory; a node that has GC'd its log still bootstraps a fresh peer by shipping the
+baseline (a `SNAP` frame), so the peer converges without the archived events. Jets give
+native acceleration that is **audited** against the pure interpreter.
+
+```sh
+./demo.sh ; ./kv_demo.sh ; ./internet_demo.sh ; ./persist_demo.sh ; ./sca_demo.sh
+```
+
+## Mocha — the application environment
+
+Mocha runs higher-level **apps written in Latte** on the same persistent, distributed
+runtime as everything else. An app is a `core` module exposing two arms:
+
+```
+poke = fn [action state] -> [effects state]   :: a state transition
+peek = fn [query  state] -> value             :: a read-only view
+```
+
+Because each poke is a durable, gossiped event, an app inherits persistence,
+strong-eventual-consistency convergence, time-travel, and log compaction for free — the
+Rust host is only a thin shell for command parsing, I/O, and the bridge to SCArs. Three
+apps ship (`lib/todo.lat`, `lib/lexicon.lat`, `lib/forge.lat`), built on the `lib/mocha.lat`
+support library:
+
+```sh
+latte mocha                                   # a guided tour of both apps
+latte mocha --app todo --store /tmp/todo \
+        --poke "add buy milk" --poke "add ship orpheus" --peek count --peek list
+# two machines converging on one app:
+latte mocha --app todo --id 1 --listen HOST:PORT --poke "add from A" --run-secs 6
+latte mocha --app todo --id 2 --listen HOST:PORT --peer A_HOST:A_PORT \
+        --poke "add from B" --peek list          # sees both tasks
+```
+
+The `lexicon` app is a Solar→Heart dictionary whose Heart forms are derived by **SCArs**
+at poke time and then stored and served by the Latte app — e.g. `add ligā` stores
+`ligā → liɣō`. This is the intended shape of the system: primitives in Rust, the
+environment and its tools in Latte.
+
+## The self-hosting environment
+
+`latte repl` is an interactive Latte session. Definitions entered at the prompt
+accumulate into a live `core` that is recompiled and run on Loom, so the environment
+hosts evolving Latte code at runtime — later expressions call arms you defined earlier,
+plus the std / mold / plan libraries. It also fronts the rest of the toolbox.
+
+```
+» double = fn [x] -> (add x x)
+defined double
+» (double 21)
+42
+» (values [400 [300 0]] [ [200 [100 0]] [ [500 [100 0]] 0 ] ] 40)
+[581 [656 0]]
+» :t head [1 2]
+head [1 2] : @
+» :sca ligā
+ligā → liɣō
+```
+
+## Team coding across connected machines
+
+`latte team` is collaborative coding built on the **Forge** Mocha app: a shared,
+append-only log of `[author snippet]` entries. Because each share is a durable, gossiped
+event, every teammate's node converges on the same codebase — across the room or across
+the Internet.
+
+```sh
+latte team --as alice --listen HOST:PORT --share "double = fn [x] -> (add x x)" --run-secs 6
+latte team --as bob   --listen HOST:PORT --peer ALICE_HOST:PORT \
+        --share "square = fn [x] -> (mul x x)" --show     # sees both authors' snippets
+```
+
+## Planning — *Towards a New Socialism*
+
+`latte plan` runs Cockshott & Cottrell's planning calculations, written in Latte
+(`lib/plan.lat`): the iterative computation of **labour values** (`v = l + v·A`, iterated
+to convergence) and of the **gross outputs** needed to meet a final demand
+(`x = y + A·x`). Arithmetic is fixed-point over naturals, accelerated by the std jets.
+
+```
+labour values  (v = l + v·A, iterated):
+  steel  = 0.581 labour-hours per unit
+  grain  = 0.656 labour-hours per unit
+gross outputs to deliver final demand [steel 0.000, grain 1.000]:
+  steel  = 0.745 units of gross output
+  grain  = 1.193 units of gross output
+```
+
+## Numeric libraries — signed numbers, tensors, and machine learning
+
+Latte atoms are naturals, so the numeric stack starts by building **signed fixed-point
+numbers** in Latte: `lib/num.lat` represents a number as a cell `[sign magnitude]` (sign 0
+or 1, magnitude scaled ×1000) with `nadd`/`nsub`/`nmul`/`ndiv`/`nlt`. The arithmetic rides
+the jetted std ops, so it is fast.
+
+On top of that, `lib/tensor.lat` provides **n-dimensional tensors**: a tensor is
+`[shape data]` with a dimension list and row-major elements. It has shape/size/reshape,
+row-major indexing (`tget`), reductions (`tsum`, `tdot`), elementwise maps (`tadd`, `tsub`,
+`thad`, `tscale`), and 2-D matrix multiply (`tmatmul`).
+
+```sh
+latte tensor      # dot product = 32, 2x2 matmul = [19 22 43 50], shapes, indexing
+```
+
+Finally `lib/ml.lat` **trains a model by gradient descent**: linear regression
+`y = w·x + b` fit over the signed-number tensors. `latte ml` fits `y = 2x + 1` from four
+points and recovers `w ≈ 2.01, b ≈ 0.97` (the 3-decimal fixed point sets a floor on how
+close the descent can creep before the `lr·gradient` update underflows).
+
+```sh
+latte ml --iters 5000     # learned w = 2.011, learned b = 0.968
+```
+
+For **data visualization**, `lib/plot.lat` computes chart *layout* in Latte — scaling data
+to pixel geometry — and Hymn serializes it to SVG. Bar, line, and scatter charts are
+available from the CLI, the `/chart` GUI page, or `POST /api/plot`:
+
+```sh
+latte chart bar  3 1 4 1 5 9 2 6  > chart.svg
+latte chart line 1 2 3 5 8 13
+```
+
+A full walkthrough — signed numbers, tensors, drawing charts, and designing/training your
+own model (including the fixed-point precision floor and the stable learning-rate range) —
+is in [`docs/visualization-and-ml.md`](docs/visualization-and-ml.md).
+
+## The GUI — a WYSIWYG Facet editor
+
+`latte gui` serves a browser GUI through Hymn: a **what-you-see-is-what-you-get editor**
+for Facet documents. You type Facet source on the left and see it rendered live on the
+right, because the page POSTs to a small dynamic API that Hymn now exposes:
+
+- `POST /api/render` — render submitted Facet source to HTML (the live preview; errors
+  shown inline)
+- `POST /api/save` / `GET /api/load` — persist and recover the in-memory document
+- `GET /api/files`, `GET`/`POST /api/file?path=NAME.facet` — list, open, and **edit the
+  actual Facet page files** in the site root (path-checked to stay inside the root)
+- `POST /api/run` — the Oberon-style tool runner (below)
+
+The document model is itself a Latte app — `lib/editor.lat`, a Mocha app whose state is
+the document — so a saved document is durable and can sync across machines just like any
+other Mocha app. The browser side is a thin, dependency-free page (`lib/site/editor.html`);
+all rendering runs through Facet on Loom, and all state lives in Latte. The editor opens
+and saves the hosted `*.facet` pages and is fully **Unicode-safe** — Heart Speech glyphs
+like `ɣ`, `ā`, `ē` round-trip through edit, save, and render byte-for-byte.
+
+### Oberon-style System GUI
+
+`/system` is a tiled, text-centric command environment in the spirit of Oberon: a
+*Commander* viewer where you type tool commands, put the caret on one, and **Execute** it
+(Ctrl+Enter); the *Log* viewer accumulates the output. Commands post to `/api/run`:
+
+- `eval <expr>` — run a Latte expression with the std, mold, num, tensor, plan and ml
+  libraries linked, so every numeric tool is reachable (`eval (fit_demo 2000)`,
+  `eval (tdot …)`)
+- `type <expr>` — infer an expression's type
+- `sca <words>` — evolve Solar words into Heart Speech
+
+A *Tools* panel drops starter commands for each tool and links to the Facet editor. The
+stateful/networked tools (the Mocha apps and `team`) run as nodes from the CLI.
+
+```sh
+latte gui --listen 127.0.0.1:8088 --store /tmp/editor    # open http://127.0.0.1:8088/editor
+```
+
+This is the system's GUI: there is no native windowing toolkit (Orpheus is dependency-free
+and the web stack via Hymn is the display layer), so the GUI is delivered in the browser.
+
+## What's implemented vs. the full spec
+
+- Loom: 12 rules, slot/edit/peg, jam/cue, SHA3 CIDs, fuel-bounded crashes, audited jets.
+- Latte: full expression language, `core` modules, `fn` closures + higher-order fns,
+  **module/import linking**, a **standard library** (`lib/std.lat`), a **mold/aura type
+  system** (`lib/mold.lat`: bunt/nest/clam + aura display), and a **static type checker**
+  (`latte typecheck`).
+- SCArs: multi-segment rules, categories + correspondence, contexts, boundaries,
+  wildcard, insertion/deletion, metathesis, graphemes, + prosodic breaking/nasalization.
+- Facet markup + the **fully-featured Hymn HTTP/1.1 server** (keep-alive, ETag/304,
+  Range/206, conditional GET, fonts), hosting `lib/site`.
+- Distributed runtime, persistence, safe upgrades, **log compaction/GC with baseline
+  transfer**, jets; Ubuntu + Windows release pipeline.
+- The **Mocha** application environment: Latte apps (`poke`/`peek`) on the persistent,
+  distributed runtime, with SCArs bridged in (`lib/mocha.lat`; `todo`, `lexicon`, `forge`).
+- A **self-hosting REPL** (`latte repl`), **team coding across machines** (`latte team`,
+  the Forge app), and **planning calculations** from *Towards a New Socialism*
+  (`latte plan`, `lib/plan.lat`) — all higher-level work written in Latte.
+- Native **jets** for the standard library's arithmetic, audited against the pure reduction.
+- A browser **GUI** served by Hymn — a **WYSIWYG Facet editor** with live preview and a
+  durable, syncable document model written in Latte (`lib/editor.lat`, `lib/site/editor.html`).
+- Facet **conditionals** (`{{if}}/{{else}}/{{end}}`) alongside the existing `{{each}}` loops.
+- **Numeric libraries in Latte**: signed fixed-point numbers (`lib/num.lat`),
+  **n-dimensional tensors** (`lib/tensor.lat`), and **gradient-descent ML training**
+  (`lib/ml.lat`) — with `lt`/`dec` added to the jetted ops to keep them fast.
+- The browser GUI now **edits the hosted Facet pages** (Unicode-safe) and adds an
+  **Oberon-style System console** (`/system`, `/api/run`) fronting eval/type/SCArs.
+- **Data visualization** in Latte (`lib/plot.lat`): bar/line/scatter charts to SVG via the
+  CLI, the `/chart` GUI page, or `/api/plot`. The ML library gained a loss function (`mse`).
+- **Starting Orpheus launches the GUI by default** (bare `latte`); the System console at
+  `/` shows how to run every tool. A guide ships in `docs/visualization-and-ml.md`.
+- **Interaction-combinator engine** (`src/icomb.rs`): Lafont's universal system
+  (γ constructor · δ duplicator · ε eraser) with all six interaction rules and a confluent
+  graph reducer — `latte icomb`, or `icomb` in the System console. It now also **compiles and
+  runs programs**: an expression language (literals, `+`, `*`, `<`, and `if`, freely nested)
+  compiles to interaction nets, reduces on the engine, and is **audited against the Loom
+  interpreter**. Addition/multiplication lower to `Add`/`Mul`/`Succ`/`Zero` agents (multiplication
+  duplicates a computed operand with the δ duplicator); comparison (`<`) reduces two Peano chains
+  in lockstep to a Loobean; and `if` bundles its branches into a γ-cell that a selector projects
+  with `Head`/`Tail`, erasing the unused branch with ε — so a computed Loobean drives real control
+  flow, entirely by interaction. `(mul (add 2 3) 2)` reduces to 10 and
+  `if (lt 2 3) then (add 10 5) else (mul 100 100)` to 15, both matching Loom; two 200-formula
+  randomized batteries (nested `+`/`*`, and `+`/`*`/`<`/`if`) are cross-checked against the
+  interpreter, alongside the annihilation, commutation, erasure-cascade, and confluence tests. `latte net "<expr>"` compiles a real Latte expression (its supported fragment) to a net and reduces it, printing the result and the interaction-step count next to the interpreter's answer.
+- **The GUI opens in a window from GNOME.** Started in a desktop session, `latte`/`latte gui`
+  pops a browser window (app-mode if available, else `xdg-open`); a `orpheus.desktop` entry and
+  icon ship for the app grid. `--no-open` disables it; headless use is unaffected.
+- **Adding your own library** is documented in `docs/adding-libraries.md` (with the worked
+  `lib/vec.lat` example); data viz and ML modelling in `docs/visualization-and-ml.md`; building and running on Ubuntu and Windows in `docs/building-and-running.md`.
+- **Adaptive JIT compilation is the default.** Formulas are *interpreted while cold* and
+  compiled to closures only once they get *hot* (re-entered past a threshold), so compilation is
+  the default exactly when it pays for itself — including compile time. A one-shot like
+  `(add 2 3)` is never compiled (≈ interpreter speed); a hot loop (e.g. 3000 gradient-descent
+  steps) compiles after warm-up and beats the interpreter. The tree-walking interpreter remains
+  the reference semantics; the compiler is checked against it by the whole suite and by
+  `latte jit "<expr>"`, which compares interpreter / adaptive / forced-compile and times them.
+- **Libraries can be added at run time** — no recompile. `import` consults a runtime registry
+  first, so a `.lat` library can be loaded from a file (`latte eval --lib NAME=FILE …`), pushed
+  over the network by a connected machine (`POST /api/lib`), or registered programmatically; it
+  can itself import other libraries. **Every library is loaded by default** (`latte::all_libs`),
+  so `eval`, the REPL, and the GUI console have the whole ecosystem in scope with no `import`.
+  Library gathering is cached, so the standard libraries are parsed/compiled once and reused.
+- **Compile a module from the GUI, Oberon-style.** The Compiler page (`/compile`, backed by
+  `POST /api/compile`) takes a `core NAME …` module, compiles it (reporting any errors with
+  line/column), and loads it into the running system; you can then `import` it or call it from
+  the console immediately. `compile_and_register` does the same from Rust.
+- **An optimizing Latte → Rust compiler ("Anvil", `latte rustc`).** Where the JIT compiles Loom
+  formulas to closures at run time, Anvil is an *ahead-of-time* compiler that emits standalone
+  Rust source for a Latte expression and its whole library closure. The emitted program carries a
+  tiny self-contained noun runtime, so it builds with a stock `rustc` and runs natively with no
+  dependency on this crate. It applies constant folding, lowers the arithmetic jets to native
+  `u128` ops, eliminates unreachable arms, turns `let` into Rust `let`, compiles `loop … again`
+  into a real Rust loop, and compiles lambdas to native closures (so `map`/`filter`/`foldl` and
+  the entire chess engine compile straight through). `latte rustc "<expr>"` prints the Rust;
+  `--run` builds and runs it; `-o file.rs` saves it. **Anvil is the default execution engine
+  across the system:** `latte eval`, the `latte cli` prompt, and the **GUI / server console**
+  (`/api/run`) all compile each expression to native code, cache the built binary in a persistent
+  per-user directory keyed by a sha3 of the emitted source (so a program compiled once is reused
+  across runs and reboots — recompilation happens only when the code actually changes; a warm run
+  matches the interpreter's speed), run it,
+  and render the resulting noun in that surface's own style — the compiled program emits a
+  canonical form that each host parses back and prints (so the CLI keeps its `%cord` rendering and
+  the GUI keeps its numeric rendering, both from the same computation). Builds are serialized and
+  cached, so concurrent console requests compile once. `--interp` forces the tree-walking VM, and
+  every surface falls back to it automatically whenever compilation isn't possible (`rustc`
+  unavailable, an unsupported construct, or a runtime domain error), so a result is never silently
+  wrong. (`latte repl` is the separate self-hosting environment for defining and introspecting
+  arms, and stays on the interpreter.) The cache lives under `~/.cache/orpheus/anvil`
+  (`%LOCALAPPDATA%\orpheus\anvil` on Windows; override with `ORPHEUS_CACHE`); `latte cache path`
+  and `latte cache clear` manage it, and `latte eval --rebuild` forces a fresh compile. Verified
+  bug-free by differential testing — the
+  compiled-and-run output matches the interpreter exactly across
+  arithmetic, lists, capturing closures, recursion, signed-number vectors, the full chess engine,
+  and the learned ML evaluator, plus a randomized fuzzer of ~100 arbitrary nested formulas
+  (arithmetic, comparisons, conditionals, lists, multi-capture closures, `let`/`foldl`/`map`),
+  all agreeing with the interpreter on both values and failure modes. (Atoms are `u128` with checked arithmetic — but so is the
+  interpreter, whose arithmetic jets reject larger atoms and crash on overflow/underflow/zero
+  divisors; Anvil reproduces each failure mode on exactly the same inputs, verified by a
+  boundary test covering `u128::MAX`, overflow, underflow, and divide-by-zero. The only
+  theoretical edge — a tag literal over 16 bytes — never arises; the longest tag in the system
+  is 5 bytes.)
+- **A terminal command-line mode** (`latte cli`, also `latte console`). Starts an interactive
+  Orpheus prompt with every library in scope: type a Latte expression to evaluate it, `:type EXPR`
+  to infer a type, `:rust EXPR` to compile-and-run it natively through Anvil, `:libs` to list the
+  loaded libraries, `:help`, and `:q` to quit.
+- **A boardgame tool with machines as players** (`latte game chess`): each player is its own
+  compiled Orpheus core (a "machine"), queried move by move by a game-agnostic match driver. The
+  rules and AI are written entirely in Latte (`lib/chess.lat`) and run on the adaptive VM —
+  legal move generation, king-safety, check/checkmate/stalemate, and a capture/centralization +
+  mate-seeking chooser. Two machines play a full game to a real checkmate. (Castling and en
+  passant are omitted; documented in the file.)
+- **A chess evaluator learned in Latte** (`lib/chessml.lat`): a linear model whose piece-value
+  weights are fit by batch gradient descent in Latte against labelled positions. After a few
+  hundred iterations it recovers sensible values — about `[1, 3, 3, 5, 9]` for P/N/B/R/Q — and
+  drives the machine in **human-vs-machine** play: `latte game chess --human white` lets you type
+  moves (`e2e4`) against the learned model.
+- **Self-hosting the module system at scale.** The arm battery is laid out as a *balanced* tree,
+  so a module's deepest arm has a small axis; modules of any size compile correctly (a previous
+  right-nested layout corrupted addressing past ~64 arms) and arm lookup is shallower/faster.
+- **The planner has a GUI** (`/plan`, `/api/plan`): enter a final demand and iteration depth and
+  get the labour values and gross outputs computed in `lib/plan.lat` on the (now JIT-compiled) VM.
+- - Not yet: extending the interaction-net compiler past its current fragment (literals, `+`,
+  `*`, `<`, and `if` now compile and are verified) to **recursion and user-defined functions**
+  (Loom rule 9), which needs net-level fixpoints, and a lazy `if` (the current one eagerly
+  reduces both branches and erases the unused one); a *native desktop* GUI (the browser GUI
+  in a window stands in); and the most intricate stress/cluster/ending sound changes.
+
+## Files
+
+| File | Role |
+|------|------|
+| `src/loom.rs` `src/knot.rs` `src/atom.rs` `src/sha3.rs` | Loom VM, Knot datatype, bignums, hashing |
+| `src/lattice.rs` | Latte compiler: expressions, modules, closures, **linker/imports** |
+| `lib/std.lat`    | the standard library, written in Latte |
+| `lib/mold.lat` `src/mold.rs` | the mold/aura type system + aura-aware rendering |
+| `src/check.rs`   | the static type checker (`latte typecheck`) |
+| `src/mocha.rs` `lib/mocha.lat` `lib/todo.lat` `lib/lexicon.lat` `lib/forge.lat` | Mocha environment + apps (Latte); Forge = team coding |
+| `src/repl.rs`    | the self-hosting Latte environment (`latte repl`) |
+| `lib/editor.lat` `lib/site/editor.html` | the WYSIWYG Facet editor: Latte document app + web page (Facet-file editing, Unicode) |
+| `lib/site/system.html` | the Oberon-style System console (tiled command viewers) |
+| `src/numerics.rs` `lib/num.lat` `lib/tensor.lat` `lib/ml.lat` | signed numbers, n-d tensors, ML training (Latte) |
+| `src/viz.rs` `lib/plot.lat` `lib/site/chart.html` | data visualization: Latte layout → SVG, + chart GUI |
+| `src/loom.rs` | the VM: 12-rule interpreter **and** the JIT (compile-to-closures, the default) |
+| `src/icomb.rs` `lib/vec.lat` | interaction combinators + arithmetic net compiler; worked vector library |
+| `src/plan.rs` `lib/plan.lat` `lib/site/plan.html` | economic planner (TANS) + its GUI |
+| `src/game.rs` `lib/chess.lat` | boardgame tool (machines as players) + chess rules & AI in Latte |
+| `src/rustgen.rs` | Anvil: the optimizing Latte → Rust compiler (`latte rustc`) |
+| `lib/chessml.lat` | chess evaluator with piece values learned by gradient descent in Latte; human-vs-machine play |
+| `docs/adding-libraries.md` | guide to writing and registering a new Latte library |
+| `dist/orpheus.desktop` `dist/orpheus.svg` | GNOME app-grid launcher + icon (opens the GUI in a window) |
+| `docs/visualization-and-ml.md` | guide to charting and ML model design in Latte |
+| `src/plan.rs` `lib/plan.lat` | planning calculations, *Towards a New Socialism* |
+| `src/jets.rs`    | native arithmetic jets for the standard library |
+| `src/agent.rs`   | counter + key-value agents (in Latte); the `add` jet |
+| `src/sca.rs`     | SCArs host: rule parsing, categories/correspondence, graphemes, prosody |
+| `lib/sca.lat`    | SCArs's multi-segment matching engine, written in Latte |
+| `lib/ligurian.sca`| Solar→Heart change file for the Ligurian conlang |
+| `src/facet.rs`   | Facet markup: parser, evaluator, tool dispatch (`SCArs`, `Txt`) |
+| `src/serve.rs`   | Hymn HTTP/1.1 server: keep-alive, ETag/304, Range/206, fonts |
+| `lib/site/index.facet` `lib/site/fonts/ligos-*.woff2` | the Ligurian page + bundled font |
+| `src/net.rs` `src/store.rs` | distributed runtime + persistence + log compaction/GC |
+| `src/main.rs`    | CLI: cli / node / eval / agent / selftest / bench / sca / evolve / serve / gui / mold / typecheck / mocha / plan / team / repl / tensor / ml / chart / icomb / jit / game / rustc / cache / net |
+| `.github/workflows/release.yml` `scripts/build-all.sh` `DISTRIBUTION.md` `dist/` | binary distribution |
+| `*_demo.sh`      | runnable demos |
