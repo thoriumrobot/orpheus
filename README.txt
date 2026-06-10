@@ -166,6 +166,15 @@ parsing, conditional GET (a content **`ETag`** via SHA3 + `If-None-Match` → `3
 and `400`/`404`/`405` handling. Rendering is pure and deterministic with no shared mutable
 state, so concurrent requests use SCArs safely.
 
+**The live derivation page.** `/derive` derives **both registers in real time**: PIE →
+Solar Speech runs `lib/pie.sca` (the grammar's §II table, stages 0a–9 — laryngeal
+coloring, syllabic resonants, satemization, the labiovelar split, all verified against
+the grammar's own examples: `dʰeh₁s→dēs`, `mr̥to→marto`, `gʷih₃w→bīw`, `sāwel→saul`),
+and Solar → Heart runs `lib/ligurian.sca` plus the prosodic passes. A **vocabulary
+generator** (`lib/lexis.lat`, written in Latte) builds phonotactically valid Solar roots
+from a seeded stream and derives each one's Heart form on the spot. The grammar page now
+links there instead of to an external script.
+
 ## Distribution — Ubuntu & Windows binaries
 
 Each release ships binaries for **Ubuntu/Linux x86-64** and **Windows x86-64**. Orpheus
@@ -351,9 +360,42 @@ latte chart bar  3 1 4 1 5 9 2 6  > chart.svg
 latte chart line 1 2 3 5 8 13
 ```
 
+The market tools run on **real, refreshable data**: `latte fetch` pulls the live Coin
+Metrics BTC/USD series (cached; the embedded press-anchored recent days splice on top),
+`latte ta [--live]` computes five classical indicators **in Latte** (`lib/ta.lat`: SMA,
+EMA, ROC, RSI, MACD, Bollinger %B) with a composite vote, `latte chart market --live`
+charts the series with SMA overlays, and `latte trade [--live] [--news FILE]` fuses the
+TA composite (60%) with Loughran-McDonald **news sentiment** over real dated headlines
+(40%), sized by fractional Kelly × volatility targeting. `lib/nn.lat` now spans the
+modern architectures — sigmoid/softmax/layernorm/conv1d, single-head **self-attention**,
+and seeded **transformer blocks** — all as composable data. Charts embed into GUI-written
+reports as ```` ```chart ```` blocks.
+
 A full walkthrough — signed numbers, tensors, drawing charts, and designing/training your
 own model (including the fixed-point precision floor and the stable learning-rate range) —
 is in [`docs/visualization-and-ml.md`](docs/visualization-and-ml.md).
+
+## The GUI — an Oberon-class system surface
+
+`latte serve` opens the **System** at `/`: tiled, **drag-resizable** text frames in two
+resizable tracks, where any `Module.cmd args` line executes on middle-click (or caret +
+Ctrl/⌘+Enter) — the Oberon text-as-interface model. New in this revision:
+
+- **Embedded dynamic objects.** The Log is a rich text: `gfx (demo 0)` embeds an SVG
+  drawing inline, `chart market days=120` embeds the real price chart, `ta` and `trade`
+  embed live analysis tables — Oberon's "texts with gadgets," over Hymn.
+- **Graphical front ends designed in Latte.** `lib/ui.lat` describes panels (labels,
+  fields, buttons) as ordinary nouns; `ui Tool.calc` opens one as a live viewer whose
+  buttons call the module's own arms with `$field` substitution. Write an arm that
+  returns `(panel …)`, Compile, open it — that is the whole loop for connecting a GUI
+  to code, exactly as in Oberon's Dialogs.
+- **The interaction-net engine in the system**: `net <expr>` runs the general net
+  compiler with an inline interpreter audit.
+- **`/derive`** — live Ligurian: PIE → Solar → Heart by SCArs, plus the vocabulary
+  generator (`lib/lexis.lat`, written in Latte).
+- **`/docs`** — every manual editable in place, **＋ New** creates documents from a
+  quality template, and ```` ```chart ```` fenced blocks render live SVG figures inside
+  reports (line/bar/scatter, multi-series, or the real market chart).
 
 ## The GUI — a WYSIWYG Facet editor
 
@@ -370,6 +412,11 @@ right, because the page POSTs to a small dynamic API that Hymn now exposes:
 - `GET /api/sources`, `GET`/`POST /api/source?name=NAME` — **list, open, and recompile the
   system's own Latte modules** in place (the Oberon edit→compile→run loop on real source)
 - `POST /api/compile` — compile a `core NAME …` module into the running system
+
+The editor is a full editing surface: **find & replace** (Ctrl/⌘+F, replace-one/all with a
+live match count), **Ctrl/⌘+S** saves, a status bar (line:column, character and word counts,
+a modified marker), font-size controls, Tab inserting spaces — and the live preview renders
+markdown including embedded ```` ```chart ```` figures.
 
 The document model is itself a Latte app — `lib/editor.lat`, a Mocha app whose state is
 the document — so a saved document is durable and can sync across machines just like any
@@ -573,13 +620,17 @@ Latte on the Loom.
   right-nested layout corrupted addressing past ~64 arms) and arm lookup is shallower/faster.
 - **The planner has a GUI** (`/plan`, `/api/plan`): enter a final demand and iteration depth and
   get the labour values and gross outputs computed in `lib/plan.lat` on the (now JIT-compiled) VM.
-- - Not yet: **unbounded** general recursion on the interaction-net engine via net-level
-  fixpoints (the net now does `let`, user functions, and *bounded* recursion by unrolling, and a
-  lazy `if` that builds only the taken branch — but a fully dynamic lazy `if` for non-constant
-  conditions still needs interaction-net boxes); bit-for-bit self-hosting of the whole compiler in
-  Latte; and a *native desktop* tiling GUI (the browser GUI in a window stands in). The most
-  intricate stress/cluster sound changes are now expressible — see `lib/breaking.sca` and
-  `latte sca --file`.
+- - DONE since the last revision: the interaction-net engine is complete for the numeric
+  fragment — net-level `sub` and `==` agents, γ-pairs as net data (so user functions of ANY
+  arity and multi-binding `loop`s compile to genuine net-level recursive definitions), a
+  fully dynamic LAZY `if` whose branches are interaction-net boxes (Ref closures: only the
+  taken branch is ever built, even when the condition is computed by the net itself), and
+  dynamic `div`/`mod` as generated recursive nets. Run it with `latte net "<expr>"`,
+  `latte eval --net`, or the `net` verb in the System GUI — every result is audited against
+  the interpreter.
+- - Not yet: bit-for-bit self-hosting of the whole compiler in Latte; and a *native desktop*
+  tiling GUI (the browser GUI in a window stands in). The most intricate stress/cluster sound
+  changes are now expressible — see `lib/breaking.sca` and `latte sca --file`.
 
 ## Files
 

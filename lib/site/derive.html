@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ligurian · Derive · Orpheus</title>
+<style>
+ :root{--bg:#1a1714;--paper:#f6f1e7;--ink:#241d16;--accent:#7a3b1d;--gold:#9a7b34;--rule:#cbbfa6;--dim:#6b5f4c;--code:#efe7d4}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--ink);font-family:Georgia,'Times New Roman',serif;line-height:1.62}
+ header{position:sticky;top:0;z-index:5;background:#120f0c;color:var(--paper);padding:9px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid var(--gold);font-family:ui-monospace,Menlo,monospace;font-size:13px}
+ header b{color:var(--gold);letter-spacing:.5px}
+ header a{color:#d8c79a;text-decoration:none;margin-left:14px}
+ header a:hover{text-decoration:underline}
+ .page{max-width:900px;margin:0 auto;padding:34px 40px 90px;background:var(--paper);box-shadow:0 0 40px #0008;min-height:100vh}
+ h1{font-size:34px;text-align:center;color:var(--accent);margin:.2em 0 .1em;letter-spacing:.5px}
+ .sub{text-align:center;color:var(--dim);margin-top:0}
+ h2{font-size:21px;color:var(--accent);margin-top:32px;border-bottom:1px solid var(--rule);padding-bottom:3px}
+ p.note{color:var(--dim);font-size:14px}
+ textarea{width:100%;height:74px;font:15px Georgia,serif;padding:9px 11px;border:1px solid var(--rule);background:#fffdf6;color:var(--ink);border-radius:3px}
+ .controls{display:flex;gap:10px;align-items:center;margin:10px 0 4px;flex-wrap:wrap}
+ button{font:14px Georgia,serif;border:1px solid var(--gold);background:#ece1c8;color:var(--accent);cursor:pointer;padding:7px 16px;border-radius:3px}
+ button:hover{background:#f6edd8}
+ button.primary{background:var(--accent);color:#f6f1e7;border-color:var(--accent)}
+ button.primary:hover{background:#8d4a26}
+ input.num{font:14px ui-monospace,monospace;width:64px;padding:6px;border:1px solid var(--rule);background:#fffdf6;border-radius:3px}
+ label{color:var(--dim);font-size:14px}
+ table{border-collapse:collapse;margin:14px 0;font-size:16px;width:100%}
+ th,td{border:1px solid var(--rule);padding:6px 12px;text-align:left}
+ th{background:#ece1c8;color:var(--accent);font-size:14px}
+ tr:nth-child(even) td{background:#faf6ec}
+ td.pie{font-style:italic;color:#3a2c1e}
+ td.solar{font-weight:600}
+ td.heart{color:var(--accent);font-weight:600}
+ code{background:var(--code);padding:1px 5px;border-radius:3px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+ .status{color:var(--dim);font-size:13px;font-family:ui-monospace,monospace;min-width:90px}
+ .ex{cursor:pointer;color:var(--accent);text-decoration:underline dotted}
+</style></head>
+<body>
+<header>
+  <span><b>ORPHEUS</b> · live derivation — <i>SCArs</i>, the sound-change engine, in real time</span>
+  <span><a href="/">System</a><a href="/grammar">Grammar</a><a href="/editor">Editor</a><a href="/docs">Docs</a></span>
+</header>
+<div class="page">
+  <h1>Deriving Ligurian</h1>
+  <p class="sub"><em>Sauleis Bazdā</em> (Solar Speech) and <em>Mazdō-yō Heardō̃</em> (Heart Speech), by rule</p>
+
+  <p>Every form on this page is computed <strong>live</strong> by the system's own SCArs engine
+  (its rewriting core runs in Latte on Loom): <strong>PIE → Solar Speech</strong> applies the
+  grammar's §II table (<code>lib/pie.sca</code>, stages 0a–9), and <strong>Solar → Heart
+  Speech</strong> applies the Vulgar-Ligurian changes (<code>lib/ligurian.sca</code>, Phases
+  II–V) plus the stress-conditioned breaking and nasalization passes. Nothing is looked up —
+  type a word and it is derived.</p>
+
+  <h2>Derive words</h2>
+  <p class="note">Enter words separated by spaces, then choose the starting stage. PIE roots may
+  use laryngeals and the usual notation: try
+  <span class="ex" onclick="example('pie')">dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt srew h₂stér sāwel weseti</span>
+  — or Solar words:
+  <span class="ex" onclick="example('solar')">liga nivo mazda saules bazdā serdā tekstā senti pewtā</span></p>
+  <textarea id="words" spellcheck="false">dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt srew h₂stér sāwel weseti</textarea>
+  <div class="controls">
+    <button class="primary" onclick="derive('pie')">PIE → Solar → Heart</button>
+    <button class="primary" onclick="derive('solar')">Solar → Heart</button>
+    <span class="status" id="dstatus"></span>
+  </div>
+  <div id="dout"></div>
+
+  <h2>Generate vocabulary</h2>
+  <p class="note">The generator (<code>lib/lexis.lat</code>, written in Latte) builds
+  phonotactically well-formed Solar Speech roots — §I onsets, nuclei and codas — from a seeded
+  pseudo-random stream, and SCArs immediately derives each word's Heart Speech form. The same
+  seed always gives the same vocabulary.</p>
+  <div class="controls">
+    <label>words</label><input class="num" id="gn" value="12">
+    <label>seed (0 = random)</label><input class="num" id="gseed" value="0">
+    <button class="primary" onclick="gen()">Generate</button>
+    <span class="status" id="gstatus"></span>
+  </div>
+  <div id="gout"></div>
+
+  <p class="note" style="margin-top:30px">The rule files ship with the system as
+  <code>lib/pie.sca</code> and <code>lib/ligurian.sca</code>, and the same derivations run from
+  the command line: <code>latte sca --file lib/pie.sca dʰeh₁s</code>,
+  <code>latte evolve saules</code>. The complete grammar is at <a href="/grammar">/grammar</a>;
+  the sound-change engine's documentation is at <a href="/docs#scars-sound-changes">/docs</a>.</p>
+</div>
+<script>
+"use strict";
+var timer=null;
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function example(kind){
+  document.getElementById('words').value = kind==='pie'
+    ? 'dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt srew h₂stér sāwel weseti'
+    : 'liga nivo mazda saules bazdā serdā tekstā senti pewtā';
+  derive(kind);
+}
+function table(rows, withPie){
+  var h='<table><tr>'+(withPie?'<th>PIE</th>':'')+'<th>Solar Speech</th><th>Heart Speech</th></tr>';
+  rows.forEach(function(r){
+    h+='<tr>'+(withPie?('<td class="pie">*'+esc(r.pie)+'</td>'):'')+
+       '<td class="solar">'+esc(r.solar)+'</td><td class="heart">'+esc(r.heart)+'</td></tr>';
+  });
+  return h+'</table>';
+}
+function derive(mode){
+  var words=document.getElementById('words').value.trim();
+  if(!words){ document.getElementById('dout').innerHTML=''; return; }
+  var st=document.getElementById('dstatus'); st.textContent='deriving…';
+  fetch('/api/derive',{method:'POST',headers:{'Content-Type':'text/plain; charset=utf-8'},
+    body:'mode='+mode+'\n'+words})
+    .then(function(r){return r.json();})
+    .then(function(j){
+      document.getElementById('dout').innerHTML = table(j.rows, mode==='pie');
+      st.textContent = j.rows.length+' word'+(j.rows.length===1?'':'s')+' · derived by SCArs';
+    })
+    .catch(function(e){ st.textContent='error: '+e; });
+  lastMode=mode;
+}
+var lastMode='pie';
+// real-time: re-derive as you type (debounced)
+document.getElementById('words').addEventListener('input', function(){
+  clearTimeout(timer); timer=setTimeout(function(){ derive(lastMode); }, 350);
+});
+function gen(){
+  var n=parseInt(document.getElementById('gn').value)||12;
+  var seed=parseInt(document.getElementById('gseed').value)||0;
+  var st=document.getElementById('gstatus'); st.textContent='generating…';
+  fetch('/api/derive',{method:'POST',headers:{'Content-Type':'text/plain; charset=utf-8'},
+    body:'mode=gen\nn='+n+'\nseed='+seed})
+    .then(function(r){return r.json();})
+    .then(function(j){
+      document.getElementById('gout').innerHTML = table(j.rows, false);
+      st.textContent = j.rows.length+' words · seed '+j.seed;
+      document.getElementById('gseed').value = j.seed;
+    })
+    .catch(function(e){ st.textContent='error: '+e; });
+}
+window.addEventListener('load', function(){ derive('pie'); gen(); });
+</script>
+</body></html>

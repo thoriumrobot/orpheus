@@ -1,0 +1,113 @@
+:: ===========================================================================
+:: pie.sca — Proto-Indo-European -> Solar Speech (Sauleis Bazdā) for SCArs.
+::
+:: This encodes stage 0a-9 of the Ligurian grammar's §II sound-change table
+:: (lib/site/ligurian-grammar.md), so the /derive page can derive Solar Speech
+:: from PIE roots in real time — and chain into ligurian.sca (Solar -> Heart).
+::
+:: Notation: rule parts are SPACE-SEPARATED graphemes; `FROM > TO / PRE _ POST`;
+:: `#` is a word boundary; classes expand host-side. Multi-character graphemes
+:: (h₂, ǵʰ, kʷ, m̥, ā …) are ordinary tokens — the segmenter longest-matches.
+:: Apply with:   latte sca --file lib/pie.sca dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt
+:: ===========================================================================
+
+class V = a e i o u ā ē ī ō ū
+class C = p t k b d g s z m n r l w y bʰ dʰ gʰ ǵʰ ǵ ḱ kʷ gʷ gʷʰ
+
+:: --- stage 0: strip PIE accent marks ---------------------------------------
+é > e
+á > a
+í > i
+ó > o
+ú > u
+ḗ > ē
+ṓ > ō
+
+:: --- 0a: laryngeal coloring -------------------------------------------------
+h₂ e > a
+h₃ e > o
+h₁ e > e
+e h₂ > ā
+e h₃ > ō
+e h₁ > ē
+o h₂ > ā
+o h₃ > ō
+
+:: --- 0b: laryngeal lengthening of i/u ---------------------------------------
+i h₁ > ī
+i h₂ > ī
+i h₃ > ī
+u h₁ > ū
+u h₂ > ū
+u h₃ > ū
+
+:: --- 0c: word-initial laryngeal before a consonant --------------------------
+h₂ > a / # _ C
+h₃ > o / # _ C
+
+:: --- 0d: interconsonantal h₂ -> ā; remaining laryngeals lost ----------------
+h₂ > ā / C _ C
+h₁ >
+h₂ >
+h₃ >
+
+:: --- 1: syllabic resonants ---------------------------------------------------
+m̥ > a m
+n̥ > a n
+r̥ > a r
+l̥ > a l
+
+:: --- 2a: depalatalization before a nasal -------------------------------------
+ḱ > k / _ m
+ḱ > k / _ n
+
+:: --- 2b: satemization (the dominant reflex) ----------------------------------
+ḱ > s
+ǵʰ > z
+ǵ > z
+
+:: --- 3: labiovelar split ------------------------------------------------------
+kʷ > k
+gʷʰ > b / _ ī
+gʷʰ > g
+gʷ > b / _ ī
+gʷ > g
+
+:: --- 4: deaspiration (the rbʰ cluster devoices) -------------------------------
+r bʰ > r p
+bʰ > b
+dʰ > d
+gʰ > g
+
+:: --- 5a: vocalism: o -> a in a non-initial closed syllable --------------------
+o > a / C _ C C
+o > a / V _ C C
+
+:: --- 5b: long-vowel shortening before w ---------------------------------------
+ā > a / _ w
+
+:: --- 5c: diphthong normalization ----------------------------------------------
+e y > e i
+o y > o i
+o w > o u
+a w > a u
+
+:: --- 6: cluster changes --------------------------------------------------------
+s r > s t r
+w r > b r
+d t > s t
+t t > s t
+l n > l l
+d w > d
+d y > z
+t y > s
+
+:: --- 7: intervocalic s-voicing --------------------------------------------------
+s > z / V _ V
+
+:: --- 8: semivowel hardening after a sibilant (V[s,z]_) ---------------------------
+w > b / V s _
+w > b / V z _
+
+:: --- 9: late syncope --------------------------------------------------------------
+u e l > u l

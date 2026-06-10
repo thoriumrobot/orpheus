@@ -8,6 +8,8 @@
 :: Each arm takes a single argument noun (a number, a cell, or a list).
 :: ===========================================================================
 import std
+import ui
+import gfx
 core tool
   :: --- simple numeric commands -------------------------------------------
   square = fn [n] -> (mul n n)
@@ -66,4 +68,26 @@ core tool
 
   :: --- a command that returns text (a cord) -----------------------------
   greet = fn [_] -> %orpheus
+
+  :: --- a graphical front end, as data (open with `ui Tool.calc`) ---------
+  :: A panel is built from ui.lat constructors; the GUI renders it as a live
+  :: viewer whose buttons run the commands below with $n = the field's value.
+  calc = fn [_] ->
+    (panel %Calculator
+      [ (row [ (label %n) [ (field %n %12) 0 ] ])
+      [ (row [ (button %fib    [ %Tool.fib    [ %$n 0 ] ])
+             [ (button %fact   [ %Tool.fact   [ %$n 0 ] ])
+             [ (button %square [ %Tool.square [ %$n 0 ] ])
+             [ (button %primes [ %Tool.primes [ %$n 0 ] ]) 0 ] ] ] ])
+      [ (label %results-appear-in-the-Log)
+      0 ] ] ])
+
+  :: --- a drawing command: a parametric scene for the gfx renderer --------
+  :: `gfx (rings 6)` in the System GUI embeds the SVG in the Log.
+  rings = fn [n] ->
+    loop with [i = 0, acc = 0] :
+      if (gte i n) then (reverse acc)
+      else again(+(i),
+        [ (circle (add 60 (mul i 36)) 70 (add 16 (mul i 6)) (rgb (mul i 40) 80 (sub 200 (mul i 25)))) acc ])
+    end
 end

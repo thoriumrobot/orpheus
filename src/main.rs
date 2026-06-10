@@ -229,6 +229,8 @@ fn main() {
         "nn" => numerics::cmd_nn(&args[1..]),
         "fin" => numerics::cmd_fin(&args[1..]),
         "trade" | "advisor" => numerics::cmd_trade(&args[1..]),
+        "fetch" => numerics::cmd_fetch(),
+        "ta" | "indicators" => numerics::cmd_ta(&args[1..]),
         "sentiment" | "news" => numerics::cmd_sentiment(&args[1..]),
         "gfx" | "draw" => numerics::cmd_gfx(&args[1..]),
         "gpu" | "compute" => numerics::cmd_gpu(&args[1..]),
@@ -502,6 +504,7 @@ fn cmd_eval(args: &[String]) {
     let mut libs: Vec<String> = latte::all_libs();
     let mut rest: Vec<String> = Vec::new();
     let mut force_interp = false;
+    let mut force_net = false;
     let mut force_rebuild = false;
     let mut i = 0;
     while i < args.len() {
@@ -526,6 +529,8 @@ fn cmd_eval(args: &[String]) {
             }
         } else if args[i] == "--interp" || args[i] == "--no-compile" {
             force_interp = true;
+        } else if args[i] == "--net" {
+            force_net = true;
         } else if args[i] == "--rebuild" {
             force_rebuild = true;
         } else {
@@ -535,6 +540,14 @@ fn cmd_eval(args: &[String]) {
     }
     let src = rest.join(" ");
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    // `--net`: evaluate on the interaction-net engine (the numeric fragment), audited.
+    if force_net {
+        match icomb::run_str(&src) {
+            Ok((v, steps)) => println!("{}  ({} interaction steps)", v, steps),
+            Err(e) => eprintln!("net error: {}", e),
+        }
+        return;
+    }
     // The optimizing compiler (Anvil) is the default engine: compile to native Rust, build (with a
     // per-expression binary cache so repeats are instant), and run. Fall back to the interpreter
     // when compilation isn't possible (rustc unavailable, an unsupported construct, or a runtime

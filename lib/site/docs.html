@@ -43,6 +43,7 @@
 <header>
   <span><b>Orpheus · Docs</b> &nbsp;—&nbsp; the system's manuals, served from the running environment</span>
   <span>
+    <button id="newbtn" class="tb" title="Create a new document">＋ New</button>
     <button id="editbtn" class="tb" title="Edit this document in place">✎ Edit</button>
     <button id="savebtn" class="tb" style="display:none">✓ Save</button>
     <button id="cancelbtn" class="tb" style="display:none">✕ Cancel</button>
@@ -89,7 +90,18 @@ function mdToHtml(md){
   }
   while(i<lines.length){
     var ln=lines[i];
-    if(/^```/.test(ln)){ var buf=[]; i++; while(i<lines.length && !/^```/.test(lines[i])){ buf.push(lines[i]); i++; } i++; out.push('<pre><code>'+esc(buf.join('\n'))+'</code></pre>'); continue; }
+    if(/^```/.test(ln)){
+      var info=ln.replace(/^```/,'').trim(); var buf=[]; i++;
+      while(i<lines.length && !/^```/.test(lines[i])){ buf.push(lines[i]); i++; } i++;
+      if(/^chart\b/.test(info)){
+        // an embedded chart: the system renders the block's data to SVG (see Visualization docs)
+        var kind=info.replace(/^chart\s*/,'').trim()||'lines';
+        out.push('<div class="chartblock" data-kind="'+esc(kind)+'" data-body="'+encodeURIComponent(buf.join('\n'))+'">rendering chart…</div>');
+      } else {
+        out.push('<pre><code>'+esc(buf.join('\n'))+'</code></pre>');
+      }
+      continue;
+    }
     if(/^\s*\|.*\|\s*$/.test(ln)){ var t=table(i); if(t){ out.push(t.html); i=t.next; continue; } }
     var h=ln.match(/^(#{1,4})\s+(.*)$/);
     if(h){ var n=h[1].length; out.push('<h'+n+'>'+inline(h[2])+'</h'+n+'>'); i++; continue; }
@@ -114,6 +126,7 @@ function load(name){
     rawmd=md;
     var art=document.getElementById('doc');
     art.innerHTML=mdToHtml(md);
+    hydrateCharts(art);
     art.querySelectorAll('a.doclink').forEach(function(a){
       a.addEventListener('click',function(e){ e.preventDefault(); load(a.getAttribute('href').replace(/\.md$/,'')); window.scrollTo(0,0); main().scrollTop=0; });
     });
@@ -146,12 +159,74 @@ function saveEdit(){
   if(!current) return;
   var text=document.getElementById('ed').value;
   fetch('/api/doc?name='+encodeURIComponent(current),{method:'POST',body:text}).then(function(r){return r.text();}).then(function(msg){
-    if(msg==='saved'){ rawmd=text; document.getElementById('doc').innerHTML=mdToHtml(text); exitEdit(); setStatus('saved ✓'); }
+    if(msg==='saved'){ rawmd=text; var d=document.getElementById('doc'); d.innerHTML=mdToHtml(text); hydrateCharts(d); exitEdit(); setStatus('saved ✓'); refreshNav(); }
     else setStatus('error: '+msg);
   }).catch(function(e){ setStatus('error: '+e); });
 }
 
+// ---- embedded charts: a ```chart fenced block renders through the system's
+// visualization endpoints (lines via /api/plotn; market via /api/marketchart;
+// bar|line|scatter via /api/plot) and the SVG is inlined into the document.
+function hydrateCharts(container){
+  container.querySelectorAll('.chartblock').forEach(function(el){
+    var kind=el.dataset.kind, body=decodeURIComponent(el.dataset.body||'');
+    var url, payload;
+    if(kind==='market'){ url='/api/marketchart'; payload=body; }
+    else if(kind==='bar'||kind==='line'||kind==='scatter'){ url='/api/plot'; payload=kind+' '+body.replace(/\n/g,' '); }
+    else { url='/api/plotn'; payload=body; }
+    fetch(url,{method:'POST',headers:{'Content-Type':'text/plain'},body:payload})
+      .then(function(r){return r.text();})
+      .then(function(svg){ if(/^\s*<svg/.test(svg)){ el.innerHTML=svg; el.style.color=''; } else { el.textContent='chart error: '+svg; } })
+      .catch(function(e){ el.textContent='chart error: '+e; });
+  });
+}
+
+// ---- creating a new document of the same quality, from within the GUI ----
+var NEW_DOC_TEMPLATE =
+'# Title\n\n' +
+'*A one-line summary of what this document covers.*\n\n' +
+'## Overview\n\n' +
+'Write the body in Markdown: **bold**, `code`, [links](latte-language.md), lists, tables and\n' +
+'fenced code blocks all render. Charts embed as fenced blocks and are drawn live by the\n' +
+'system\'s visualization engine:\n\n' +
+'```chart\n' +
+'An embedded chart (title line)\n' +
+'series a | series b\n' +
+'1 3 2 5 4 6\n' +
+'2 2 3 3 4 4\n' +
+'```\n\n' +
+'```chart market\n' +
+'days=120\n' +
+'```\n\n' +
+'## Details\n\n' +
+'| column | meaning |\n' +
+'| ------ | ------- |\n' +
+'| a      | …       |\n';
+function newDoc(){
+  var name=prompt('New document name (letters, digits, - and _ only):','my-notes');
+  if(!name) return;
+  name=name.replace(/\.md$/,'');
+  if(!/^[A-Za-z0-9_-]+$/.test(name)){ setStatus('bad name'); return; }
+  current=name; rawmd=NEW_DOC_TEMPLATE;
+  document.getElementById('doc').innerHTML='<p><i>new document — edit and save to create it</i></p>';
+  enterEdit();
+  setStatus('editing new doc: '+name);
+}
+function refreshNav(){
+  fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
+    var names=t.split('\n').filter(Boolean), nav=document.getElementById('nav');
+    nav.innerHTML='';
+    names.forEach(function(n){
+      var a=document.createElement('a'); a.textContent=title(n); a.dataset.name=n; a.href='#'+n;
+      a.addEventListener('click',function(e){ e.preventDefault(); load(n); });
+      a.classList.toggle('active', n===current);
+      nav.appendChild(a);
+    });
+  });
+}
+
 window.addEventListener('load', function(){
+  document.getElementById('newbtn').addEventListener('click', newDoc);
   document.getElementById('editbtn').addEventListener('click', enterEdit);
   document.getElementById('savebtn').addEventListener('click', saveEdit);
   document.getElementById('cancelbtn').addEventListener('click', exitEdit);

@@ -27,6 +27,11 @@ pub enum Sym {
     Head, // take a γ's first child (1 aux: result), erasing the second
     Tail, // take a γ's second child (1 aux: result), erasing the first
     Pred, // predecessor / dec: faces a number, 1 aux = result
+    Sub,  // monus a∸b          (2 aux: second operand, result)
+    SubB, // helper: S(a')∸b facing b (2 aux: a', result)
+    Eq,   // equality a==b       (2 aux: second operand, result) → Loobean 0/1
+    EqZ,  // helper: 0==b facing b (1 aux: result)
+    EqB,  // helper: S(a')==b facing b (2 aux: a', result)
     Ref(u32), // a reference to a top-level definition (defs[i]); unrolled lazily (HVM-style)
 }
 
@@ -118,6 +123,16 @@ impl Net {
                 | (Pred, Zero) | (Zero, Pred)
                 | (Pred, Succ) | (Succ, Pred)
                 | (Eps, Pred) | (Pred, Eps)
+                | (Sub, Zero) | (Zero, Sub)
+                | (Sub, Succ) | (Succ, Sub)
+                | (SubB, Zero) | (Zero, SubB)
+                | (SubB, Succ) | (Succ, SubB)
+                | (Eq, Zero) | (Zero, Eq)
+                | (Eq, Succ) | (Succ, Eq)
+                | (EqZ, Zero) | (Zero, EqZ)
+                | (EqZ, Succ) | (Succ, EqZ)
+                | (EqB, Zero) | (Zero, EqB)
+                | (EqB, Succ) | (Succ, EqB)
         )
     }
 
@@ -232,6 +247,26 @@ impl Net {
             (Gamma, Head) => self.head_gamma(b, a),
             (Tail, Gamma) => self.tail_gamma(a, b),
             (Gamma, Tail) => self.tail_gamma(b, a),
+            (Sub, Zero) => self.sub_zero(a, b),
+            (Zero, Sub) => self.sub_zero(b, a),
+            (Sub, Succ) => self.sub_succ(a, b),
+            (Succ, Sub) => self.sub_succ(b, a),
+            (SubB, Zero) => self.subb_zero(a, b),
+            (Zero, SubB) => self.subb_zero(b, a),
+            (SubB, Succ) => self.subb_succ(a, b),
+            (Succ, SubB) => self.subb_succ(b, a),
+            (Eq, Zero) => self.eq_zero(a, b),
+            (Zero, Eq) => self.eq_zero(b, a),
+            (Eq, Succ) => self.eq_succ(a, b),
+            (Succ, Eq) => self.eq_succ(b, a),
+            (EqZ, Zero) => self.eqz_zero(a, b),
+            (Zero, EqZ) => self.eqz_zero(b, a),
+            (EqZ, Succ) => self.eqz_succ(a, b),
+            (Succ, EqZ) => self.eqz_succ(b, a),
+            (EqB, Zero) => self.eqb_zero(a, b),
+            (Zero, EqB) => self.eqb_zero(b, a),
+            (EqB, Succ) => self.eqb_succ(a, b),
+            (Succ, EqB) => self.eqb_succ(b, a),
             _ => return false,
         }
         self.steps += 1;
@@ -534,6 +569,112 @@ impl Net {
         self.kill(succ);
     }
 
+    // ---- monus (truncated subtraction), Peano-lockstep like Lt --------------
+    // Sub ⋈ Zero: 0 ∸ b = 0; the second operand is unused, so erase it.
+    fn sub_zero(&mut self, sb: usize, zero: usize) {
+        let b = self.link[sb][1];
+        let r = self.link[sb][2];
+        self.emit_zero(r);
+        self.erase_port(b);
+        self.kill(sb);
+        self.kill(zero);
+    }
+    // Sub ⋈ Succ: S(a') ∸ b → inspect b carrying a' (SubB).
+    fn sub_succ(&mut self, sb: usize, succ: usize) {
+        let ap = self.link[succ][1];
+        let b = self.link[sb][1];
+        let r = self.link[sb][2];
+        let n = self.add(Sym::SubB);
+        self.wire((n, 0), b);
+        self.wire((n, 1), ap);
+        self.wire((n, 2), r);
+        self.kill(sb);
+        self.kill(succ);
+    }
+    // SubB ⋈ Zero: S(a') ∸ 0 = S(a') — rebuild the successor at the result.
+    fn subb_zero(&mut self, sbb: usize, zero: usize) {
+        let ap = self.link[sbb][1];
+        let r = self.link[sbb][2];
+        let s = self.add(Sym::Succ);
+        self.wire((s, 1), ap);
+        self.wire((s, 0), r);
+        self.kill(sbb);
+        self.kill(zero);
+    }
+    // SubB ⋈ Succ: S(a') ∸ S(b') = a' ∸ b' — recurse in lockstep.
+    fn subb_succ(&mut self, sbb: usize, succ: usize) {
+        let bp = self.link[succ][1];
+        let ap = self.link[sbb][1];
+        let r = self.link[sbb][2];
+        let n = self.add(Sym::Sub);
+        self.wire((n, 0), ap);
+        self.wire((n, 1), bp);
+        self.wire((n, 2), r);
+        self.kill(sbb);
+        self.kill(succ);
+    }
+
+    // ---- equality, Peano-lockstep ------------------------------------------
+    // Eq ⋈ Zero: 0 == b → inspect b (EqZ).
+    fn eq_zero(&mut self, eq: usize, zero: usize) {
+        let b = self.link[eq][1];
+        let r = self.link[eq][2];
+        let z = self.add(Sym::EqZ);
+        self.wire((z, 0), b);
+        self.wire((z, 1), r);
+        self.kill(eq);
+        self.kill(zero);
+    }
+    // Eq ⋈ Succ: S(a') == b → inspect b carrying a' (EqB).
+    fn eq_succ(&mut self, eq: usize, succ: usize) {
+        let ap = self.link[succ][1];
+        let b = self.link[eq][1];
+        let r = self.link[eq][2];
+        let n = self.add(Sym::EqB);
+        self.wire((n, 0), b);
+        self.wire((n, 1), ap);
+        self.wire((n, 2), r);
+        self.kill(eq);
+        self.kill(succ);
+    }
+    // EqZ ⋈ Zero: 0 == 0 is true → Loobean 0.
+    fn eqz_zero(&mut self, eqz: usize, zero: usize) {
+        let r = self.link[eqz][1];
+        self.emit_zero(r);
+        self.kill(eqz);
+        self.kill(zero);
+    }
+    // EqZ ⋈ Succ: 0 == S(_) is false → Loobean 1; erase the predecessor.
+    fn eqz_succ(&mut self, eqz: usize, succ: usize) {
+        let p = self.link[succ][1];
+        let r = self.link[eqz][1];
+        self.emit_one(r);
+        self.erase_port(p);
+        self.kill(eqz);
+        self.kill(succ);
+    }
+    // EqB ⋈ Zero: S(_) == 0 is false → Loobean 1; erase a'.
+    fn eqb_zero(&mut self, eqb: usize, zero: usize) {
+        let ap = self.link[eqb][1];
+        let r = self.link[eqb][2];
+        self.emit_one(r);
+        self.erase_port(ap);
+        self.kill(eqb);
+        self.kill(zero);
+    }
+    // EqB ⋈ Succ: S(a') == S(b') = a' == b' — recurse in lockstep.
+    fn eqb_succ(&mut self, eqb: usize, succ: usize) {
+        let bp = self.link[succ][1];
+        let ap = self.link[eqb][1];
+        let r = self.link[eqb][2];
+        let n = self.add(Sym::Eq);
+        self.wire((n, 0), ap);
+        self.wire((n, 1), bp);
+        self.wire((n, 2), r);
+        self.kill(eqb);
+        self.kill(succ);
+    }
+
     /// Register a definition body, returning its index for a `Ref`.
     fn push_def(&mut self, body: R) -> u32 {
         self.defs.push(body);
@@ -617,16 +758,81 @@ impl Net {
                 }
                 cur
             }
+            R::Sub(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                let a = self.add(Sym::Sub);
+                self.wire((a, 0), lp);
+                self.wire((a, 1), rp);
+                (a, 2)
+            }
+            R::Eq(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                let a = self.add(Sym::Eq);
+                self.wire((a, 0), lp);
+                self.wire((a, 1), rp);
+                (a, 2)
+            }
+            R::Pair(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                let g = self.add(Sym::Gamma);
+                self.wire((g, 1), lp);
+                self.wire((g, 2), rp);
+                (g, 0)
+            }
+            R::Fst(x) => {
+                let xp = self.build(x, supply);
+                let h = self.add(Sym::Head);
+                self.wire((h, 0), xp);
+                (h, 1)
+            }
+            R::Snd(x) => {
+                let xp = self.build(x, supply);
+                let t = self.add(Sym::Tail);
+                self.wire((t, 0), xp);
+                (t, 1)
+            }
+            // ParamN(i, k): one δ-copy of the packed argument, projected to component i of k
+            // (a right-nested γ-pair chain: Snd^i, then Fst unless it is the last component).
+            R::ParamN(i, k) => {
+                let mut cur = supply.pop().expect("net recursion: parameter supply underflow");
+                for _ in 0..*i {
+                    let t = self.add(Sym::Tail);
+                    self.wire((t, 0), cur);
+                    cur = (t, 1);
+                }
+                if *k > 1 && i + 1 < *k {
+                    let h = self.add(Sym::Head);
+                    self.wire((h, 0), cur);
+                    cur = (h, 1);
+                }
+                cur
+            }
             R::Rec(a) => {
                 let ap = self.build(a, supply);
                 let rf = self.add(Sym::Ref(0)); // the main function is always defs[0]
                 self.wire((rf, 1), ap);
                 (rf, 0)
             }
+            R::Call(idx, a) => {
+                let ap = self.build(a, supply);
+                let rf = self.add(Sym::Ref(*idx as u32));
+                self.wire((rf, 1), ap);
+                (rf, 0)
+            }
             R::If(c, t, e) => {
                 let cp = self.build(c, supply);
-                let base_arg = supply.pop().expect("net recursion: missing then-branch argument");
-                let rec_arg = supply.pop().expect("net recursion: missing else-branch argument");
+                // each branch closure gets one copy of the (packed) argument; in a
+                // zero-parameter context the closures are closed, so a dummy 0 is
+                // supplied and simply erased when the branch's def has no parameters.
+                let mut dummy = |net: &mut Net| {
+                    let z = net.add(Sym::Zero);
+                    (z, 0)
+                };
+                let base_arg = match supply.pop() { Some(p) => p, None => dummy(self) };
+                let rec_arg = match supply.pop() { Some(p) => p, None => dummy(self) };
                 let base_idx = self.push_def((**t).clone());
                 let rec_idx = self.push_def((**e).clone());
                 let bref = self.add(Sym::Ref(base_idx));
@@ -964,16 +1170,30 @@ fn lower(a: &crate::latte::Ast, env: &mut LowerEnv, fuel: u32) -> Result<Lowered
     }
 }
 
-/// Parse a Latte expression, compile its supported fragment to an interaction net, reduce it, and
-/// return `(value, interaction-steps)`.
+/// Parse a Latte expression, compile its supported fragment to an interaction net, reduce it,
+/// and return `(value, interaction-steps)`.
+///
+/// Three compilers are tried in order:
+///   1. `run_rec` — the classic single-parameter self-recursive function (REF unrolling);
+///   2. `run_general` — the general compiler: lazy boxed `if`, multi-binding loops, user
+///      functions of any arity, dynamic `sub`/`==`/`div`/`mod` (γ-pairs as net data);
+///   3. the simple `Expr` compiler — kept as a final fallback and as the audit oracle.
 pub fn run_str(src: &str) -> Result<(u128, usize), String> {
     // A self-recursive function is evaluated by net-level REF unrolling (genuine fixpoints).
     if let Some(res) = run_rec(src)? {
         return Ok(res);
     }
-    let ast = crate::latte::parse(src)?;
-    let e = latte_to_expr(&ast)?;
-    Ok(eval_net(&e))
+    match run_general(src) {
+        Ok(res) => Ok(res),
+        Err(gerr) => {
+            // the simple path can still serve shapes the general compiler refuses
+            let ast = crate::latte::parse(src)?;
+            match latte_to_expr(&ast) {
+                Ok(e) => Ok(eval_net(&e)),
+                Err(_) => Err(gerr),
+            }
+        }
+    }
 }
 
 /// Build the Peano chain Sⁿ(Z); returns the principal port of the chain head.
@@ -1066,13 +1286,20 @@ pub fn eval_net(e: &Expr) -> (u128, usize) {
 #[derive(Clone)]
 enum R {
     Num(u128),
-    Param,
+    Param,                       // the single parameter (= ParamN(0) over an unpacked argument)
+    ParamN(usize, usize),        // parameter i of k: project Snd^i (then Fst if i < k-1) of the packed γ-pair argument
     Add(Box<R>, Box<R>),
     Mul(Box<R>, Box<R>),
     Lt(Box<R>, Box<R>),
+    Sub(Box<R>, Box<R>),         // monus, on the net's Sub agents
+    Eq(Box<R>, Box<R>),          // equality, on the net's Eq agents → Loobean
     Dec(Box<R>),
     SubK(Box<R>, u128),
-    Rec(Box<R>),
+    Pair(Box<R>, Box<R>),        // a γ-cell: pairs as net data (tuples, packed arguments)
+    Fst(Box<R>),                 // Head ⋈ γ projection
+    Snd(Box<R>),                 // Tail ⋈ γ projection
+    Rec(Box<R>),                 // recursive call of defs[0] (back-compat)
+    Call(usize, Box<R>),         // call defs[i] with one (possibly packed) argument
     If(Box<R>, Box<R>, Box<R>),
 }
 
@@ -1081,9 +1308,11 @@ enum R {
 fn nparams(r: &R) -> usize {
     match r {
         R::Num(_) => 0,
-        R::Param => 1,
-        R::Add(a, b) | R::Mul(a, b) | R::Lt(a, b) => nparams(a) + nparams(b),
-        R::Dec(a) | R::SubK(a, _) | R::Rec(a) => nparams(a),
+        R::Param | R::ParamN(_, _) => 1,
+        R::Add(a, b) | R::Mul(a, b) | R::Lt(a, b) | R::Sub(a, b) | R::Eq(a, b) | R::Pair(a, b) => {
+            nparams(a) + nparams(b)
+        }
+        R::Dec(a) | R::SubK(a, _) | R::Rec(a) | R::Call(_, a) | R::Fst(a) | R::Snd(a) => nparams(a),
         R::If(c, _, _) => nparams(c) + 2,
     }
 }
@@ -1205,6 +1434,283 @@ pub fn run_rec(src: &str) -> Result<Option<(u128, usize)>, String> {
     net.wire((rf, 0), (out, 0));
     let steps = net.normalize_forcing();
     Ok(Some((decode_num(&net, out), steps)))
+}
+
+// ============================================================================
+// The GENERAL net compiler. Where `run_rec` handles the classic single-parameter
+// self-recursive function, this lowers the full numeric fragment of Latte to the
+// net: `let`, user functions of any arity, multi-binding `loop`s, `==`, `sub`,
+// dynamic `div`/`mod`, and a LAZY dynamic `if` for arbitrary (non-constant)
+// conditions. The enabling idea is γ-cells as data: a function's arguments are
+// packed into a right-nested γ-pair chain, parameters project out of δ-copies of
+// the pack with Head/Tail, `loop` lowers to a recursive definition over its
+// bindings, and `div`/`mod` lower to generated recursive definitions built from
+// the net's native Sub/Lt agents. `if` hoists both branches into Ref closures
+// (interaction-net boxes): the selector expands only the taken branch and the
+// other is collected by an eraser without ever being built — so a recursive call
+// in the untaken branch costs nothing, and conditions may be arbitrary subnets.
+// ============================================================================
+
+struct GEnv {
+    defs: Vec<R>,                       // collected definitions (index = the Ref index)
+    funcs: Vec<(String, usize, usize)>, // (name, def index, arity)
+    div_idx: Option<usize>,             // the generated division definition, shared
+    mod_idx: Option<usize>,             // the generated modulo definition, shared
+}
+
+struct GScope {
+    params: Vec<String>,    // the current definition's parameters (a packed γ-chain)
+    lets: Vec<(String, R)>, // let-bound values, inlined (rebuilt) per use
+    loop_idx: Option<usize>, // the innermost loop's definition index, for `again`
+}
+
+/// Constant-fold an R tree (used to take statically-known `if` branches and to
+/// keep constant arithmetic out of the net).
+fn rfold(r: &R) -> Option<u128> {
+    match r {
+        R::Num(n) => Some(*n),
+        R::Add(a, b) => rfold(a)?.checked_add(rfold(b)?),
+        R::Mul(a, b) => rfold(a)?.checked_mul(rfold(b)?),
+        R::Sub(a, b) => Some(rfold(a)?.saturating_sub(rfold(b)?)),
+        R::Lt(a, b) => Some(if rfold(a)? < rfold(b)? { 0 } else { 1 }),
+        R::Eq(a, b) => Some(if rfold(a)? == rfold(b)? { 0 } else { 1 }),
+        R::Dec(a) => Some(rfold(a)?.saturating_sub(1)),
+        R::SubK(a, k) => Some(rfold(a)?.saturating_sub(*k)),
+        R::If(c, t, e) => {
+            if rfold(c)? == 0 { rfold(t) } else { rfold(e) }
+        }
+        _ => None,
+    }
+}
+
+fn pn(i: usize, k: usize) -> R {
+    if k == 1 { R::Param } else { R::ParamN(i, k) }
+}
+
+/// Pack argument values into a right-nested γ-pair chain (1 value packs to itself).
+fn pack(mut args: Vec<R>) -> R {
+    let mut acc = args.pop().expect("pack: at least one argument");
+    while let Some(a) = args.pop() {
+        acc = R::Pair(Box::new(a), Box::new(acc));
+    }
+    acc
+}
+
+fn ensure_div(env: &mut GEnv) -> usize {
+    if let Some(i) = env.div_idx {
+        return i;
+    }
+    let d = env.defs.len();
+    env.defs.push(R::Num(0)); // reserve
+    // f([x q b]) = if x < b then q else f([x∸b, q+1, b])
+    env.defs[d] = R::If(
+        Box::new(R::Lt(Box::new(pn(0, 3)), Box::new(pn(2, 3)))),
+        Box::new(pn(1, 3)),
+        Box::new(R::Call(
+            d,
+            Box::new(pack(vec![
+                R::Sub(Box::new(pn(0, 3)), Box::new(pn(2, 3))),
+                R::Add(Box::new(pn(1, 3)), Box::new(R::Num(1))),
+                pn(2, 3),
+            ])),
+        )),
+    );
+    env.div_idx = Some(d);
+    d
+}
+
+fn ensure_mod(env: &mut GEnv) -> usize {
+    if let Some(i) = env.mod_idx {
+        return i;
+    }
+    let m = env.defs.len();
+    env.defs.push(R::Num(0)); // reserve
+    // f([x b]) = if x < b then x else f([x∸b, b])
+    env.defs[m] = R::If(
+        Box::new(R::Lt(Box::new(pn(0, 2)), Box::new(pn(1, 2)))),
+        Box::new(pn(0, 2)),
+        Box::new(R::Call(
+            m,
+            Box::new(pack(vec![R::Sub(Box::new(pn(0, 2)), Box::new(pn(1, 2))), pn(1, 2)])),
+        )),
+    );
+    env.mod_idx = Some(m);
+    m
+}
+
+fn glower(a: &crate::latte::Ast, env: &mut GEnv, scope: &mut GScope) -> Result<R, String> {
+    use crate::latte::Ast;
+    let k = scope.params.len();
+    match a {
+        Ast::Lit(n) => Ok(R::Num(*n)),
+        Ast::Nil => Ok(R::Num(0)),
+        Ast::Var(x) => {
+            if let Some((_, r)) = scope.lets.iter().rev().find(|(n, _)| n == x) {
+                return Ok(r.clone());
+            }
+            if let Some(i) = scope.params.iter().position(|p| p == x) {
+                return Ok(pn(i, k));
+            }
+            Err(format!(
+                "net: free variable '{}' (a loop/function body on the net may use only its own bindings and constants)",
+                x
+            ))
+        }
+        Ast::Inc(e) => Ok(R::Add(Box::new(glower(e, env, scope)?), Box::new(R::Num(1)))),
+        Ast::Fast(_, b) => glower(b, env, scope),
+        Ast::Eq(x, y) => Ok(R::Eq(Box::new(glower(x, env, scope)?), Box::new(glower(y, env, scope)?))),
+        Ast::If(c, t, e) => {
+            let rc = glower(c, env, scope)?;
+            match rfold(&rc) {
+                Some(0) => glower(t, env, scope),
+                Some(_) => glower(e, env, scope),
+                None => Ok(R::If(
+                    Box::new(rc),
+                    Box::new(glower(t, env, scope)?),
+                    Box::new(glower(e, env, scope)?),
+                )),
+            }
+        }
+        Ast::Let(name, val, body) => match val.as_ref() {
+            Ast::Gate(params, gbody) => {
+                if params.is_empty() {
+                    return Err("net: a function needs at least one parameter".into());
+                }
+                let idx = env.defs.len();
+                env.defs.push(R::Num(0)); // reserve, so recursive calls resolve
+                env.funcs.push((name.clone(), idx, params.len()));
+                let mut inner = GScope { params: params.clone(), lets: Vec::new(), loop_idx: None };
+                let b = glower(gbody, env, &mut inner)?;
+                env.defs[idx] = b;
+                glower(body, env, scope)
+            }
+            _ => {
+                let v = glower(val, env, scope)?;
+                scope.lets.push((name.clone(), v));
+                let r = glower(body, env, scope);
+                scope.lets.pop();
+                r
+            }
+        },
+        Ast::Again(args) => {
+            let idx = scope
+                .loop_idx
+                .ok_or("net: `again` is only allowed inside a `loop`")?;
+            let mut vs = Vec::with_capacity(args.len());
+            for a in args {
+                vs.push(glower(a, env, scope)?);
+            }
+            if vs.len() != k {
+                return Err("net: `again` arity does not match the loop bindings".into());
+            }
+            Ok(R::Call(idx, Box::new(pack(vs))))
+        }
+        Ast::Loop(binds, body) => {
+            if binds.is_empty() {
+                return Err("net: a loop needs at least one binding".into());
+            }
+            let mut inits = Vec::with_capacity(binds.len());
+            for (_, v) in binds {
+                inits.push(glower(v, env, scope)?);
+            }
+            let idx = env.defs.len();
+            env.defs.push(R::Num(0)); // reserve
+            let names: Vec<String> = binds.iter().map(|(n, _)| n.clone()).collect();
+            let mut inner = GScope { params: names, lets: Vec::new(), loop_idx: Some(idx) };
+            let b = glower(body, env, &mut inner)?;
+            env.defs[idx] = b;
+            Ok(R::Call(idx, Box::new(pack(inits))))
+        }
+        Ast::Call(name, args) => {
+            let mut bin = |env: &mut GEnv, scope: &mut GScope, f: fn(Box<R>, Box<R>) -> R| -> Result<R, String> {
+                if args.len() != 2 {
+                    return Err(format!("net: '{}' expects 2 arguments", name));
+                }
+                Ok(f(
+                    Box::new(glower(&args[0], env, scope)?),
+                    Box::new(glower(&args[1], env, scope)?),
+                ))
+            };
+            match name.as_str() {
+                "add" => bin(env, scope, R::Add),
+                "mul" => bin(env, scope, R::Mul),
+                "lt" => bin(env, scope, R::Lt),
+                "sub" => bin(env, scope, R::Sub),
+                "dec" => {
+                    if args.len() != 1 {
+                        return Err("net: 'dec' expects 1 argument".into());
+                    }
+                    Ok(R::Dec(Box::new(glower(&args[0], env, scope)?)))
+                }
+                "div" | "mod" => {
+                    if args.len() != 2 {
+                        return Err(format!("net: '{}' expects 2 arguments", name));
+                    }
+                    let x = glower(&args[0], env, scope)?;
+                    let b = glower(&args[1], env, scope)?;
+                    if let (Some(xv), Some(bv)) = (rfold(&x), rfold(&b)) {
+                        // both constant: fold (and catch division by zero statically)
+                        if bv == 0 {
+                            return Err(format!("net: '{}' by zero", name));
+                        }
+                        return Ok(R::Num(if name == "div" { xv / bv } else { xv % bv }));
+                    }
+                    if rfold(&b) == Some(0) {
+                        return Err(format!("net: '{}' by zero", name));
+                    }
+                    if name == "div" {
+                        let d = ensure_div(env);
+                        Ok(R::Call(d, Box::new(pack(vec![x, R::Num(0), b]))))
+                    } else {
+                        let m = ensure_mod(env);
+                        Ok(R::Call(m, Box::new(pack(vec![x, b]))))
+                    }
+                }
+                other => {
+                    let func = env.funcs.iter().rev().find(|(n, _, _)| n == other).cloned();
+                    match func {
+                        Some((_, idx, arity)) => {
+                            if args.len() != arity {
+                                return Err(format!("net: '{}' expects {} argument(s)", other, arity));
+                            }
+                            let mut vs = Vec::with_capacity(args.len());
+                            for a in args {
+                                vs.push(glower(a, env, scope)?);
+                            }
+                            Ok(R::Call(idx, Box::new(pack(vs))))
+                        }
+                        None => Err(format!("net: unsupported operation '{}'", other)),
+                    }
+                }
+            }
+        }
+        other => Err(format!(
+            "net: unsupported construct {:?} (the net engine computes over naturals)",
+            std::mem::discriminant(other)
+        )),
+    }
+}
+
+/// Compile an arbitrary (numeric-fragment) Latte expression to the net with the
+/// general lowerer and reduce it. Lazy `if`, multi-binding loops, user functions
+/// of any arity, and dynamic `sub`/`==`/`div`/`mod` all run as net interactions.
+pub fn run_general(src: &str) -> Result<(u128, usize), String> {
+    let ast = crate::latte::parse(src)?;
+    let mut env = GEnv { defs: Vec::new(), funcs: Vec::new(), div_idx: None, mod_idx: None };
+    let mut scope = GScope { params: Vec::new(), lets: Vec::new(), loop_idx: None };
+    let main = glower(&ast, &mut env, &mut scope)?;
+    let mut net = Net::new();
+    net.defs = env.defs;
+    let mut supply: Vec<Port> = Vec::new();
+    let rp = net.build(&main, &mut supply);
+    let out = net.free();
+    net.wire(rp, (out, 0));
+    let steps = net.normalize_forcing();
+    let v = decode_num(&net, out);
+    if v == u128::MAX {
+        return Err("net: did not reduce to a number within the step budget".into());
+    }
+    Ok((v, steps))
 }
 
 /// The same expression as Latte source, for cross-checking against the Loom interpreter.
@@ -1683,6 +2189,71 @@ mod tests {
         }
         assert!(super::run_str("(reverse [1 [2 0]])").is_err());
         assert!(super::run_str("(len [1 0])").is_err());
+    }
+
+    #[test]
+    fn net_sub_and_eq_agents() {
+        // the new Peano-lockstep agents, dynamic (not constant-folded) via a function call
+        assert_eq!(super::run_str("let f = fn [n] -> (sub n 4) in (f 10)").unwrap().0, 6);
+        assert_eq!(super::run_str("let f = fn [n] -> (sub n 40) in (f 10)").unwrap().0, 0); // monus
+        assert_eq!(super::run_str("let f = fn [n] -> if (n == 7) then 1 else 0 in (f 7)").unwrap().0, 1);
+        assert_eq!(super::run_str("let f = fn [n] -> if (n == 7) then 1 else 0 in (f 9)").unwrap().0, 0);
+    }
+
+    #[test]
+    fn net_dynamic_div_mod() {
+        // div/mod with a non-constant dividend lower to generated recursive definitions
+        assert_eq!(super::run_str("let f = fn [n] -> (add n 2) in (div (f 15) 5)").unwrap().0, 3);
+        assert_eq!(super::run_str("let f = fn [n] -> (add n 2) in (mod (f 15) 5)").unwrap().0, 2);
+    }
+
+    #[test]
+    fn net_multi_param_and_loops() {
+        // γ-pairs as net data: functions of any arity and multi-binding loops
+        assert_eq!(super::run_str("let f = fn [a b] -> (add (mul a 10) b) in (f 4 2)").unwrap().0, 42);
+        assert_eq!(
+            super::run_str("let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 48 18)").unwrap().0,
+            6
+        );
+        assert_eq!(
+            super::run_str("loop with [a = 0, b = 1, i = 10] : if (i == 0) then a else again(b, (add a b), (dec i)) end").unwrap().0,
+            55
+        );
+    }
+
+    #[test]
+    fn net_lazy_dynamic_if_skips_untaken_branch() {
+        // the condition is computed BY THE NET (a recursive call), and the untaken branch
+        // holds a computation that would cost ~10^10 interactions if built strictly; the
+        // boxed (Ref-closure) `if` must erase it unexpanded.
+        let (v, steps) = super::run_str(
+            "let g = fn [n] -> if (lt n 1) then 0 else (add 1 (g (sub n 1))) in if (lt (g 3) 100) then 42 else (mul 99999 99999)",
+        )
+        .unwrap();
+        assert_eq!(v, 42);
+        assert!(steps < 5_000, "untaken branch must not be reduced (got {} steps)", steps);
+    }
+
+    #[test]
+    fn general_compiler_matches_interpreter() {
+        for src in [
+            "(sub (mul 7 8) (div 100 9))",
+            "let f = fn [x y] -> (sub (mul x x) y) in (f 9 8)",
+            "loop with [q = 0, r = 23] : if (lt r 7) then q else again((add q 1), (sub r 7)) end",
+        ] {
+            let (v, _) = super::run_str(src).expect(src);
+            let loom = crate::latte::run_with_libs(src, &["std"])
+                .ok()
+                .and_then(|n| n.as_atom().and_then(|a| a.to_u128()))
+                .unwrap();
+            assert_eq!(v, loom, "net and interpreter disagree on {}", src);
+        }
+        // let-bound recursion is the net's own capability (the interpreter has no fixpoint
+        // for let-bound gates), so its value is checked directly:
+        assert_eq!(
+            super::run_str("let fib = fn [n] -> if (lt n 2) then n else (add (fib (sub n 1)) (fib (sub n 2))) in (fib 10)").unwrap().0,
+            55
+        );
     }
 
     #[test]

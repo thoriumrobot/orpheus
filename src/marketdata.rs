@@ -1,11 +1,15 @@
 //! Embedded daily BTC/USD (Bitcoin) closing prices, scaled x100 (i.e. cents).
-//! Source: Coin Metrics community data (raw.githubusercontent.com/coinmetrics/data), PriceUSD.
-//! 1300 trading days, 2022-11-01 to 2026-05-23 (multi-regime: 2021 bull,
-//! 2022 bear, 2023-24 recovery) — crypto shows strong momentum and volatility
-//! clustering, the regularities this model exploits (see docs/visualization-and-ml.md).
+//! Source: Coin Metrics community data (raw.githubusercontent.com/coinmetrics/data), PriceUSD,
+//! exact through 2026-05-23; 2026-05-24..2026-06-10 from dated press reports (Fortune,
+//! Yahoo Finance, CNBC, The Block, Investing.com — anchored days exact as reported, the
+//! few unreported days interpolated between adjacent anchors; the final value is the
+//! latest intraday print on 2026-06-10). 1318 trading days, 2022-11-01 to 2026-06-10
+//! (multi-regime) — crypto shows strong momentum and volatility clustering, the
+//! regularities this model exploits (see docs/visualization-and-ml.md).
 //! A value of 6000000 means 60000.00 USD. (Multiply by 10 for x1000 fixed-point.)
+//! `latte fetch` refreshes from the live Coin Metrics file at run time (see below).
 pub const MARKET_NAME: &str = "BTC/USD (Bitcoin)";
-pub const MARKET_SPAN: (&str, &str) = ("2022-11-01", "2026-05-23");
+pub const MARKET_SPAN: (&str, &str) = ("2022-11-01", "2026-06-10");
 pub const MARKET_CLOSE_X100: &[i64] = &[
     2048397, 2014828, 2019811, 2115724, 2128347, 2094680, 2056857, 1852097, 1575829, 1754156,
     1691685, 1677124, 1632050, 1662948, 1685559, 1665961, 1667518, 1666152, 1669600, 1624684,
@@ -137,4 +141,223 @@ pub const MARKET_CLOSE_X100: &[i64] = &[
     7744427, 7762471, 7853877, 7725630, 7629553, 7579501, 7629962, 7813264, 7871254, 7864917,
     7982611, 8093675, 8136462, 7998900, 8017969, 8066363, 8225678, 8171474, 8052556, 7929191,
     8117583, 7906341, 7816450, 7749770, 7697591, 7680746, 7740817, 7759539, 7556754, 7661987,
+    // -- 2026-05-24 .. 2026-06-10: from dated press reports (see module header) --------------
+    7612000, 7575000, 7641000, 7542400, 7346000, 7355000, 7322000, 7331000, 7150000, 6900000,
+    6696500, 6368300, 6204600, 6250000, 6300000, 6330000, 6197400, 6153100,
 ];
+
+/// Real, dated finance headlines about this market (most recent first), embedded so the
+/// sentiment side of the advisor scores genuine news. Each entry: (date, source, headline).
+/// `latte trade --news FILE` (or piping headlines to `latte sentiment`) supplies live text;
+/// these are the bundled recent corpus, gathered 2026-06-10.
+pub const MARKET_NEWS: &[(&str, &str, &str)] = &[
+    ("2026-06-10", "BlockchainReporter", "Bitcoin holds $61K ahead of the CPI report that could decide everything; down about 17 percent over the past week after a record ETF outflow streak"),
+    ("2026-06-10", "Fortune", "Bitcoin priced at $61,531, down $1,108 from where it stood yesterday morning"),
+    ("2026-06-09", "Investing.com", "Bitcoin dips below $62K as ETF outflows continue; Strategy buys the dip"),
+    ("2026-06-09", "Investing.com", "Broader risk assets lower after Trump vowed a U.S. response to the shooting down of an American helicopter by Iran"),
+    ("2026-06-09", "Analytics Insight", "Strategy acquires 1,550 BTC for $101 million as Bitcoin ETF outflows ease to $91 million"),
+    ("2026-06-08", "The Block", "Spot bitcoin ETFs log $1.7 billion in weekly outflows, largest since February 2025; BlackRock's IBIT sheds a record $1.34 billion"),
+    ("2026-06-08", "The Block", "Strong May payrolls report crushed near-term Fed rate-cut odds, making yielding bonds more attractive than non-yielding bitcoin"),
+    ("2026-06-08", "Bitcoin Foundation News", "Crypto Fear and Greed Index falls to 8, extreme fear; analysts call the weekend bounce to $64,000 a classic oversold relief rally"),
+    ("2026-06-05", "Yahoo Finance", "Bitcoin and ethereum prices continue their descent after May's employment report and news that Hezbollah rejected a ceasefire offer"),
+    ("2026-06-04", "CNBC", "Bitcoin is weathering its ugliest week in months as narrative fades and liquidity rotates into AI infrastructure and the SpaceX IPO"),
+    ("2026-06-04", "CNBC", "Bitcoin ETFs register 13th straight day of net outflows, longest streak ever; total assets fall to $82.8 billion from $107.8 billion"),
+    ("2026-05-30", "crypto.news", "Bitcoin ETFs record over $4 billion in total outflows since May 7; Santiment notes extreme outflows often signal peak fear and historically precede price bounces"),
+    ("2026-05-28", "Yahoo Finance", "Bitcoin down this morning and falling further after U.S. military strikes Iranian drones near the Strait of Hormuz"),
+];
+
+// ============================================================================
+// Live market data: `latte fetch` refreshes the daily close series at run time
+// from the Coin Metrics community file (raw.githubusercontent.com). Orpheus is
+// dependency-free, so HTTPS transport shells out to `curl` (the same trust
+// model as Anvil shelling out to `rustc`); without curl or a network the
+// system falls back to the embedded series above, so it always works.
+// ============================================================================
+
+const LIVE_URL: &str = "https://raw.githubusercontent.com/coinmetrics/data/master/csv/btc.csv";
+
+fn cache_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("ORPHEUS_CACHE") {
+        return std::path::PathBuf::from(d).join("market");
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("LOCALAPPDATA"))
+        .unwrap_or_else(|_| ".".into());
+    if cfg!(windows) {
+        std::path::PathBuf::from(home).join("orpheus").join("market")
+    } else {
+        std::path::PathBuf::from(home).join(".cache").join("orpheus").join("market")
+    }
+}
+
+fn cache_file() -> std::path::PathBuf {
+    cache_dir().join("btc-priceusd.csv")
+}
+
+/// Parse the Coin Metrics CSV (header has `time` and `PriceUSD` columns) into
+/// (date, close x100) rows, skipping days with no price.
+fn parse_cm_csv(text: &str) -> Vec<(String, i64)> {
+    let mut lines = text.lines();
+    let header = match lines.next() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    let cols: Vec<&str> = header.split(',').collect();
+    let ti = cols.iter().position(|c| *c == "time");
+    let pi = cols.iter().position(|c| *c == "PriceUSD");
+    let (ti, pi) = match (ti, pi) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in lines {
+        let f: Vec<&str> = line.split(',').collect();
+        if f.len() <= ti.max(pi) {
+            continue;
+        }
+        if let Ok(p) = f[pi].parse::<f64>() {
+            if p > 0.0 {
+                out.push((f[ti].to_string(), (p * 100.0).round() as i64));
+            }
+        }
+    }
+    out
+}
+
+/// Fetch the live series with `curl`, cache it, and return the parsed rows.
+pub fn fetch_live() -> Result<Vec<(String, i64)>, String> {
+    let out = std::process::Command::new("curl")
+        .args(["-sSL", "--max-time", "90", LIVE_URL])
+        .output()
+        .map_err(|e| format!("curl not available ({}) — using the embedded series", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl exited with {} — using the embedded series",
+            out.status
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let rows = parse_cm_csv(&text);
+    if rows.len() < 100 {
+        return Err("live file did not parse (too few rows) — using the embedded series".into());
+    }
+    let _ = std::fs::create_dir_all(cache_dir());
+    let mut keep = String::from("time,PriceUSD\n");
+    for (d, p) in &rows {
+        keep.push_str(&format!("{},{:.2}\n", d, *p as f64 / 100.0));
+    }
+    let _ = std::fs::write(cache_file(), keep);
+    Ok(rows)
+}
+
+/// Read the cached live series, if a previous `latte fetch` stored one.
+pub fn cached_live() -> Option<Vec<(String, i64)>> {
+    let text = std::fs::read_to_string(cache_file()).ok()?;
+    let rows = parse_cm_csv(&text);
+    if rows.len() < 100 {
+        None
+    } else {
+        Some(rows)
+    }
+}
+
+/// The price series the models run on: the freshest real data available.
+/// Order of preference: a `--live` fetch now > the cached fetch > the embedded
+/// series — and if the freshest live/cached series ends *before* the embedded
+/// one (the community file lags), the embedded tail is appended so recent real
+/// closes are never lost. Returns (closes x100, span, provenance note).
+pub fn closes(live: bool) -> (Vec<i64>, (String, String), String) {
+    let fetched: Option<(Vec<(String, i64)>, &str)> = if live {
+        match fetch_live() {
+            Ok(r) => Some((r, "live Coin Metrics fetch")),
+            Err(e) => {
+                eprintln!("  fetch: {}", e);
+                cached_live().map(|r| (r, "cached Coin Metrics fetch"))
+            }
+        }
+    } else {
+        cached_live().map(|r| (r, "cached Coin Metrics fetch"))
+    };
+    match fetched {
+        Some((rows, what)) => {
+            let mut closes: Vec<i64> = rows.iter().map(|(_, p)| *p).collect();
+            let first = rows.first().map(|(d, _)| d.clone()).unwrap_or_default();
+            let mut last = rows.last().map(|(d, _)| d.clone()).unwrap_or_default();
+            let mut note = format!("{} ({} days)", what, closes.len());
+            // splice in the embedded tail when it is fresher than the fetched file
+            if last.as_str() < MARKET_SPAN.1 {
+                let tail_n = embedded_days_after(&last);
+                if tail_n > 0 {
+                    let emb = &MARKET_CLOSE_X100[MARKET_CLOSE_X100.len() - tail_n..];
+                    closes.extend_from_slice(emb);
+                    note.push_str(&format!(" + {} embedded recent days to {}", tail_n, MARKET_SPAN.1));
+                    last = MARKET_SPAN.1.to_string();
+                }
+            }
+            (closes, (first, last), note)
+        }
+        None => (
+            MARKET_CLOSE_X100.to_vec(),
+            (MARKET_SPAN.0.to_string(), MARKET_SPAN.1.to_string()),
+            format!("embedded series ({} days; run `latte fetch` to refresh)", MARKET_CLOSE_X100.len()),
+        ),
+    }
+}
+
+/// How many trailing embedded days fall strictly after date `d` (YYYY-MM-DD)?
+/// The embedded series is daily and ends at MARKET_SPAN.1, so this is a date
+/// difference clamped to the press-report window documented above.
+fn embedded_days_after(d: &str) -> usize {
+    fn ordinal(s: &str) -> Option<i64> {
+        let mut it = s.split('-');
+        let y: i64 = it.next()?.parse().ok()?;
+        let m: i64 = it.next()?.parse().ok()?;
+        let day: i64 = it.next()?.parse().ok()?;
+        // days since epoch, civil-from-days inverse (Howard Hinnant's algorithm)
+        let y2 = if m <= 2 { y - 1 } else { y };
+        let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+        let yoe = y2 - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        Some(era * 146097 + doe - 719468)
+    }
+    match (ordinal(d), ordinal(MARKET_SPAN.1)) {
+        (Some(a), Some(b)) if b > a => ((b - a) as usize).min(MARKET_CLOSE_X100.len()),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_series_is_well_formed() {
+        assert_eq!(MARKET_CLOSE_X100.len(), 1318);
+        assert!(MARKET_CLOSE_X100.iter().all(|&p| p > 100_000), "all closes are real prices");
+        // the documented anchors from the press reports
+        let n = MARKET_CLOSE_X100.len();
+        assert_eq!(MARKET_CLOSE_X100[n - 1], 6153100); // 2026-06-10 (Fortune)
+        assert_eq!(MARKET_CLOSE_X100[n - 7], 6368300); // 2026-06-04 (Fortune)
+    }
+
+    #[test]
+    fn cm_csv_parses() {
+        let rows = parse_cm_csv("time,x,PriceUSD\n2026-01-01,0,50000.5\n2026-01-02,0,\n2026-01-03,0,51000\n");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("2026-01-01".into(), 5000050));
+    }
+
+    #[test]
+    fn news_corpus_is_recent_and_dated() {
+        assert!(MARKET_NEWS.len() >= 10);
+        assert!(MARKET_NEWS.iter().all(|(d, s, h)| d.starts_with("2026-") && !s.is_empty() && h.len() > 20));
+    }
+
+    #[test]
+    fn date_tail_arithmetic() {
+        assert_eq!(embedded_days_after("2026-06-10"), 0);
+        assert_eq!(embedded_days_after("2026-06-09"), 1);
+        assert_eq!(embedded_days_after("2026-05-24"), 17);
+    }
+}

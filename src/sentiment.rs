@@ -22,6 +22,10 @@ const POSITIVE: &[&str] = &[
     "rallied", "rebound", "rebounded", "recover", "recovered", "recovery", "record", "strength",
     "strong", "stronger", "strongest", "success", "successful", "surge", "surged", "upbeat",
     "upgrade", "upgraded", "win", "winner", "winning", "higher", "rise", "rises", "rising", "rose",
+    // market-flow extensions (not in LM, but unambiguous in market headlines)
+    "inflow", "inflows", "buy", "buys", "buying", "bought", "accumulate", "accumulating",
+    "bounce", "bounced", "soar", "soared", "soars", "climb", "climbed", "climbs", "jump",
+    "jumped", "jumps", "bull", "bullish", "relief",
 ];
 
 /// A representative subset of the Loughran-McDonald NEGATIVE word list.
@@ -35,6 +39,10 @@ const NEGATIVE: &[&str] = &[
     "shortfall", "slump", "slumped", "sink", "sank", "slowdown", "struggle", "struggled", "tension",
     "tensions", "turmoil", "uncertainty", "uncertain", "volatile", "volatility", "weak", "weaker",
     "weakness", "worse", "worst", "worry", "worried", "worries",
+    // market-flow extensions (not in LM, but unambiguous in market headlines)
+    "down", "outflow", "outflows", "dump", "dumped", "dip", "dips", "dipped", "tumble",
+    "tumbled", "tumbling", "rout", "bleed", "bleeding", "slid", "slide", "slides", "slump",
+    "crushed", "descent", "ugliest", "war", "strikes", "shorting", "redemptions",
 ];
 
 fn tokenize(text: &str) -> Vec<String> {

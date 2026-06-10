@@ -36,15 +36,54 @@ core nn
   :: ---- a dense (fully-connected) layer ------------------------------------
   dense = fn [W b x] -> (vadd (matvec W x) b)
 
+  :: ---- the newer activations and normalizations ---------------------------
+  :: fixed-point exp: e^x ~ (1 + x/16)^16 by four squarings, with x clamped to
+  :: [-6, 6] so the approximation stays in range. Good enough for softmax,
+  :: whose inputs are first shifted so the maximum is 0.
+  nexp = fn [x] ->
+    let cx = (nmax (nnegate (nint 6)) (nmin (nint 6) x)) in
+    let y  = (nadd [0 1000] (ndiv cx (nint 16))) in
+    let y2 = (nmul y y) in let y4 = (nmul y2 y2) in let y8 = (nmul y4 y4) in
+    (nmul y8 y8)
+  vsigmoid = fn [v] -> (map (fn [vi] -> (nsigmoid vi)) v)
+  :: softmax: shift by the max (so exp's argument is <= 0), exponentiate, normalize
+  vmax2 = fn [v] -> (foldl (fn [a vi] -> (nmax a vi)) (head v) (tail v))
+  softmax = fn [v] ->
+    let m  = (vmax2 v) in
+    let es = (map (fn [vi] -> (nexp (nsub vi m))) v) in
+    let z  = (nsum es) in
+    if (nlt z [0 1]) then (map (fn [_] -> (ndiv [0 1000] (nint (len v)))) v)
+    else (map (fn [e] -> (ndiv e z)) es)
+  :: layer normalization: (x - mean) / std  (no learned gain/bias)
+  nstd2 = fn [v] -> let m = (nmean v) in (nsqrt (nmean (map (fn [vi] -> let d = (nsub vi m) in (nmul d d)) v)))
+  layernorm = fn [v] ->
+    let m = (nmean v) in
+    let s = (nstd2 v) in
+    if (nlt s [0 1]) then (map (fn [vi] -> (nsub vi m)) v)
+    else (map (fn [vi] -> (ndiv (nsub vi m) s)) v)
+  :: 1-d convolution over a vector signal: kernel K (a vector), bias b; stride 1,
+  :: valid padding — output length is len(x) - len(K) + 1.
+  conv1d = fn [K b x] ->
+    let k = (len K) in
+    loop with [c = x, acc = 0] :
+      if (lt (len c) k) then (reverse acc)
+      else again((tail c), [ (nadd (ndot K (take k c)) b) acc ])
+    end
+
   :: ---- composable layers: a network is a LIST of layers -------------------
-  :: layer forms:  [%dense [W b]]   [%relu 0]   [%tanh 0]   [%res sublayers]
+  :: layer forms:  [%dense [W b]]  [%relu 0]  [%tanh 0]  [%sigmoid 0]
+  ::               [%softmax 0]  [%layernorm 0]  [%conv1d [K b]]  [%res sublayers]
   layer_fwd = fn [L x] ->
     case (head L) of
-      %dense -> let p = (tail L) in (dense (head p) (head (tail p)) x) ;
-      %relu  -> (vrelu x) ;
-      %tanh  -> (vtanh x) ;
-      %res   -> (vadd (net_fwd (tail L) x) x) ;
-      _      -> x
+      %dense   -> let p = (tail L) in (dense (head p) (head (tail p)) x) ;
+      %relu    -> (vrelu x) ;
+      %tanh    -> (vtanh x) ;
+      %sigmoid -> (vsigmoid x) ;
+      %softmax -> (softmax x) ;
+      %layernorm -> (layernorm x) ;
+      %conv1d  -> let p = (tail L) in (conv1d (head p) (head (tail p)) x) ;
+      %res     -> (vadd (net_fwd (tail L) x) x) ;
+      _        -> x
     end
   :: forward pass over a whole network (any architecture, ResNet-style included)
   net_fwd = fn [layers x] -> (foldl (fn [acc L] -> (layer_fwd L acc)) x layers)
@@ -93,6 +132,80 @@ core nn
                 again((tail px), (tail py), (nadd acc (ndot e e)))
             end in
     (ndiv s (npos (mul (len xs) 1000)))
+
+  :: ---- SEQUENCE layers: attention and the transformer block ----------------
+  :: A sequence is a list of vectors (one per position). Layer forms:
+  ::   [%attn [Wq [Wk [Wv 0]]]]   single-head scaled dot-product self-attention
+  ::   [%seqdense [W b]]          a position-wise dense layer
+  ::   [%lnorm 0]                 layer normalization at every position
+  ::   [%seqres sublayers]        residual: seq_fwd(sub, xs) + xs, per position
+  ::   [%pool 0]                  mean over positions (sequence -> one vector)
+  :: A TRANSFORMER block is then ordinary data:
+  ::   [ [%seqres [ [%attn [Wq [Wk [Wv 0]]]] 0 ]] [ [%lnorm 0]
+  ::   [ [%seqres [ [%seqdense [W b]] 0 ]]        [ [%lnorm 0] 0 ] ] ] ]
+  attn = fn [Wq Wk Wv xs] ->
+    let qs = (map (fn [x] -> (matvec Wq x)) xs) in
+    let ks = (map (fn [x] -> (matvec Wk x)) xs) in
+    let vs = (map (fn [x] -> (matvec Wv x)) xs) in
+    let d  = (nsqrt (nint (len (head qs)))) in
+    (map (fn [q] ->
+       let scores = (map (fn [kk] -> (ndiv (ndot q kk) d)) ks) in
+       let w = (softmax scores) in
+       loop with [ws = w, vv = vs, acc = 0] :
+         if (ws == 0) then acc
+         else let term = (vscale (head ws) (head vv)) in
+           again((tail ws), (tail vv), if (acc == 0) then term else (vadd acc term))
+       end) qs)
+  seq_layer = fn [L xs] ->
+    case (head L) of
+      %attn     -> let p = (tail L) in (attn (head p) (head (tail p)) (head (tail (tail p))) xs) ;
+      %seqdense -> let p = (tail L) in (map (fn [x] -> (dense (head p) (head (tail p)) x)) xs) ;
+      %lnorm    -> (map (fn [x] -> (layernorm x)) xs) ;
+      %seqres   -> let ys = (seq_fwd (tail L) xs) in
+                   loop with [a = ys, b = xs, acc = 0] :
+                     if (a == 0) then (reverse acc) else again((tail a), (tail b), [ (vadd (head a) (head b)) acc ])
+                   end ;
+      %pool     -> [ (vmean xs) 0 ] ;
+      _         -> xs
+    end
+  seq_fwd = fn [layers xs] -> (foldl (fn [acc L] -> (seq_layer L acc)) xs layers)
+  vmean = fn [xs] ->
+    let s = loop with [c = xs, acc = 0] :
+              if (c == 0) then acc
+              else again((tail c), if (acc == 0) then (head c) else (vadd acc (head c)))
+            end in
+    (vscale (ndiv [0 1000] (nint (len xs))) s)
+  :: run a sequence net that ends in %pool and read off the single vector
+  seq_run = fn [layers xs] -> (head (seq_fwd layers xs))
+
+  :: ---- a seeded builder: architectures from a spec, weights from an LCG ----
+  :: rand: a linear congruential generator over naturals; randn maps it into a
+  :: small signed weight in (-scale, +scale). randmat builds rows x cols of them.
+  lcg = fn [seed] -> (mod (add (mul seed 1103515245) 12345) 2147483648)
+  randn = fn [seed scale] ->
+    let r = (mod seed 2001) in                       :: 0..2000
+    [ (if (lt r 1001) then 0 else 1) (div (mul (mod r 1000) scale) 1000) ]
+  randmat = fn [seed rows cols scale] ->
+    loop with [i = 0, sd = seed, acc = 0] :
+      if (i == rows) then (reverse acc)
+      else
+        let row = loop with [j = 0, sd2 = sd, racc = 0] :
+                    if (j == cols) then [ (reverse racc) sd2 ]
+                    else again(+(j), (lcg sd2), [ (randn sd2 scale) racc ])
+                  end in
+        again(+(i), (lcg (tail row)), [ (head row) acc ])
+    end
+  :: a ready-made transformer block over model width d, seeded
+  block = fn [seed d] ->
+    let Wq = (randmat seed d d 400) in
+    let Wk = (randmat (add seed 7) d d 400) in
+    let Wv = (randmat (add seed 13) d d 400) in
+    let W  = (randmat (add seed 23) d d 400) in
+    let b  = (map (fn [_] -> [0 0]) (range d)) in
+    [ [%seqres [ [%attn [ Wq [ Wk [ Wv 0 ] ] ]] 0 ]]
+    [ [%lnorm 0]
+    [ [%seqres [ [%seqdense [ W [ b 0 ] ]] 0 ]]
+    [ [%lnorm 0] 0 ] ] ] ]
 
   :: ---- demo: learn y = |x|, which needs a nonlinearity (two ReLU units) ----
   :: starts away from the solution; loss should fall sharply over the epochs.

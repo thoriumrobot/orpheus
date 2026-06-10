@@ -1,0 +1,69 @@
+:: ===========================================================================
+:: lexis.lat — a phonotactic vocabulary generator for Solar Speech, in Latte.
+::
+:: Generates well-formed Solar Speech roots per the Ligurian grammar (§I):
+::   consonants  p t k · b d g · s z · m n · r l · w y
+::   vowels      a e i o u · ā ē ī ō ū      diphthongs  ai ei oi au eu ou
+::   onsets      C · stop+liquid · s+stop · s+stop+liquid · z+stop · sw · sn
+::   codas       -s -n -r -l -m -k · open
+::
+:: A word comes back as a LIST OF CORDS (one per grapheme cluster); the host
+:: joins them, skipping the %_ marker (an empty coda). The randomness is a
+:: seeded LCG, so generation is reproducible: (genword 12345) is always the
+:: same word. Used live by the /derive page, which then runs each word through
+:: SCArs (ligurian.sca) to derive its Heart Speech form.
+:: ===========================================================================
+import std
+core lexis
+  lcg2 = fn [s] -> (mod (add (mul s 1103515245) 12345) 2147483648)
+  pick = fn [xs r] -> (nth xs (mod (div r 64) (len xs)))
+
+  :: word-initial onsets (the full §I inventory, single consonants weighted up)
+  onsets = fn [_] ->
+    [ %p [ %t [ %k [ %b [ %d [ %g [ %s [ %z [ %m [ %n [ %r [ %l [ %w [ %y
+    [ %p [ %t [ %k [ %b [ %d [ %s [ %m [ %n [ %r [ %l
+    [ %pr [ %tr [ %kr [ %br [ %dr [ %gr [ %pl [ %kl [ %bl [ %gl
+    [ %sp [ %st [ %sk [ %spr [ %str [ %skl [ %zd [ %zb [ %sw [ %sn
+    0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+
+  :: word-internal onsets (simple consonants only)
+  midonsets = fn [_] ->
+    [ %p [ %t [ %k [ %b [ %d [ %g [ %s [ %z [ %m [ %n [ %r [ %l [ %w [ %y 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+
+  :: nuclei: short vowels weighted up; long vowels and diphthongs rarer
+  nuclei = fn [_] ->
+    [ %a [ %e [ %i [ %o [ %u [ %a [ %e [ %i [ %o [ %u [ %a [ %e
+    [ %ā [ %ē [ %ī [ %ō [ %ū
+    [ %ai [ %ei [ %oi [ %au [ %eu [ %ou
+    0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+
+  :: final codas: -s -n -r -l -m -k, or open (the %_ marker means "nothing")
+  codas = fn [_] ->
+    [ %s [ %n [ %r [ %l [ %m [ %k [ %_ [ %_ [ %_ [ %s [ %n [ %_ 0 ] ] ] ] ] ] ] ] ] ] ] ]
+
+  :: occasional internal coda (mostly open)
+  midcodas = fn [_] ->
+    [ %_ [ %_ [ %_ [ %_ [ %_ [ %n [ %r [ %s [ %_ [ %_ 0 ] ] ] ] ] ] ] ] ] ]
+
+  :: a whole word from a seed: 1-3 syllables of onset+nucleus(+coda)
+  genword = fn [seed] ->
+    let s0 = (lcg2 (add seed 1)) in
+    let nsyl = (add 1 (mod (div s0 1024) 3)) in
+    loop with [i = 0, s = (lcg2 s0), acc = 0] :
+      if (i == nsyl) then (reverse acc)
+      else
+        let ons = if (i == 0) then (pick (onsets 0) s) else (pick (midonsets 0) s) in
+        let s2 = (lcg2 s) in
+        let nuc = (pick (nuclei 0) s2) in
+        let s3 = (lcg2 s2) in
+        let cod = if (+(i) == nsyl) then (pick (codas 0) s3) else (pick (midcodas 0) s3) in
+        again(+(i), (lcg2 s3), [ cod [ nuc [ ons acc ] ] ])
+    end
+
+  :: n words from a base seed, as a list of word-lists
+  genwords = fn [seed n] ->
+    loop with [i = 0, acc = 0] :
+      if (i == n) then (reverse acc)
+      else again(+(i), [ (genword (add seed (mul i 7919))) acc ])
+    end
+end

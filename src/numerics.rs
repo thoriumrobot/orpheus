@@ -247,9 +247,29 @@ pub fn cmd_nn(args: &[String]) {
         Ok(_) => println!("\n  loss curve written to {}  (open in a browser)", out),
         Err(e) => println!("\n  (could not write {}: {})", out, e),
     }
-    println!("\n  Composable layers (lib/nn.lat): build deeper nets as a list of layers —");
-    println!("  %dense / %relu / %tanh / %res (residual skip). `net_fwd` folds the forward");
-    println!("  pass, so ResNet-style blocks (`resblock`) are ordinary data.");
+    // ---- the newer architectures: a seeded transformer block, forward on Loom ----
+    println!("\n  -- architectures beyond the MLP (all composable data in lib/nn.lat) --");
+    let seq_demo = "(seq_run (append (block 7 4) [ [%pool 0] 0 ]) \
+        [ [ [0 1000] [ [1 500] [ [0 200] [ [0 0] 0 ] ] ] ] \
+        [ [ [0 300] [ [0 800] [ [1 100] [ [0 400] 0 ] ] ] ] \
+        [ [ [1 200] [ [0 100] [ [0 900] [ [1 600] 0 ] ] ] ] 0 ] ] ])";
+    match run(seq_demo, &libs) {
+        Ok(v) => {
+            let outv: Vec<String> = to_list(&v).iter().map(show_signed).collect();
+            println!("  transformer block (d=4, seeded): single-head self-ATTENTION + residual +");
+            println!("  LAYERNORM + position-wise dense + residual + layernorm, mean-POOLED over a");
+            println!("  3-token sequence  ->  [{}]", outv.join("  "));
+        }
+        Err(e) => println!("  (transformer demo unavailable: {})", e),
+    }
+    println!("\n  Composable layers (lib/nn.lat): a network is a LIST of layers —");
+    println!("  vectors:   %dense %relu %tanh %sigmoid %softmax %layernorm %conv1d %res");
+    println!("  sequences: %attn (scaled dot-product) %seqdense %lnorm %seqres %pool");
+    println!("  `net_fwd`/`seq_fwd` fold the forward pass; `block seed d` builds a seeded");
+    println!("  transformer block; `randmat` gives reproducible inits — architectures are");
+    println!("  ordinary data, so any composition (ResNets, transformers, conv stacks) is");
+    println!("  yours to assemble. Training: the MLP comes with full backprop; the other");
+    println!("  layers are forward-only in this release.");
 }
 
 /// `latte fin gold` — a practical financial-ML pipeline on real gold/USD data.
@@ -719,6 +739,22 @@ pub fn cmd_gpu(args: &[String]) {
 // positive. This is a research demonstration, NOT financial advice.
 // ===========================================================================
 
+/// One technical-analysis indicator's verdict (computed by lib/ta.lat on Loom).
+pub struct TaRow {
+    pub name: String, // %trend %mom %rsi %macd %boll
+    pub vote: i32,    // +1 bullish, 0 neutral, -1 bearish
+    pub value: f64,   // the indicator's value (% for trend/mom/macd; RSI in 0-100; %B in 0-1000)
+}
+
+/// One scored news headline (sentiment computed by lib/sentiment.lat on Loom).
+pub struct NewsRow {
+    pub date: String,
+    pub source: String,
+    pub headline: String,
+    pub polarity: f64, // Loughran-McDonald polarity in [-1,1]
+    pub weight: f64,   // recency weight (half-life 3 days)
+}
+
 pub struct TradeAdvice {
     pub market: &'static str,
     pub last_price: f64,
@@ -735,14 +771,129 @@ pub struct TradeAdvice {
     pub dollars: f64,        // recommended notional
     pub account: f64,
     pub action: String,
-    pub sentiment: Option<f64>,
+    pub sentiment: Option<f64>,    // the aggregate news sentiment actually used
+    // --- the combined-signal evidence ---
+    pub ta_rows: Vec<TaRow>,       // per-indicator verdicts (lib/ta.lat)
+    pub ta_score: i32,             // sum of votes, in [-5, +5]
+    pub ta_signal: f64,            // score/5 in [-1, 1]
+    pub news: Vec<NewsRow>,        // the scored headlines
+    pub news_sentiment: f64,       // recency-weighted aggregate polarity
+    pub combined: f64,             // 0.6*ta_signal + 0.4*news_sentiment
+    pub data_note: String,         // where the price series came from
+    pub span: (String, String),    // first/last date of the series
 }
 
-/// Compute a trade recommendation from the embedded market data and the fin model.
-/// `kelly_mult` is the fractional-Kelly multiplier (e.g. 0.25). `sentiment` is an optional
-/// exogenous score in [-1,1] (e.g. from `latte sentiment` on news) that nudges the lean.
-pub fn trade_advice(account: f64, kelly_mult: f64, sentiment: Option<f64>) -> Result<TradeAdvice, String> {
-    let closes: Vec<f64> = crate::marketdata::MARKET_CLOSE_X100.iter().map(|&c| c as f64 / 100.0).collect();
+/// Decode a num.lat signed fixed-point cell to f64.
+fn sf_to_f64(n: &crate::knot::N) -> f64 {
+    use crate::knot::Knot;
+    if let Knot::Cell(h, t) = &**n {
+        let sign = h.as_atom().and_then(|a| a.to_u128()).unwrap_or(0);
+        let mag = t.as_atom().and_then(|a| a.to_u128()).unwrap_or(0) as f64 / 1000.0;
+        if sign == 0 { mag } else { -mag }
+    } else { 0.0 }
+}
+
+/// Run lib/ta.lat's composite `votes` over the last `win` closes (computed on Loom),
+/// decoding the verdict rows. `closes_x100` are prices in cents.
+pub fn ta_votes(closes_x100: &[i64], win: usize) -> Result<(Vec<TaRow>, i32), String> {
+    use crate::knot::Knot;
+    let n = closes_x100.len();
+    let w = &closes_x100[n.saturating_sub(win)..];
+    // a chronological Latte list of fixed-point prices (cents x10 = x1000 fixed point)
+    let mut lit = String::from("0");
+    for p in w.iter().rev() {
+        lit = format!("[ [0 {}] {} ]", (*p as u128) * 10, lit);
+    }
+    let out = crate::latte::run_with_libs(&format!("(votes {})", lit), &["std", "num", "ta"])?;
+    let mut rows = Vec::new();
+    let mut score = 0i32;
+    let mut cur = out;
+    while let Knot::Cell(row, rest) = &*cur.clone() {
+        if let Knot::Cell(tag, vt) = &**row {
+            if let Knot::Cell(vote, vl) = &**vt {
+                if let Knot::Cell(value, _) = &**vl {
+                    let name = tag.as_atom().and_then(|a| a.as_cord()).unwrap_or_default();
+                    let v = sf_to_f64(vote).round() as i32;
+                    rows.push(TaRow { name, vote: v, value: sf_to_f64(value) });
+                    score += v;
+                }
+            }
+        }
+        cur = rest.clone();
+    }
+    if rows.len() != 5 {
+        return Err(format!("ta votes decoded {} rows (expected 5)", rows.len()));
+    }
+    Ok((rows, score))
+}
+
+/// Score a set of dated headlines with the Loughran-McDonald scorer (polarity arithmetic
+/// in lib/sentiment.lat) and aggregate with a 3-day-half-life recency weight relative to
+/// the newest item. Returns (rows, aggregate in [-1,1]).
+pub fn score_news(items: &[(String, String, String)]) -> (Vec<NewsRow>, f64) {
+    fn ord(d: &str) -> i64 {
+        let mut it = d.split('-');
+        let (y, m, day) = (
+            it.next().and_then(|x| x.parse::<i64>().ok()).unwrap_or(0),
+            it.next().and_then(|x| x.parse::<i64>().ok()).unwrap_or(1),
+            it.next().and_then(|x| x.parse::<i64>().ok()).unwrap_or(1),
+        );
+        y * 372 + m * 31 + day // monotone in date; only differences matter
+    }
+    let newest = items.iter().map(|(d, _, _)| ord(d)).max().unwrap_or(0);
+    let mut rows = Vec::new();
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (d, src, h) in items {
+        let pol = crate::sentiment::polarity(h);
+        let age = (newest - ord(d)).max(0) as f64;
+        let wgt = 0.5f64.powf(age / 3.0);
+        num += wgt * pol;
+        den += wgt;
+        rows.push(NewsRow { date: d.clone(), source: src.clone(), headline: h.clone(), polarity: pol, weight: wgt });
+    }
+    (rows, if den > 0.0 { num / den } else { 0.0 })
+}
+
+/// Parse a user-supplied news file: one headline per line, optionally prefixed
+/// "YYYY-MM-DD<TAB>Source<TAB>" (missing fields default to today/"user").
+pub fn parse_news_file(text: &str) -> Vec<(String, String, String)> {
+    let today = crate::marketdata::MARKET_SPAN.1.to_string();
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let parts: Vec<&str> = l.splitn(3, '\t').collect();
+            match parts.len() {
+                3 => (parts[0].trim().to_string(), parts[1].trim().to_string(), parts[2].trim().to_string()),
+                2 => (parts[0].trim().to_string(), "user".into(), parts[1].trim().to_string()),
+                _ => (today.clone(), "user".into(), l.trim().to_string()),
+            }
+        })
+        .collect()
+}
+
+/// The volatility model's test accuracy, trained once per process (it is the same
+/// data and configuration every time, so retraining per call was pure waste).
+fn vol_model_acc() -> f64 {
+    static ACC: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *ACC.get_or_init(|| market_eval_cfg(60, 1, true).map(|r| r.test).unwrap_or(0.0))
+}
+
+/// Compute a trade recommendation by fusing TECHNICAL ANALYSIS (lib/ta.lat: five
+/// classical indicators voting on Loom) with NEWS SENTIMENT (lib/sentiment.lat:
+/// Loughran-McDonald scores over real recent headlines, recency-weighted), sized by
+/// fractional Kelly + volatility targeting against the volatility model's regime call.
+/// `kelly_mult` is the fractional-Kelly multiplier (e.g. 0.25). `sentiment_override`
+/// replaces the aggregated news score. `live` refreshes the price series first;
+/// `news_text` (a `--news` file) replaces the bundled headline corpus.
+pub fn trade_advice(
+    account: f64,
+    kelly_mult: f64,
+    sentiment_override: Option<f64>,
+    live: bool,
+    news_text: Option<&str>,
+) -> Result<TradeAdvice, String> {
+    let (closes_x100, span, data_note) = crate::marketdata::closes(live);
+    let closes: Vec<f64> = closes_x100.iter().map(|&c| c as f64 / 100.0).collect();
     let n = closes.len();
     if n < 30 {
         return Err("not enough data".into());
@@ -777,27 +928,51 @@ pub fn trade_advice(account: f64, kelly_mult: f64, sentiment: Option<f64>) -> Re
         }
     }
     let dir_hitrate = if tot > 0 { hits as f64 / tot as f64 } else { 0.5 };
-    // model (volatility) accuracy for reporting reliability
-    let model_acc = market_eval_cfg(60, 1, true).map(|r| r.test).unwrap_or(0.0);
-    // directional edge -> Kelly (payoff ratio ~1 for daily symmetric moves): f = 2W - 1
-    let mut w = dir_hitrate;
-    if let Some(s) = sentiment {
-        w += 0.03 * s; // small nudge from news sentiment, bounded by |s|<=1
-    }
-    let kelly_full = (2.0 * w - 1.0).max(-1.0).min(1.0);
+    // model (volatility) accuracy for reporting reliability (trained once per process)
+    let model_acc = vol_model_acc();
+
+    // --- TECHNICAL ANALYSIS: lib/ta.lat's five indicators vote, on Loom ----------
+    let (ta_rows, ta_score) = ta_votes(&closes_x100, 120)?;
+    let ta_signal = ta_score as f64 / 5.0;
+
+    // --- NEWS SENTIMENT: Loughran-McDonald over real recent headlines ------------
+    let items: Vec<(String, String, String)> = match news_text {
+        Some(t) => parse_news_file(t),
+        None => crate::marketdata::MARKET_NEWS
+            .iter()
+            .map(|(d, s, h)| (d.to_string(), s.to_string(), h.to_string()))
+            .collect(),
+    };
+    let (news, news_sentiment) = score_news(&items);
+    let used_sentiment = sentiment_override.unwrap_or(news_sentiment);
+
+    // --- the COMBINED lean: TA carries 60%, news 40% ------------------------------
+    let combined = 0.6 * ta_signal + 0.4 * used_sentiment;
+    let long = combined > 0.1;
+    let bearish = combined < -0.1;
+
+    // directional confidence -> Kelly (payoff ratio ~1 for daily symmetric moves):
+    // the measured momentum hit rate is the base; it counts fully only when the
+    // momentum lean AGREES with the combined signal, and news nudges it slightly.
+    let mom_agrees = (mom > 0.0) == (combined > 0.0);
+    let edge = dir_hitrate - 0.5;
+    let mut w = 0.5 + if mom_agrees { edge } else { edge * 0.5 };
+    w += 0.03 * used_sentiment;
+    let kelly_full = (2.0 * w - 1.0).clamp(-1.0, 1.0);
     let kelly_used = (kelly_mult * kelly_full).max(0.0); // never go short in this demo
     // volatility targeting: shrink size when realized/predicted vol is high
     let fc_vol = if vol_regime == "high" { realized_vol * 1.3 } else { realized_vol };
     let vol_scale = if fc_vol > 1e-9 { (target_vol / fc_vol).min(2.0) } else { 0.0 };
-    let long = mom > 0.0;
     let positive_edge = kelly_full > 0.0;
     let exposure = if long && positive_edge {
         (kelly_used * vol_scale).min(2.0)
     } else {
         0.0
     };
-    let action = if !long {
-        "FLAT — momentum is down; stand aside".to_string()
+    let action = if bearish {
+        format!("FLAT — combined signal is bearish ({:+.2}: TA {:+.1}, news {:+.2}); no shorting in this demo, stand aside", combined, ta_signal, used_sentiment)
+    } else if !long {
+        format!("FLAT — combined signal is neutral ({:+.2}); no edge worth trading", combined)
     } else if !positive_edge {
         "FLAT — directional edge is not positive (Kelly <= 0); do not trade".to_string()
     } else {
@@ -807,7 +982,7 @@ pub fn trade_advice(account: f64, kelly_mult: f64, sentiment: Option<f64>) -> Re
         market: crate::marketdata::MARKET_NAME,
         last_price: last,
         mom,
-        direction: if long { "up" } else { "down" },
+        direction: if combined > 0.0 { "up" } else { "down" },
         realized_vol,
         target_vol,
         vol_regime: if vol_regime == "high" { "high" } else { "low" },
@@ -819,53 +994,154 @@ pub fn trade_advice(account: f64, kelly_mult: f64, sentiment: Option<f64>) -> Re
         dollars: account * exposure,
         account,
         action,
-        sentiment,
+        sentiment: Some(used_sentiment),
+        ta_rows,
+        ta_score,
+        ta_signal,
+        news,
+        news_sentiment,
+        combined,
+        data_note,
+        span,
     })
 }
 
-/// `latte trade` — automatic trading advisor: calls the best model and recommends
-/// whether and how much to trade.
+/// `latte trade` — automatic trading advisor: technical analysis + news sentiment
+/// + the volatility model, with Kelly/vol-target position sizing.
 pub fn cmd_trade(args: &[String]) {
     let mut account = 10_000.0f64;
     let mut kelly = 0.25f64;
     let mut sentiment: Option<f64> = None;
+    let mut live = false;
+    let mut news_text: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--account" | "--capital" if i + 1 < args.len() => { account = args[i + 1].parse().unwrap_or(account); i += 1; }
             "--kelly" if i + 1 < args.len() => { kelly = args[i + 1].parse().unwrap_or(kelly); i += 1; }
             "--sentiment" if i + 1 < args.len() => { sentiment = args[i + 1].parse().ok(); i += 1; }
+            "--live" | "--fetch" => live = true,
+            "--news" if i + 1 < args.len() => {
+                match std::fs::read_to_string(&args[i + 1]) {
+                    Ok(t) => news_text = Some(t),
+                    Err(e) => eprintln!("  --news {}: {} (using the bundled corpus)", args[i + 1], e),
+                }
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
     }
-    println!("trade - automatic trading advisor (calls the best fin model)\n");
-    match trade_advice(account, kelly, sentiment) {
+    println!("trade - advisor: technical analysis + news sentiment + the volatility model\n");
+    match trade_advice(account, kelly, sentiment, live, news_text.as_deref()) {
         Ok(a) => {
             println!("  market            : {}   last close ${:.0}", a.market, a.last_price);
-            println!("  momentum (P/MA10) : {:+.2}%  -> lean {}", a.mom, a.direction);
-            println!("  realized vol/day  : {:.2}%   target {:.2}%   predicted regime: {}-vol", a.realized_vol, a.target_vol, a.vol_regime);
-            if let Some(s) = a.sentiment {
-                println!("  news sentiment    : {:+.2}  (exogenous nudge to the lean)", s);
+            println!("  data              : {}  ({} .. {})", a.data_note, a.span.0, a.span.1);
+            println!("  -- technical analysis (lib/ta.lat, computed on Loom) --");
+            for r in &a.ta_rows {
+                let v = match r.vote { 1 => "+1 bullish", -1 => "-1 bearish", _ => " 0 neutral" };
+                let what = match r.name.as_str() {
+                    "trend" => format!("price vs SMA50      {:+8.2}%", r.value),
+                    "mom"   => format!("10-day momentum     {:+8.2}%", r.value),
+                    "rsi"   => format!("RSI(14)             {:8.1}", r.value),
+                    "macd"  => format!("MACD(12,26,9) hist  {:+8.3}%", r.value),
+                    "boll"  => format!("Bollinger %B(20,2)  {:8.0}", r.value),
+                    _ => format!("{} {:.3}", r.name, r.value),
+                };
+                println!("    {}   -> {}", what, v);
             }
+            println!("    composite TA score: {:+}  (of -5..+5)  ->  signal {:+.2}", a.ta_score, a.ta_signal);
+            println!("  -- news sentiment (Loughran-McDonald, lib/sentiment.lat) --");
+            for r in a.news.iter().take(6) {
+                println!("    {} [{:+.2}] {} — {}", r.date, r.polarity, r.source, truncate(&r.headline, 76));
+            }
+            if a.news.len() > 6 {
+                println!("    … and {} more headlines", a.news.len() - 6);
+            }
+            println!("    recency-weighted sentiment: {:+.2}{}", a.news_sentiment,
+                if a.sentiment != Some(a.news_sentiment) { "  (overridden by --sentiment)" } else { "" });
+            println!("  -- the combined signal --------------------");
+            println!("  combined lean     : {:+.2}   (= 0.6*TA {:+.2} + 0.4*news {:+.2}) -> {}",
+                a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction);
+            println!("  realized vol/day  : {:.2}%   target {:.2}%   predicted regime: {}-vol", a.realized_vol, a.target_vol, a.vol_regime);
             println!("  -- model reliability ----------------------");
             println!("  momentum hit rate : {:.1}%  (out-of-sample)", a.dir_hitrate);
             println!("  volatility model  : {:.1}%  test accuracy (the dependable edge)", a.model_acc);
             println!("  -- position sizing ------------------------");
             println!("  full Kelly        : {:+.3}", a.kelly_full);
             println!("  fractional Kelly  : {:.3}", a.kelly_used);
-            println!("  vol-target scale  : x{:.2}", if a.realized_vol > 0.0 { (a.target_vol / (if a.vol_regime=="high" {a.realized_vol*1.3} else {a.realized_vol})).min(2.0) } else { 0.0 });
             println!("\n  >> ADVICE: {}", a.action);
             if a.exposure > 0.0 {
                 println!("            notional ~ ${:.0} of a ${:.0} account", a.dollars, a.account);
             }
-            println!("\n  Rationale: the model's dependable edge is VOLATILITY, so sizing (risk control)");
-            println!("  is the main lever; direction is a low-confidence momentum lean. When the");
-            println!("  directional edge is not positive, the tool advises standing aside rather than");
-            println!("  forcing a trade. This is a research demo, NOT financial advice; markets are");
-            println!("  risky and past performance does not predict future results.");
+            println!("\n  Rationale: five classical indicators vote in Latte (ta.lat) and real, dated");
+            println!("  headlines are scored in Latte (sentiment.lat); the leans are fused 60/40 and");
+            println!("  position size is risk-controlled by the volatility model (the dependable edge)");
+            println!("  with fractional Kelly. `--live` refreshes prices from Coin Metrics; `--news F`");
+            println!("  supplies today's headlines. Research demo, NOT financial advice.");
         }
         Err(e) => println!("  error: {}", e),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
+}
+
+/// `latte ta` — standalone technical analysis on the freshest real data
+/// (`--live` fetches Coin Metrics now; otherwise cached fetch > embedded series).
+pub fn cmd_ta(args: &[String]) {
+    let mut live = false;
+    let mut win = 120usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--live" | "--fetch" => live = true,
+            "--win" | "--window" if i + 1 < args.len() => { win = args[i + 1].parse().unwrap_or(win); i += 1; }
+            _ => {}
+        }
+        i += 1;
+    }
+    let (closes, span, note) = crate::marketdata::closes(live);
+    println!("ta - technical analysis (lib/ta.lat, computed on Loom)\n");
+    println!("  market : {}   last close ${:.2}", crate::marketdata::MARKET_NAME, *closes.last().unwrap_or(&0) as f64 / 100.0);
+    println!("  data   : {}  ({} .. {})", note, span.0, span.1);
+    println!("  window : last {} trading days\n", win);
+    match ta_votes(&closes, win) {
+        Ok((rows, score)) => {
+            for r in &rows {
+                let v = match r.vote { 1 => "+1 bullish", -1 => "-1 bearish", _ => " 0 neutral" };
+                let what = match r.name.as_str() {
+                    "trend" => format!("price vs SMA50      {:+8.2}%", r.value),
+                    "mom"   => format!("10-day momentum     {:+8.2}%", r.value),
+                    "rsi"   => format!("RSI(14)             {:8.1}", r.value),
+                    "macd"  => format!("MACD(12,26,9) hist  {:+8.3}%", r.value),
+                    "boll"  => format!("Bollinger %B(20,2)  {:8.0}", r.value),
+                    _ => format!("{} {:.3}", r.name, r.value),
+                };
+                println!("    {}   -> {}", what, v);
+            }
+            let lean = if score > 0 { "bullish" } else if score < 0 { "bearish" } else { "neutral" };
+            println!("\n    composite TA score: {:+}  (of -5..+5)  ->  {}", score, lean);
+            println!("\n  Every indicator is computed by lib/ta.lat over signed fixed-point on Loom.");
+            println!("  Feed it to the advisor with `latte trade` (where it carries 60% of the lean).");
+        }
+        Err(e) => println!("  error: {}", e),
+    }
+}
+
+/// `latte fetch` — refresh the market data from the live Coin Metrics file (via curl),
+/// caching it for `trade`/`fin` to use; falls back to the embedded series gracefully.
+pub fn cmd_fetch() {
+    println!("fetch - refresh BTC/USD daily closes from Coin Metrics (community data)\n");
+    match crate::marketdata::fetch_live() {
+        Ok(rows) => {
+            let (f, l) = (rows.first().unwrap(), rows.last().unwrap());
+            println!("  fetched {} daily closes: {} .. {}  (last ${:.2})", rows.len(), f.0, l.0, l.1 as f64 / 100.0);
+            println!("  cached for `latte trade` / `latte fin`. The embedded series still covers");
+            println!("  the freshest press-reported days past the community file's lag.");
+        }
+        Err(e) => println!("  {}", e),
     }
 }
 

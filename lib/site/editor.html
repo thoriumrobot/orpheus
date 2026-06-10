@@ -17,9 +17,25 @@
  button:hover { background:#4a51a0; }
  .muted { color:#8a8ab0; font-size:12px; }
  #status { color:#7fd1a8; font-size:12px; min-width:60px; }
+ #findbar { display:none; gap:8px; align-items:center; padding:6px 16px; background:#101226; border-bottom:1px solid #2a2d50; }
+ #findbar input { background:#0b0c1a; color:#cfe8ff; border:1px solid #2a2d50; border-radius:6px; padding:5px 8px; font:13px ui-monospace,monospace; width:200px; }
+ #findbar button { padding:5px 10px; }
+ #findbar .hits { color:#8a8ab0; font-size:12px; min-width:80px; }
+ #statusbar { display:flex; gap:18px; padding:4px 16px; background:#101226; border-top:1px solid #2a2d50; color:#8a8ab0; font-size:12px; }
+ #statusbar .dirty { color:#e0b050; }
+ .fontbtn { background:#23264a; padding:4px 9px; }
 </style></head>
 <body>
-<header><h1>Latte · Facet WYSIWYG — edit on the left, see it rendered live on the right</h1></header>
+<header><h1>Latte · Facet WYSIWYG — edit on the left, see it rendered live on the right &nbsp; <span style="color:#8a8ab0;font-weight:400;font-size:12px">Ctrl/⌘+S save · Ctrl/⌘+F find · Esc close</span></h1></header>
+<div id="findbar">
+  <input id="findq" placeholder="find…" spellcheck="false">
+  <button onclick="findNext()">Next</button>
+  <input id="replq" placeholder="replace with…" spellcheck="false">
+  <button onclick="replaceOne()">Replace</button>
+  <button onclick="replaceAll()">Replace all</button>
+  <span class="hits" id="findhits"></span>
+  <button onclick="closeFind()">✕</button>
+</div>
 <div class="wrap">
   <div class="pane"><div class="lbl">Facet source</div><textarea id="src" spellcheck="false"></textarea></div>
   <div class="pane"><div class="lbl">rendered (Hymn → Facet → Loom)</div><div id="preview"></div></div>
@@ -35,6 +51,16 @@
   <button onclick="load()">Quick-load</button>
   <span id="status"></span>
   <span class="muted">edits render live; Save persists through the Latte <code>editor</code> app (durable &amp; syncable)</span>
+  <span style="flex:1"></span>
+  <button class="fontbtn" onclick="fontSize(1)" title="larger text">A+</button>
+  <button class="fontbtn" onclick="fontSize(-1)" title="smaller text">A−</button>
+</div>
+<div id="statusbar">
+  <span id="pos">ln 1, col 1</span>
+  <span id="count">0 chars · 0 words</span>
+  <span id="dirty"></span>
+  <span style="flex:1"></span>
+  <span id="fname"></span>
 </div>
 <script>
 var src = document.getElementById('src');
@@ -46,11 +72,22 @@ var timer;
 // minimal Markdown -> HTML for the live preview (headings, bold/italic/code, lists, rules)
 function mdToHtml(t){
   var esc = function(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
-  var lines = t.split('\n'), out = [], inList = false, inCode = false;
+  var lines = t.split('\n'), out = [], inList = false, inCode = false, chart = null;
   for (var i=0;i<lines.length;i++){
     var l = lines[i];
-    if (l.trim().indexOf('```') === 0){ inCode=!inCode; out.push(inCode?'<pre><code>':'</code></pre>'); continue; }
-    if (inCode){ out.push(esc(l)); continue; }
+    if (l.trim().indexOf('```') === 0){
+      if (!inCode){
+        var info = l.trim().replace(/^```/,'').trim();
+        if (/^chart\b/.test(info)){ chart = {kind:(info.replace(/^chart\s*/,'')||'lines'), buf:[]}; inCode=true; continue; }
+        inCode=true; out.push('<pre><code>');
+      } else {
+        inCode=false;
+        if (chart){ out.push('<div class="chartblock" data-kind="'+esc(chart.kind)+'" data-body="'+encodeURIComponent(chart.buf.join('\n'))+'">rendering chart…</div>'); chart=null; }
+        else out.push('</code></pre>');
+      }
+      continue;
+    }
+    if (inCode){ if (chart) chart.buf.push(l); else out.push(esc(l)); continue; }
     var m;
     if (m = l.match(/^(#{1,6})\s+(.*)$/)){ if(inList){out.push('</ul>');inList=false;} out.push('<h'+m[1].length+'>'+inline(m[2])+'</h'+m[1].length+'>'); continue; }
     if (/^\s*[-*]\s+/.test(l)){ if(!inList){out.push('<ul>');inList=true;} out.push('<li>'+inline(l.replace(/^\s*[-*]\s+/,''))+'</li>'); continue; }
@@ -69,11 +106,24 @@ function mdToHtml(t){
   return out.join('\n');
 }
 function looksMarkdown(t){ return /^\s*#/.test(t) || t.indexOf('\n#') >= 0; }
+function hydrateCharts(container){
+  container.querySelectorAll('.chartblock').forEach(function(el){
+    var kind=el.dataset.kind, body=decodeURIComponent(el.dataset.body||'');
+    var url, payload;
+    if(kind==='market'){ url='/api/marketchart'; payload=body; }
+    else if(kind==='bar'||kind==='line'||kind==='scatter'){ url='/api/plot'; payload=kind+' '+body.replace(/\n/g,' '); }
+    else { url='/api/plotn'; payload=body; }
+    fetch(url,{method:'POST',headers:{'Content-Type':'text/plain'},body:payload})
+      .then(function(r){return r.text();})
+      .then(function(svg){ if(/^\s*<svg/.test(svg)) el.innerHTML=svg; else el.textContent='chart error: '+svg; })
+      .catch(function(e){ el.textContent='chart error: '+e; });
+  });
+}
 function renderNow() {
-  if (looksMarkdown(src.value)) { preview.innerHTML = mdToHtml(src.value); return; }
+  if (looksMarkdown(src.value)) { preview.innerHTML = mdToHtml(src.value); hydrateCharts(preview); return; }
   fetch('/api/render', {method:'POST', headers:{'Content-Type':'text/plain'}, body: src.value})
     .then(function(r){ return r.text(); })
-    .then(function(html){ preview.innerHTML = html; });
+    .then(function(html){ preview.innerHTML = html; hydrateCharts(preview); });
 }
 src.addEventListener('input', function(){ clearTimeout(timer); timer = setTimeout(renderNow, 200); });
 function flash(msg){ status.textContent = msg; setTimeout(function(){ status.textContent=''; }, 1500); }
@@ -93,13 +143,14 @@ function openFile(){
   if(!name) return;
   fetch('/api/file?path=' + encodeURIComponent(name)).then(function(r){return r.text();}).then(function(t){
     src.value = t; renderNow(); flash('opened ' + name);
+    document.getElementById('fname').textContent=name; markDirty(false); updateStatus();
   });
 }
 function saveFile(){
   var name = document.getElementById('files').value;
   if(!name) return;
   fetch('/api/file?path=' + encodeURIComponent(name), {method:'POST', headers:{'Content-Type':'text/plain; charset=utf-8'}, body: src.value})
-    .then(function(){ flash('saved ' + name); refreshFiles(); });
+    .then(function(){ flash('saved ' + name); refreshFiles(); markDirty(false); });
 }
 function saveAs(){
   var name = document.getElementById('newname').value.trim();
@@ -112,6 +163,90 @@ function saveAs(){
       refreshFiles().then(function(){ document.getElementById('files').value = name; });
     });
 }
+/* ---- a fully-featured editing surface: find & replace, shortcuts, status --- */
+var dirty=false, fsize=13;
+function markDirty(d){ dirty=d; document.getElementById('dirty').textContent = d ? '● modified' : ''; }
+function fontSize(d){ fsize=Math.max(10,Math.min(22,fsize+d)); src.style.fontSize=fsize+'px'; }
+function updateStatus(){
+  var p=src.selectionStart, t=src.value;
+  var ln=t.slice(0,p).split('\n');
+  document.getElementById('pos').textContent='ln '+ln.length+', col '+(ln[ln.length-1].length+1);
+  var words=(t.match(/\S+/g)||[]).length;
+  document.getElementById('count').textContent=t.length+' chars · '+words+' words';
+}
+src.addEventListener('keyup', updateStatus);
+src.addEventListener('click', updateStatus);
+src.addEventListener('input', function(){ markDirty(true); updateStatus(); });
+// Tab inserts two spaces instead of leaving the textarea
+src.addEventListener('keydown', function(e){
+  if(e.key==='Tab' && !e.ctrlKey && !e.metaKey){
+    e.preventDefault();
+    var st=src.selectionStart, en=src.selectionEnd;
+    src.value=src.value.slice(0,st)+'  '+src.value.slice(en);
+    src.selectionStart=src.selectionEnd=st+2;
+    markDirty(true);
+  }
+});
+// global shortcuts: save / find / escape
+window.addEventListener('keydown', function(e){
+  if((e.ctrlKey||e.metaKey) && e.key==='s'){ e.preventDefault(); var name=document.getElementById('files').value; if(name){ saveFile(); markDirty(false); } else save(); }
+  if((e.ctrlKey||e.metaKey) && e.key==='f'){ e.preventDefault(); openFind(); }
+  if(e.key==='Escape'){ closeFind(); }
+});
+function openFind(){
+  var fb=document.getElementById('findbar'); fb.style.display='flex';
+  var q=document.getElementById('findq');
+  var sel=src.value.substring(src.selectionStart, src.selectionEnd);
+  if(sel) q.value=sel;
+  q.focus(); q.select(); countHits();
+}
+function closeFind(){ document.getElementById('findbar').style.display='none'; src.focus(); }
+function countHits(){
+  var q=document.getElementById('findq').value;
+  var n=0;
+  if(q){ var i=0; while((i=src.value.indexOf(q,i))>=0){ n++; i+=q.length; } }
+  document.getElementById('findhits').textContent = q ? (n+' match'+(n===1?'':'es')) : '';
+  return n;
+}
+document.getElementById && setTimeout(function(){
+  var fq=document.getElementById('findq');
+  if(fq){ fq.addEventListener('input', countHits);
+    fq.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); findNext(); } }); }
+},0);
+function findNext(){
+  var q=document.getElementById('findq').value; if(!q) return;
+  var from=src.selectionEnd||0;
+  var i=src.value.indexOf(q, from);
+  if(i<0) i=src.value.indexOf(q, 0);          // wrap around
+  if(i<0){ flash('not found'); return; }
+  src.focus(); src.setSelectionRange(i, i+q.length);
+  // scroll the hit into view (approximate: by line)
+  var line=src.value.slice(0,i).split('\n').length;
+  var lh=parseFloat(getComputedStyle(src).lineHeight)||20;
+  src.scrollTop=Math.max(0,(line-4)*lh);
+  updateStatus(); countHits();
+}
+function replaceOne(){
+  var q=document.getElementById('findq').value, r=document.getElementById('replq').value;
+  if(!q) return;
+  var sel=src.value.substring(src.selectionStart, src.selectionEnd);
+  if(sel===q){
+    var st=src.selectionStart;
+    src.value=src.value.slice(0,st)+r+src.value.slice(st+q.length);
+    src.setSelectionRange(st, st+r.length);
+    markDirty(true); renderNow();
+  }
+  findNext();
+}
+function replaceAll(){
+  var q=document.getElementById('findq').value, r=document.getElementById('replq').value;
+  if(!q) return;
+  var n=countHits();
+  src.value=src.value.split(q).join(r);
+  markDirty(true); renderNow(); countHits(); updateStatus();
+  flash(n+' replaced');
+}
+
 // On open, show the Ligurian grammar — the document the editor is for.
 window.addEventListener('load', function(){
   refreshFiles().then(function(){

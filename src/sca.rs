@@ -372,6 +372,25 @@ pub fn run_sca(word: &str, rules: &[String]) -> Result<String, String> {
     Ok(seglist_to_string(&out).replace('#', ""))
 }
 
+// ----- PIE -> Solar Speech ----------------------------------------------------
+const PIE_SCA: &str = include_str!("../lib/pie.sca");
+
+fn pie() -> &'static (N, Vec<String>) {
+    static P: OnceLock<(N, Vec<String>)> = OnceLock::new();
+    P.get_or_init(|| {
+        let (rules, graphemes) = parse_sca(PIE_SCA).expect("pie.sca parses");
+        (rules_vec_to_list(&rules), graphemes)
+    })
+}
+
+/// Derive a Solar Speech form from a PIE root (stages 0a-9 of the grammar's §II).
+pub fn pie_to_solar(word: &str) -> Result<String, String> {
+    let (rules_list, graphemes) = pie();
+    let segs = word_segments(graphemes, word);
+    let out = run_engine(segs, rules_list.clone())?;
+    Ok(seglist_to_string(&out).replace('#', ""))
+}
+
 // ----- Ligurian Solar -> Heart ----------------------------------------------
 fn ligurian() -> &'static (N, Vec<String>) {
     static L: OnceLock<(N, Vec<String>)> = OnceLock::new();

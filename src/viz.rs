@@ -165,7 +165,55 @@ pub fn render_lines(title: &str, labels: &[&str], series: &[Vec<f64>]) -> String
     )
 }
 
+/// Chart the (real, optionally live-refreshed) market series: daily closes with
+/// SMA20 and SMA50 overlays over the last `days` days.
+pub fn market_chart(days: usize, live: bool) -> String {
+    let (closes_x100, span, note) = crate::marketdata::closes(live);
+    let all: Vec<f64> = closes_x100.iter().map(|&c| c as f64 / 100.0).collect();
+    let sma = |w: usize| -> Vec<f64> {
+        (0..all.len())
+            .map(|i| {
+                let lo = i.saturating_sub(w - 1);
+                let win = &all[lo..=i];
+                win.iter().sum::<f64>() / win.len() as f64
+            })
+            .collect()
+    };
+    let (s20, s50) = (sma(20), sma(50));
+    let n = all.len();
+    let lo = n.saturating_sub(days);
+    let title = format!(
+        "{} — last {} days to {}  ({})",
+        crate::marketdata::MARKET_NAME,
+        n - lo,
+        span.1,
+        note
+    );
+    render_lines(
+        &title,
+        &["close", "SMA20", "SMA50"],
+        &[all[lo..].to_vec(), s20[lo..].to_vec(), s50[lo..].to_vec()],
+    )
+}
+
 pub fn cmd_chart(args: &[String]) {
+    // `latte chart market [--live] [--days N]`: the real price series with SMA overlays
+    if args.first().map(|s| s.as_str()) == Some("market") {
+        let mut live = false;
+        let mut days = 180usize;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--live" | "--fetch" => live = true,
+                "--days" if i + 1 < args.len() => { days = args[i + 1].parse().unwrap_or(days); i += 1; }
+                _ => {}
+            }
+            i += 1;
+        }
+        println!("{}", market_chart(days, live));
+        eprintln!("\n(redirect stdout to a .svg file to view, or use the chart GUI at /chart)");
+        return;
+    }
     let kinds = ["bar", "line", "scatter"];
     let (kind, nums): (&str, &[String]) = match args.first() {
         Some(a) if kinds.contains(&a.as_str()) => (a.as_str(), &args[1..]),

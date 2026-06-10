@@ -163,6 +163,52 @@ cargo test --offline
 
 ---
 
+## The command map (what shipped where)
+
+A quick tour of the tools — each also has a GUI surface in the System (`latte serve`, then
+middle-click commands in `System.Tool`):
+
+```sh
+# language
+latte eval "(fib 30)"                 # Anvil native compilation (the default engine)
+latte eval --interp "<expr>"          # the Loom interpreter
+latte eval --net "<expr>"             # the interaction-net engine (audited)
+latte net  "let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)"
+latte repl                            # interactive
+
+# market tools — all run on REAL data; --live refreshes it from Coin Metrics
+latte fetch                           # refresh + cache the daily close series
+latte ta [--live] [--win N]           # technical analysis (lib/ta.lat, on Loom)
+latte trade [--live] [--news FILE] [--account N] [--kelly F] [--sentiment S]
+latte sentiment "<headline text>"     # Loughran-McDonald scoring
+latte chart market [--live] [--days N] > market.svg
+latte chart bar 3 1 4 1 5             # bar | line | scatter (layout in lib/plot.lat)
+
+# models and graphics
+latte nn [--epochs N]                 # MLP backprop demo + a seeded transformer block
+latte fin gold                        # the financial-ML pipeline
+latte gfx > scene.svg                 # the gfx demo scene (lib/gfx.lat)
+
+# the conlang engine
+latte sca --file lib/pie.sca dʰeh₁s mr̥to     # PIE -> Solar Speech
+latte evolve saules bazdā                     # Solar -> Heart Speech
+latte sca kasa k>g s>z/a_a                    # ad-hoc rules
+
+# the system
+latte serve                           # the Oberon-style GUI (resizable frames,
+                                      # embedded objects, Latte-designed panels)
+```
+
+In the GUI: `/` is the System (drag the bars between frames to resize; `gfx`, `chart`, `ta`,
+`trade` embed objects in the Log; `ui Tool.calc` opens a graphical front end whose buttons call
+Latte arms; `net <expr>` runs the interaction-net engine with an interpreter audit), `/docs` is
+the manual shelf (every document editable in place; **＋ New** creates one, with live
+`` ```chart `` figures), `/editor` is the WYSIWYG page editor (find & replace, Ctrl/⌘+S, status
+bar), `/derive` derives Ligurian live (PIE → Solar → Heart, plus the vocabulary generator), and
+`/trade`, `/fin`, `/chart`, `/gpu`, `/chess`, `/grammar`, `/plan` are the tool pages.
+
+---
+
 ## Troubleshooting
 
 - **`rustc` not found at run time** — evaluation silently falls back to the interpreter, so

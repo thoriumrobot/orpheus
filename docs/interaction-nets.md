@@ -103,8 +103,8 @@ latte net "let fib = fn [n] -> if (lt n 2) then n else (add (fib (sub n 1)) (fib
 latte net "let tri = fn [n] -> if (lt n 1) then 0 else (add n (tri (dec n))) in (tri 100)"  → 5050
 ```
 
-The supported surface is single-argument natural-number recursion (multiple and nested recursive
-calls are fine); multi-argument recursion is the remaining frontier here.
+The supported surface was single-argument natural-number recursion; the **general compiler**
+(§7a below) has since removed that limit.
 
 ## 5. Performance — the active-pair worklist
 
@@ -128,7 +128,49 @@ For every compiled expression the engine's value is checked against the Loom int
 200-formula randomized batteries (arithmetic, and arithmetic-with-`if`), the worked fragment cases,
 and the recursion cross-checks keep the net and the interpreter in agreement.
 
-## 7. Frontier
+## 7. The general compiler — pairs as net data
 
-Still open: a fully **dynamic lazy `if`** for non-constant conditions via interaction-net boxes (the
-strict selector is used there today), and **multi-argument** net-level recursion.
+Both items that used to sit on the frontier — a fully dynamic lazy `if` and multi-argument
+net-level recursion — are now implemented, and one idea delivers both: **γ-cells as data**.
+
+**New agents.** `Sub`/`SubB` compute monus and `Eq`/`EqZ`/`EqB` compute equality by the same
+Peano-lockstep walk `Lt` uses, so `(sub a b)` and `a == b` reduce as net interactions on
+arbitrary (non-constant) operands. Both return the usual Loobean (0 = true).
+
+**Pairs.** A γ-cell whose children are values is a pair; `Head`/`Tail` project out of it (the
+rules already existed for the lazy-`if` bundle). The compiler packs a function's arguments into
+a right-nested γ-chain, hands ONE packed value to the `Ref`, and each parameter occurrence
+takes a δ-copy of the pack and projects its component — δ⋈γ commutation does the sharing.
+That single device gives:
+
+- **functions of any arity** — `let f = fn [a b] -> … in (f 4 2)` compiles to a definition
+  over the packed pair;
+- **multi-binding `loop`s** — a loop lowers to a recursive definition over its bindings, with
+  `again(…)` a `Ref` call on the re-packed values: `loop with [a = 0, b = 1, i = 10] : …`
+  runs as genuine net recursion, not unrolling;
+- **dynamic `div` and `mod`** — lowered to generated recursive definitions built from the
+  net's own `Sub`/`Lt` agents (`div` recurses over the packed `[x q b]`, `mod` over `[x b]`),
+  so `(div (f 15) 5)` reduces on the net even though the dividend is unknown at compile time;
+- **mutual flows like `gcd`** — `let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b))
+  in (gcd 1071 462)` → 21, tens of thousands of interactions, every one a local rewrite.
+
+**The lazy dynamic `if`.** Every `if` whose condition does not constant-fold compiles its
+branches into **interaction-net boxes** — `Ref` closures over the packed argument. The
+selector wires the taken branch's `Ref` to the result (it unrolls on demand) and points an
+eraser at the other (it is collected *unexpanded*). The proof is in the test suite: an `if`
+whose condition is itself computed by a recursive net call, with `(mul 99999 99999)` in the
+untaken branch, reduces in a few hundred steps — the ~10¹⁰ interactions the strict selector
+would have paid are simply never built.
+
+**Using it.** `latte net "<expr>"` and `latte eval --net "<expr>"` run the general compiler
+(falling back to the older single-parameter and simple-expression paths where those are
+smaller), and the System GUI's `net <expr>` verb does the same with the interpreter audit
+shown inline. Three compilers, one rule: when the net and the interpreter both produce a
+value, they must agree — the randomized batteries and the new `general_compiler_matches_interpreter`
+test hold that line.
+
+## 8. Frontier
+
+Still open: net-level cells/lists as *surface* data (pairs are internal machinery today), and
+sharing `let`-bound subnets instead of rebuilding them per use (pure duplication is correct
+but can repeat work).

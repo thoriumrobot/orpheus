@@ -264,6 +264,21 @@ runs any such architecture, so deeper nets are built by consing more layers onto
 vector/matrix plumbing (`vadd`, `vsub`, `vmul`, `vscale`, `matvec`, `outer`, `matTvec`, `mscale`,
 `msub`) is all in the library, over the signed fixed-point numbers of `num`.
 
+### The newer architectures
+
+The layer set now covers the modern toolkit, all as composable data: `%sigmoid`, `%softmax`
+(fixed-point `exp` by four squarings of `1 + x/16`, inputs max-shifted), `%layernorm`,
+`%conv1d [K b]` (stride 1, valid padding), and `%res` residual wrappers. **Sequences** (lists of
+vectors) get their own layer algebra under `seq_fwd`: `%attn [Wq Wk Wv]` is single-head scaled
+dot-product **self-attention**, `%seqdense` is a position-wise dense layer, `%lnorm` normalizes
+every position, `%seqres` adds a residual around any sub-stack, and `%pool` mean-pools the
+sequence to one vector. A **transformer block** is therefore ordinary data — attention +
+residual + layernorm + position-wise dense + residual + layernorm — and `block seed d` builds a
+seeded one (`randmat`/`lcg` give reproducible initializations). `latte nn` runs a 3-token
+sequence through a seeded block live. Customizability is structural: any composition of these
+layers — ResNets, transformer stacks, conv pyramids — is a list you write. Training: the MLP
+ships with full backpropagation; the other layers are forward-only in this release.
+
 ### Training by backpropagation
 
 Beyond inference, the library trains a one-hidden-layer MLP (ReLU hidden, linear output, MSE loss)
@@ -412,23 +427,85 @@ on real headlines (a "rally/recover/surge higher" headline scores +1.0, a "sello
 fears" headline −1.0). News sentiment is most useful on information-driven markets (equities,
 indices, single names), where it is an exogenous feature fed to the model and the trading advisor.
 
-## The trading advisor (`latte trade`)
+## Real, recent, live market data (`latte fetch`)
 
-An automatic advisor that calls the best model and recommends *whether* and *how much* to trade.
-Its design follows the honest finding that the dependable edge is volatility, not direction, plus
-standard position-sizing theory (Kelly; volatility targeting):
+The models run on **real data**. The embedded series is daily BTC/USD closes — Coin Metrics
+community data exact through 2026-05-23, then dated press reports (Fortune, Yahoo Finance, CNBC,
+The Block, Investing.com) through 2026-06-10 — and `latte fetch` refreshes it at run time from
+the live Coin Metrics file (HTTPS via `curl`, the same external-tool trust model Anvil uses for
+`rustc`), caching under `~/.cache/orpheus/market/`. Every consumer takes a `--live` flag:
+`latte ta --live`, `latte trade --live`, `latte chart market --live`. Each report states its
+provenance ("live Coin Metrics fetch (5789 days) + 18 embedded recent days to 2026-06-10"), and
+when the community file lags, the embedded press-anchored tail is spliced on so the freshest
+real closes are never lost. No network, no curl? The embedded series serves, and everything
+still works.
 
-1. **Direction** — a momentum lean (price vs its 10-day average), with the rule's *measured*
-   out-of-sample hit rate reported as confidence (typically near 50% on daily data).
-2. **Sizing** — **fractional Kelly** from the directional edge (`f = 2W − 1`, scaled to ¼–½),
-   combined with **volatility targeting** (scale exposure toward a target daily volatility, and
-   shrink it when the model predicts a high-volatility regime), capped at 2× leverage.
-3. **Discipline** — if momentum is down or the Kelly fraction is ≤ 0 (no positive edge), it advises
-   **FLAT — stand aside** rather than forcing a trade, exactly as the literature recommends.
+A bundled corpus of **real, dated headlines** about the market (`MARKET_NEWS`, gathered
+2026-06-10 with sources) feeds the sentiment side; `--news FILE` substitutes today's headlines
+(one per line, optionally `YYYY-MM-DD<TAB>Source<TAB>headline`).
 
-It accepts `--account N`, `--kelly F`, and an optional `--sentiment S` (e.g. from `latte sentiment`
-on news) that nudges the lean. The `/trade` GUI page runs it live alongside the sentiment scorer.
-Every output carries an explicit disclaimer: this is a research demonstration, not financial advice.
+## Technical analysis in Latte (`lib/ta.lat`, `latte ta`)
+
+Five classical indicators, written entirely in Latte over signed fixed-point and computed on
+Loom: **SMA/EMA**, **rate-of-change** momentum, Wilder's **RSI(14)**, **MACD(12,26,9)** with its
+signal and histogram, and **Bollinger %B(20,2σ)** — plus realized volatility. `votes` has each
+indicator cast a −1/0/+1 verdict (trend vs SMA50, 10-day ROC, RSI overbought/oversold, MACD
+histogram sign, %B band touch) and `score` sums them into a composite in −5…+5. Run it standalone:
+
+```
+latte ta            # the verdict table on the freshest cached/embedded data
+latte ta --live     # fetch first
+```
+
+or in the System GUI (`ta` embeds the table in the Log) and over HTTP (`POST /api/ta`).
+
+## The trading advisor (`latte trade`) — technical analysis × news sentiment
+
+The advisor **fuses two kinds of evidence** and sizes the position with the volatility model:
+
+1. **Technical analysis (60%)** — `ta.lat`'s composite vote, normalized to a signal in [−1, +1].
+2. **News sentiment (40%)** — every bundled (or `--news`-supplied) headline is scored by the
+   Loughran-McDonald method (the polarity arithmetic runs in `lib/sentiment.lat` on Loom) and
+   aggregated with a 3-day-half-life recency weight; `--sentiment S` overrides.
+3. **The combined lean** `0.6·TA + 0.4·news` decides direction: above +0.1 → long candidate;
+   below −0.1 → bearish → **FLAT** (no shorting in this demo); in between → no edge, FLAT.
+4. **Sizing** — **fractional Kelly** from the *measured* out-of-sample momentum hit rate (the
+   edge is halved when momentum disagrees with the combined lean), nudged by sentiment, times
+   **volatility targeting** against the volatility model's regime call (the dependable edge),
+   capped at 2× leverage. The volatility model trains once per process and is cached.
+
+The report shows its evidence: the five-indicator table, every scored headline with its date and
+polarity, the fusion arithmetic, the measured reliabilities, and the sizing chain. Flags:
+`--account N --kelly F --live --news FILE --sentiment S`. The `/trade` GUI page renders the same
+evidence; `trade` in the System GUI embeds it in the Log. Every output carries an explicit
+disclaimer: this is a research demonstration, not financial advice.
+
+## Charts in your reports — embeddable visualization
+
+Reports written in the GUI (documents in `/docs`, pages in `/editor`) can **embed live charts**
+as fenced blocks; the renderer posts the block to the visualization engine and inlines the SVG:
+
+    ```chart
+    Equity curves              <- title line
+    strategy | buy & hold      <- series labels
+    1 2 3 4 5                  <- one series per line
+    2 2 3 3 4
+    ```
+
+    ```chart market
+    days=120                   <- the real price series + SMA20/SMA50
+    live=1                     <- optional: refresh from Coin Metrics first
+    ```
+
+    ```chart bar
+    3 1 4 1 5 9 2 6            <- also: line, scatter (layout in lib/plot.lat)
+    ```
+
+The same charts are one command away everywhere: `latte chart market --live --days 90 > m.svg`
+on the CLI, `chart market days=120` embedded in the System GUI's Log, `POST /api/marketchart`
+and `POST /api/plotn` over HTTP. The "＋ New" button in `/docs` starts a fresh document from a
+template that demonstrates the blocks — so producing new documentation with live figures, from
+inside the GUI, is the default path, not a trick.
 
 ## A fuller standard library
 

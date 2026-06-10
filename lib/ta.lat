@@ -1,0 +1,127 @@
+:: ===========================================================================
+:: ta.lat — technical analysis, in Latte.
+::
+:: Classical price-series indicators over signed fixed-point numbers (num.lat):
+::   sma n ps        simple moving average of the last n prices
+::   ema n ps        exponential moving average (a = 2/(n+1)) over the series
+::   roc n ps        rate of change in percent over n days
+::   rsi n ps        Wilder's Relative Strength Index, in [0,100]
+::   macd ps         MACD(12,26) line, its 9-day signal, and the histogram
+::   boll n ps       Bollinger %B with 2-sigma bands over n days
+::   votes ps        the composite signal: each indicator votes -1 / 0 / +1
+::
+:: A price list is most-recent-LAST (chronological), as everywhere in fin.lat.
+:: All numbers are [sign magnitude] fixed-point ×1000; percents are ×100 of the
+:: raw ratio (so [0 2500] = +2.5%), matching the fin library's convention.
+:: ===========================================================================
+import std
+import num
+core ta
+  :: ---- windows over a chronological list ----------------------------------
+  lastn = fn [n ps] -> (drop (sub (len ps) (min n (len ps))) ps)
+
+  :: ---- moving averages -----------------------------------------------------
+  sma = fn [n ps] -> (nmean (lastn n ps))
+
+  :: ema with alpha = 2/(n+1), folded over the whole series, seeded by the
+  :: first price; alpha is computed in fixed point once.
+  ema = fn [n ps] ->
+    let a = (ndiv (nint 2) (nint (add n 1))) in
+    let b = (nsub [0 1000] a) in
+    (foldl (fn [acc p] -> (nadd (nmul a p) (nmul b acc))) (head ps) (tail ps))
+
+  :: ---- momentum -------------------------------------------------------------
+  :: percent change over the last n days: 100*(p_t - p_{t-n})/p_{t-n}
+  roc = fn [n ps] ->
+    let w = (lastn (add n 1) ps) in
+    let p0 = (head w) in
+    let pt = (last w) in
+    (nmul (nint 100) (ndiv (nsub pt p0) p0))
+
+  :: ---- RSI (Wilder) ---------------------------------------------------------
+  :: average gain / average loss over the last n moves; RSI = 100*ag/(ag+al).
+  diffs = fn [ps] ->
+    loop with [c = ps, acc = 0] :
+      if ((tail c) == 0) then (reverse acc)
+      else again((tail c), [ (nsub (head (tail c)) (head c)) acc ])
+    end
+  rsi = fn [n ps] ->
+    let ds = (lastn n (diffs ps)) in
+    let ag = (nmean (map (fn [d] -> (nrelu d)) ds)) in
+    let al = (nmean (map (fn [d] -> (nrelu (nnegate d))) ds)) in
+    let tot = (nadd ag al) in
+    if (nlt tot [0 1]) then (nint 50)
+    else (nmul (nint 100) (ndiv ag tot))
+
+  :: ---- MACD(12,26,9) --------------------------------------------------------
+  :: the MACD line per day is ema12 - ema26; the signal is the 9-day ema of the
+  :: line over its last 9 values. Returns [line signal histogram] in percent of
+  :: the last price (so different price scales compare).
+  macd_line_at = fn [ps] -> (nsub (ema 12 ps) (ema 26 ps))
+  :: the line evaluated on each of the last k growing prefixes
+  macd_series = fn [k ps] ->
+    let n = (len ps) in
+    loop with [i = (sub n (min k n)), acc = 0] :
+      if (gt i n) then (reverse acc)
+      else if (i == n) then (reverse acc)
+      else again(+(i), [ (macd_line_at (take (add i 1) ps)) acc ])
+    end
+  macd = fn [ps] ->
+    let lines = (macd_series 9 ps) in
+    let line = (last lines) in
+    let sig = (ema 9 lines) in
+    let p = (last ps) in
+    let pct = fn [x] -> (nmul (nint 100) (ndiv x p)) in
+    [ (pct line) [ (pct sig) [ (pct (nsub line sig)) 0 ] ] ]
+
+  :: ---- Bollinger %B ---------------------------------------------------------
+  :: %B = (p - (m - 2s)) / (4s): 0 at the lower band, 1000 at the upper.
+  nstd = fn [xs] ->
+    let m = (nmean xs) in
+    (nsqrt (nmean (map (fn [v] -> let d = (nsub v m) in (nmul d d)) xs)))
+  boll = fn [n ps] ->
+    let w = (lastn n ps) in
+    let m = (nmean w) in
+    let s = (nstd w) in
+    if (nlt s [0 1]) then [0 500]
+    else (ndiv (nsub (last ps) (nsub m (nmul (nint 2) s))) (nmul (nint 4) s))
+
+  :: ---- realized volatility (st.dev of daily percent returns, last n) -------
+  rets = fn [ps] ->
+    loop with [c = ps, acc = 0] :
+      if ((tail c) == 0) then (reverse acc)
+      else let a = (head c) in let b = (head (tail c)) in
+        again((tail c), [ (nmul (nint 100) (ndiv (nsub b a) a)) acc ])
+    end
+  rvol = fn [n ps] -> (nstd (lastn n (rets ps)))
+
+  :: ---- the composite signal -------------------------------------------------
+  :: Each indicator votes:  +1 bullish, 0 neutral, -1 bearish (signed numbers).
+  ::   trend : price vs sma50          (above -> +1)
+  ::   mom   : roc10                   (positive -> +1)
+  ::   rsi14 : <30 oversold -> +1, >70 overbought -> -1, else 0
+  ::   macd  : histogram sign
+  ::   boll  : %B <100 -> +1 (at lower band), >900 -> -1, else 0
+  :: Returns the list of [tag vote value] rows; `score` sums the votes.
+  vote_row = fn [tag v val] -> [ tag [ v [ val 0 ] ] ]
+  votes = fn [ps] ->
+    let p = (last ps) in
+    let s50 = (sma 50 ps) in
+    let trend = if (nlt s50 p) then (nint 1) else (nnegate (nint 1)) in
+    let r10 = (roc 10 ps) in
+    let mom = if (nlt [0 0] r10) then (nint 1) else if (nlt r10 [0 0]) then (nnegate (nint 1)) else [0 0] in
+    let rs = (rsi 14 ps) in
+    let vrsi = if (nlt rs (nint 30)) then (nint 1) else if (nlt (nint 70) rs) then (nnegate (nint 1)) else [0 0] in
+    let mc = (macd ps) in
+    let hist = (head (tail (tail mc))) in
+    let vmacd = if (nlt [0 1] hist) then (nint 1) else if (nlt hist (nnegate [0 1])) then (nnegate (nint 1)) else [0 0] in
+    let bb = (boll 20 ps) in
+    let vboll = if (nlt bb [0 100]) then (nint 1) else if (nlt [0 900] bb) then (nnegate (nint 1)) else [0 0] in
+    [ (vote_row %trend trend (nmul (nint 100) (ndiv (nsub p s50) s50)))
+    [ (vote_row %mom mom r10)
+    [ (vote_row %rsi vrsi rs)
+    [ (vote_row %macd vmacd hist)
+    [ (vote_row %boll vboll bb)
+    0 ] ] ] ] ]
+  score = fn [vs] -> (nsum (map (fn [row] -> (head (tail row))) vs))
+end

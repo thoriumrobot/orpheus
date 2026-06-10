@@ -580,11 +580,56 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
         }
         // graphics library: render the Latte gfx demo scene to SVG.
         ("POST", "/api/gfx") => {
-            let svg = match crate::latte::run_with_libs("(demo 0)", &["std", "gfx"]) {
+            // body = a Latte expression evaluating to a gfx scene (defaults to the demo);
+            // a bare `Module.arm args` command form is also accepted.
+            let body = String::from_utf8_lossy(&req.body);
+            let expr0 = body.trim();
+            let expr = if expr0.is_empty() {
+                "(demo 0)".to_string()
+            } else if expr0.starts_with('(') {
+                expr0.to_string()
+            } else {
+                // `Tool.rings 6` -> `(rings 6)`
+                let (head, rest) = match expr0.split_once(char::is_whitespace) {
+                    Some((h, r)) => (h, r.trim()),
+                    None => (expr0, ""),
+                };
+                let arm = head.rsplit('.').next().unwrap_or(head);
+                if rest.is_empty() { format!("({} 0)", arm) } else { format!("({} {})", arm, rest) }
+            };
+            let libs: Vec<String> = crate::latte::all_libs();
+            let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+            let svg = match crate::latte::run_with_libs(&expr, &refs) {
                 Ok(scene) => crate::gfx::render_scene(&scene, 330, 270),
                 Err(e) => format!("<svg xmlns='http://www.w3.org/2000/svg' width='330' height='40'><text x='6' y='22'>{}</text></svg>", html_escape(&e)),
             };
             simple(200, "image/svg+xml; charset=utf-8", svg.into_bytes())
+        }
+        // a graphical front end described in Latte (lib/ui.lat): body = `Mod.arm [args]`
+        // or a parenthesised expression; returns the panel as JSON for the GUI to render.
+        ("POST", "/api/ui") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let expr0 = body.trim();
+            let expr = if expr0.starts_with('(') {
+                expr0.to_string()
+            } else {
+                let (head, rest) = match expr0.split_once(char::is_whitespace) {
+                    Some((h, r)) => (h, r.trim()),
+                    None => (expr0, ""),
+                };
+                let arm = head.rsplit('.').next().unwrap_or(head);
+                if rest.is_empty() { format!("({} 0)", arm) } else { format!("({} {})", arm, rest) }
+            };
+            let libs: Vec<String> = crate::latte::all_libs();
+            let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+            let out = match crate::latte::run_with_libs(&expr, &refs) {
+                Ok(n) => match panel_json(&n) {
+                    Some(j) => j,
+                    None => format!("{{\"error\":\"{} did not return a (panel …) value\"}}", json_escape(expr0)),
+                },
+                Err(e) => format!("{{\"error\":\"{}\"}}", json_escape(&e)),
+            };
+            simple(200, "application/json; charset=utf-8", out.into_bytes())
         }
         // trading advisor: run the best model + position sizing, return an HTML fragment.
         ("POST", "/api/trade") => {
@@ -592,37 +637,223 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let mut account = 10_000.0f64;
             let mut kelly = 0.25f64;
             let mut sentiment: Option<f64> = None;
+            let mut live = false;
+            let mut news_text: Option<String> = None;
+            let mut in_news = false;
+            let mut news_buf = String::new();
             for line in body.lines() {
-                let mut it = line.split('=');
+                if in_news {
+                    news_buf.push_str(line);
+                    news_buf.push('\n');
+                    continue;
+                }
+                let mut it = line.splitn(2, '=');
                 match (it.next(), it.next()) {
                     (Some("account"), Some(v)) => account = v.trim().parse().unwrap_or(account),
                     (Some("kelly"), Some(v)) => kelly = v.trim().parse().unwrap_or(kelly),
                     (Some("sentiment"), Some(v)) => sentiment = v.trim().parse().ok(),
+                    (Some("live"), Some(v)) => live = v.trim() == "1" || v.trim() == "true",
+                    (Some("news"), _) => in_news = true, // the rest of the body is headlines
                     _ => {}
                 }
             }
-            let html = match crate::numerics::trade_advice(account, kelly, sentiment) {
-                Ok(a) => format!(
-                    "<table class='m'>\
-                     <tr><td>market</td><td>{} &nbsp; last ${:.0}</td></tr>\
-                     <tr><td>momentum (P/MA10)</td><td>{:+.2}% &rarr; lean {}</td></tr>\
-                     <tr><td>realized vol/day</td><td>{:.2}% (target {:.2}%) &mdash; predicted {}-vol</td></tr>\
-                     <tr><td>momentum hit rate</td><td>{:.1}% out-of-sample</td></tr>\
-                     <tr><td>volatility model</td><td>{:.1}% test accuracy (the dependable edge)</td></tr>\
-                     <tr><td>full / fractional Kelly</td><td>{:+.3} / {:.3}</td></tr>\
-                     <tr><td><b>advice</b></td><td><b>{}</b></td></tr>{}\
-                     </table>\
-                     <p class='note'>The model's dependable edge is <b>volatility</b>, so position <i>sizing</i> \
-                     (risk control) is the main lever and direction is a low-confidence momentum lean. When the \
-                     directional edge is not positive the tool stands aside. News sentiment (if provided) nudges \
-                     the lean and matters most on equities/indices. <b>Research demo, not financial advice.</b></p>",
-                    a.market, a.last_price, a.mom, a.direction, a.realized_vol, a.target_vol, a.vol_regime,
-                    a.dir_hitrate, a.model_acc, a.kelly_full, a.kelly_used, html_escape(&a.action),
-                    if a.exposure > 0.0 { format!("<tr><td>notional</td><td>${:.0} of ${:.0}</td></tr>", a.dollars, a.account) } else { String::new() }
-                ),
+            if !news_buf.trim().is_empty() {
+                news_text = Some(news_buf);
+            }
+            let html = match crate::numerics::trade_advice(account, kelly, sentiment, live, news_text.as_deref()) {
+                Ok(a) => {
+                    let mut ta = String::from("<table class='m'><tr><td><b>indicator</b></td><td><b>value</b></td><td><b>vote</b></td></tr>");
+                    for r in &a.ta_rows {
+                        let (label, val) = match r.name.as_str() {
+                            "trend" => ("price vs SMA50", format!("{:+.2}%", r.value)),
+                            "mom" => ("10-day momentum", format!("{:+.2}%", r.value)),
+                            "rsi" => ("RSI(14)", format!("{:.1}", r.value)),
+                            "macd" => ("MACD(12,26,9) hist", format!("{:+.3}%", r.value)),
+                            "boll" => ("Bollinger %B(20,2)", format!("{:.0}", r.value)),
+                            o => (o, format!("{:.3}", r.value)),
+                        };
+                        let v = match r.vote { 1 => "<span style='color:#1a6e2a'>+1 bullish</span>", -1 => "<span style='color:#7a1a1a'>&minus;1 bearish</span>", _ => "0 neutral" };
+                        ta.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", label, val, v));
+                    }
+                    ta.push_str(&format!("<tr><td><b>composite TA</b></td><td><b>{:+}</b> of &minus;5..+5</td><td><b>signal {:+.2}</b></td></tr></table>", a.ta_score, a.ta_signal));
+                    let mut news = String::from("<table class='m'><tr><td><b>date</b></td><td><b>pol</b></td><td><b>headline</b></td></tr>");
+                    for r in &a.news {
+                        news.push_str(&format!(
+                            "<tr><td>{}</td><td>{:+.2}</td><td>{} <span style='color:#777'>&mdash; {}</span></td></tr>",
+                            r.date, r.polarity, html_escape(&r.headline), html_escape(&r.source)
+                        ));
+                    }
+                    news.push_str(&format!("<tr><td><b>aggregate</b></td><td><b>{:+.2}</b></td><td>recency-weighted (half-life 3 days){}</td></tr></table>",
+                        a.news_sentiment,
+                        if a.sentiment != Some(a.news_sentiment) { format!(" &mdash; overridden to {:+.2}", a.sentiment.unwrap_or(0.0)) } else { String::new() }));
+                    format!(
+                        "<h3 style='margin:4px 0'>Technical analysis (lib/ta.lat, computed on Loom)</h3>{}\
+                         <h3 style='margin:10px 0 4px'>News sentiment (Loughran-McDonald, lib/sentiment.lat)</h3>{}\
+                         <h3 style='margin:10px 0 4px'>Verdict</h3>\
+                         <table class='m'>\
+                         <tr><td>market</td><td>{} &nbsp; last ${:.0} &nbsp; <span style='color:#777'>{} ({} .. {})</span></td></tr>\
+                         <tr><td>combined lean</td><td><b>{:+.2}</b> = 0.6&middot;TA {:+.2} + 0.4&middot;news {:+.2} &rarr; {}</td></tr>\
+                         <tr><td>realized vol/day</td><td>{:.2}% (target {:.2}%) &mdash; predicted {}-vol regime</td></tr>\
+                         <tr><td>momentum hit rate</td><td>{:.1}% out-of-sample</td></tr>\
+                         <tr><td>volatility model</td><td>{:.1}% test accuracy (the dependable edge)</td></tr>\
+                         <tr><td>full / fractional Kelly</td><td>{:+.3} / {:.3}</td></tr>\
+                         <tr><td><b>advice</b></td><td><b>{}</b></td></tr>{}\
+                         </table>\
+                         <p class='note'>Five classical indicators vote in Latte and real, dated headlines are scored in \
+                         Latte; the leans fuse 60/40 and the size is risk-controlled by the volatility model (the \
+                         dependable edge) with fractional Kelly. <b>Research demo, not financial advice.</b></p>",
+                        ta, news,
+                        a.market, a.last_price, html_escape(&a.data_note), a.span.0, a.span.1,
+                        a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction,
+                        a.realized_vol, a.target_vol, a.vol_regime,
+                        a.dir_hitrate, a.model_acc, a.kelly_full, a.kelly_used, html_escape(&a.action),
+                        if a.exposure > 0.0 { format!("<tr><td>notional</td><td>${:.0} of ${:.0}</td></tr>", a.dollars, a.account) } else { String::new() }
+                    )
+                }
                 Err(e) => format!("<p class='note'>error: {}</p>", html_escape(&e)),
             };
             simple(200, "text/html; charset=utf-8", html.into_bytes())
+        }
+        // standalone technical analysis: body "live=0/1\nwin=N" -> HTML table fragment
+        ("POST", "/api/ta") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut live = false;
+            let mut win = 120usize;
+            for line in body.lines() {
+                let mut it = line.splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("live"), Some(v)) => live = v.trim() == "1" || v.trim() == "true",
+                    (Some("win"), Some(v)) => win = v.trim().parse().unwrap_or(win),
+                    _ => {}
+                }
+            }
+            let (closes, span, note) = crate::marketdata::closes(live);
+            let html = match crate::numerics::ta_votes(&closes, win) {
+                Ok((rows, score)) => {
+                    let mut t = format!(
+                        "<p class='note'>{} &mdash; last ${:.0} &mdash; {} ({} .. {}), window {} days</p>\
+                         <table class='m'><tr><td><b>indicator</b></td><td><b>value</b></td><td><b>vote</b></td></tr>",
+                        crate::marketdata::MARKET_NAME,
+                        *closes.last().unwrap_or(&0) as f64 / 100.0,
+                        html_escape(&note), span.0, span.1, win
+                    );
+                    for r in &rows {
+                        let (label, val) = match r.name.as_str() {
+                            "trend" => ("price vs SMA50", format!("{:+.2}%", r.value)),
+                            "mom" => ("10-day momentum", format!("{:+.2}%", r.value)),
+                            "rsi" => ("RSI(14)", format!("{:.1}", r.value)),
+                            "macd" => ("MACD(12,26,9) hist", format!("{:+.3}%", r.value)),
+                            "boll" => ("Bollinger %B(20,2)", format!("{:.0}", r.value)),
+                            o => (o, format!("{:.3}", r.value)),
+                        };
+                        let v = match r.vote { 1 => "<span style='color:#1a6e2a'>+1 bullish</span>", -1 => "<span style='color:#7a1a1a'>&minus;1 bearish</span>", _ => "0 neutral" };
+                        t.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>", label, val, v));
+                    }
+                    let lean = if score > 0 { "bullish" } else if score < 0 { "bearish" } else { "neutral" };
+                    t.push_str(&format!("<tr><td><b>composite</b></td><td><b>{:+}</b> of &minus;5..+5</td><td><b>{}</b></td></tr></table>", score, lean));
+                    t
+                }
+                Err(e) => format!("<p class='note'>error: {}</p>", html_escape(&e)),
+            };
+            simple(200, "text/html; charset=utf-8", html.into_bytes())
+        }
+        // market price chart (real data; live=1 refreshes): close + SMA20 + SMA50 -> SVG
+        ("POST", "/api/marketchart") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut live = false;
+            let mut days = 180usize;
+            for line in body.lines() {
+                let mut it = line.splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("live"), Some(v)) => live = v.trim() == "1" || v.trim() == "true",
+                    (Some("days"), Some(v)) => days = v.trim().parse().unwrap_or(days).clamp(20, 2000),
+                    _ => {}
+                }
+            }
+            let svg = crate::viz::market_chart(days, live);
+            simple(200, "image/svg+xml; charset=utf-8", svg.into_bytes())
+        }
+        // live Ligurian derivation: body lines `mode=pie|solar|gen`, `n=`, `seed=`,
+        // then words. Returns JSON rows {pie, solar, heart} — PIE -> Solar runs
+        // lib/pie.sca, Solar -> Heart runs lib/ligurian.sca (+ prosodic passes),
+        // and `gen` makes phonotactic Solar roots with lib/lexis.lat (in Latte).
+        ("POST", "/api/derive") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut mode = "solar".to_string();
+            let mut n = 10usize;
+            let mut seed: u64 = 0;
+            let mut words: Vec<String> = Vec::new();
+            for line in body.lines() {
+                let mut it = line.splitn(2, '=');
+                match (it.next().map(str::trim), it.next()) {
+                    (Some("mode"), Some(v)) => mode = v.trim().to_string(),
+                    (Some("n"), Some(v)) => n = v.trim().parse().unwrap_or(n).clamp(1, 60),
+                    (Some("seed"), Some(v)) => seed = v.trim().parse().unwrap_or(seed),
+                    _ => words.extend(line.split_whitespace().map(|w| w.to_string())),
+                }
+            }
+            let mut rows: Vec<(String, String, String)> = Vec::new();
+            match mode.as_str() {
+                "pie" => {
+                    for w in words.iter().take(60) {
+                        let solar = crate::sca::pie_to_solar(w).unwrap_or_else(|e| format!("(error: {})", e));
+                        let heart = crate::sca::evolve(&solar).unwrap_or_else(|e| format!("(error: {})", e));
+                        rows.push((w.clone(), solar, heart));
+                    }
+                }
+                "gen" => {
+                    if seed == 0 {
+                        seed = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() ^ (d.subsec_nanos() as u64))
+                            .unwrap_or(42) % 1_000_000;
+                    }
+                    for i in 0..n {
+                        let expr = format!("(genword {})", seed + (i as u64) * 7919);
+                        let word = match crate::latte::run_with_libs(&expr, &["std", "lexis"]) {
+                            Ok(v) => cord_list_to_string(&v),
+                            Err(e) => format!("(error: {})", e),
+                        };
+                        let heart = crate::sca::evolve(&word).unwrap_or_else(|e| format!("(error: {})", e));
+                        rows.push((String::new(), word, heart));
+                    }
+                }
+                _ => {
+                    for w in words.iter().take(60) {
+                        let heart = crate::sca::evolve(w).unwrap_or_else(|e| format!("(error: {})", e));
+                        rows.push((String::new(), w.clone(), heart));
+                    }
+                }
+            }
+            let mut json = format!("{{\"mode\":\"{}\",\"seed\":{},\"rows\":[", json_escape(&mode), seed);
+            for (i, (p, sol, h)) in rows.iter().enumerate() {
+                if i > 0 { json.push(','); }
+                json.push_str(&format!(
+                    "{{\"pie\":\"{}\",\"solar\":\"{}\",\"heart\":\"{}\"}}",
+                    json_escape(p), json_escape(sol), json_escape(h)
+                ));
+            }
+            json.push_str("]}");
+            simple(200, "application/json; charset=utf-8", json.into_bytes())
+        }
+        // the bundled real-news corpus, scored: JSON [{date,source,headline,polarity}..]
+        ("GET", "/api/news") => {
+            let items: Vec<(String, String, String)> = crate::marketdata::MARKET_NEWS
+                .iter()
+                .map(|(d, s, h)| (d.to_string(), s.to_string(), h.to_string()))
+                .collect();
+            let (rows, agg) = crate::numerics::score_news(&items);
+            let mut json = String::from("{\"aggregate\":");
+            json.push_str(&format!("{:.3},\"items\":[", agg));
+            for (i, r) in rows.iter().enumerate() {
+                if i > 0 { json.push(','); }
+                json.push_str(&format!(
+                    "{{\"date\":\"{}\",\"source\":\"{}\",\"headline\":\"{}\",\"polarity\":{:.3}}}",
+                    r.date, json_escape(&r.source), json_escape(&r.headline), r.polarity
+                ));
+            }
+            json.push_str("]}");
+            simple(200, "application/json; charset=utf-8", json.into_bytes())
         }
         // sentiment scoring: body is the text; returns JSON {pos,neg,polarity}.
         ("POST", "/api/sentiment") => {
@@ -723,7 +954,7 @@ fn chess_json(ch: &Chess) -> String {
 /// `eval <expr>`, `type <expr>`, or `sca <words>`.
 fn run_tool(cmd: &str) -> String {
     if cmd.is_empty() {
-        return "commands:\n  eval <expr>   run a Latte expression (std · mold · num · tensor · plan · ml · tool)\n  type <expr>   infer an expression's type\n  sca  <words>  evolve Solar words into Heart Speech (SCArs)\n  icomb         reduce interaction combinators (Lafont γ/δ/ε)\n  libs          list the libraries (modules) loaded in the running system\n  Module.cmd a  run arm `cmd` of a loaded Latte module on the argument(s) `a`"
+        return "commands:\n  eval <expr>   run a Latte expression (std · mold · num · tensor · plan · ml · tool)\n  type <expr>   infer an expression's type\n  sca  <words>  evolve Solar words into Heart Speech (SCArs)\n  icomb         reduce interaction combinators (Lafont γ/δ/ε)\n  net <expr>    run an expression on the interaction net (lazy if, net recursion)\n  libs          list the libraries (modules) loaded in the running system\n  Module.cmd a  run arm `cmd` of a loaded Latte module on the argument(s) `a`"
             .into();
     }
     let (head, rest) = match cmd.split_once(char::is_whitespace) {
@@ -740,6 +971,21 @@ fn run_tool(cmd: &str) -> String {
             Err(e) => format!("parse error: {}", e),
         },
         "icomb" => crate::icomb::demo(),
+        // run an expression ON THE INTERACTION NET (lazy boxed `if`, net-level recursion,
+        // γ-pairs; see docs/interaction-nets.md), cross-checked against the interpreter.
+        "net" => match crate::icomb::run_str(rest) {
+            Ok((v, steps)) => {
+                let audit = crate::latte::run_with_libs(rest, &["std"])
+                    .ok()
+                    .and_then(|n| n.as_atom().and_then(|a| a.to_u128()));
+                match audit {
+                    Some(l) if l == v => format!("{} → {}  ({} interaction steps; interpreter agrees)", rest, v, steps),
+                    Some(l) => format!("{} → {}  ({} steps) — INTERPRETER DISAGREES: {}", rest, v, steps, l),
+                    None => format!("{} → {}  ({} interaction steps)", rest, v, steps),
+                }
+            }
+            Err(e) => format!("net error: {}", e),
+        },
         "sca" | "evolve" => rest
             .split_whitespace()
             .map(|w| match sca::evolve(w) {
@@ -800,7 +1046,7 @@ fn run_tool(cmd: &str) -> String {
         // A bare parenthesised expression is also accepted as an expression to evaluate.
         _ if head.starts_with('(') => eval_expr(cmd),
         _ => format!(
-            "unknown command '{}'. try: eval | type | sca | icomb | libs, or Module.command args",
+            "unknown command '{}'. try: eval | type | sca | icomb | net | libs, or Module.command args",
             head
         ),
     }
@@ -1105,6 +1351,93 @@ fn hexval(c: u8) -> Option<u8> {
         b'A'..=b'F' => Some(c - b'A' + 10),
         _ => None,
     }
+}
+
+/// Decode a ui.lat panel noun to JSON for the GUI renderer.
+fn panel_json(n: &crate::knot::N) -> Option<String> {
+    use crate::knot::Knot;
+    fn cord(n: &crate::knot::N) -> Option<String> {
+        n.as_atom().and_then(|a| a.as_cord())
+    }
+    fn cell(n: &crate::knot::N) -> Option<(crate::knot::N, crate::knot::N)> {
+        if let Knot::Cell(h, t) = &**n { Some((h.clone(), t.clone())) } else { None }
+    }
+    fn list(mut n: crate::knot::N) -> Vec<crate::knot::N> {
+        let mut out = Vec::new();
+        while let Knot::Cell(h, t) = &*n.clone() {
+            out.push(h.clone());
+            n = t.clone();
+        }
+        out
+    }
+    fn item(n: &crate::knot::N) -> Option<String> {
+        let (tag, payload) = cell(n)?;
+        let t = cord(&tag)?;
+        match t.as_str() {
+            "label" => {
+                let (text, _) = cell(&payload)?;
+                Some(format!("{{\"t\":\"label\",\"text\":\"{}\"}}", json_escape(&cord(&text)?)))
+            }
+            "field" => {
+                let (name, rest) = cell(&payload)?;
+                let (init, _) = cell(&rest)?;
+                Some(format!(
+                    "{{\"t\":\"field\",\"name\":\"{}\",\"init\":\"{}\"}}",
+                    json_escape(&cord(&name)?),
+                    json_escape(&cord(&init).or_else(|| init.as_atom().map(|a| a.to_u128().map(|v| v.to_string()).unwrap_or_default()))?)
+                ))
+            }
+            "button" => {
+                let (text, rest) = cell(&payload)?;
+                let (cmdwords, _) = cell(&rest)?;
+                let words: Vec<String> = list(cmdwords).iter().filter_map(cord).collect();
+                Some(format!(
+                    "{{\"t\":\"button\",\"text\":\"{}\",\"cmd\":\"{}\"}}",
+                    json_escape(&cord(&text)?),
+                    json_escape(&words.join(" "))
+                ))
+            }
+            "row" => {
+                let (items, _) = cell(&payload)?;
+                let parts: Vec<String> = list(items).iter().filter_map(item).collect();
+                Some(format!("{{\"t\":\"row\",\"items\":[{}]}}", parts.join(",")))
+            }
+            _ => None,
+        }
+    }
+    let (tag, payload) = cell(n)?;
+    if cord(&tag)? != "panel" {
+        return None;
+    }
+    let (title, rest) = cell(&payload)?;
+    let (items, _) = cell(&rest)?;
+    let parts: Vec<String> = list(items).iter().filter_map(|i| item(i)).collect();
+    Some(format!(
+        "{{\"title\":\"{}\",\"items\":[{}]}}",
+        json_escape(&cord(&title)?),
+        parts.join(",")
+    ))
+}
+
+/// Join a 0-terminated list of cords into a string, skipping the "_" marker
+/// (lib/lexis.lat uses %_ for an empty syllable coda).
+fn cord_list_to_string(n: &crate::knot::N) -> String {
+    use crate::knot::Knot;
+    let mut out = String::new();
+    let mut cur = n.clone();
+    while let Knot::Cell(h, t) = &*cur.clone() {
+        if let Some(c) = h.as_atom().and_then(|a| a.as_cord()) {
+            if c != "_" {
+                out.push_str(&c);
+            }
+        }
+        cur = t.clone();
+    }
+    out
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
 }
 
 fn html_escape(s: &str) -> String {

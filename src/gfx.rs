@@ -47,6 +47,12 @@ fn escape(s: &str) -> String {
 
 /// Walk a scene noun (a list of `[tag payload]` shapes) and render it as a standalone SVG.
 pub fn render_scene(scene: &N, w: u128, h: u128) -> String {
+    let body = render_scene_body(scene);
+    body
+}
+
+/// Render the shapes of a scene to SVG elements (no outer <svg> wrapper).
+fn render_scene_body(scene: &N) -> String {
     let mut body = String::new();
     let mut cur = scene.clone();
     while let Knot::Cell(shape, rest) = &*cur {
@@ -94,6 +100,55 @@ pub fn render_scene(scene: &N, w: u128, h: u128) -> String {
                         );
                     }
                 }
+                "ellipse" => {
+                    // payload = [ x y rx ry c ]
+                    let p = nat_list(payload);
+                    if p.len() >= 5 {
+                        body += &format!(
+                            "<ellipse cx='{}' cy='{}' rx='{}' ry='{}' fill='{}'/>",
+                            p[0], p[1], p[2], p[3], color(p[4])
+                        );
+                    }
+                }
+                "pline" => {
+                    // an OPEN polyline: payload = [ pts w c ] (stroke width w)
+                    if let Knot::Cell(pts, prest) = &**payload {
+                        let pstr: Vec<String> = rows(pts)
+                            .iter()
+                            .filter(|r| r.len() >= 2)
+                            .map(|r| format!("{},{}", r[0], r[1]))
+                            .collect();
+                        let rest_v = nat_list(prest);
+                        let w = rest_v.first().copied().unwrap_or(2).max(1);
+                        let c = rest_v.get(1).copied().unwrap_or(0);
+                        body += &format!(
+                            "<polyline points='{}' fill='none' stroke='{}' stroke-width='{}' stroke-linejoin='round' stroke-linecap='round'/>",
+                            pstr.join(" "), color(c), w
+                        );
+                    }
+                }
+                "ring" => {
+                    // an unfilled circle: payload = [ x y r w c ]
+                    let p = nat_list(payload);
+                    if p.len() >= 5 {
+                        body += &format!(
+                            "<circle cx='{}' cy='{}' r='{}' fill='none' stroke='{}' stroke-width='{}'/>",
+                            p[0], p[1], p[2], color(p[4]), p[3].max(1)
+                        );
+                    }
+                }
+                "fade" => {
+                    // translucency wrapper: payload = [ alpha(0..100) shape ] — renders the
+                    // inner shape inside a group with opacity alpha/100.
+                    if let Knot::Cell(ah, sh) = &**payload {
+                        let a = natof(ah).min(100);
+                        if let Knot::Cell(inner, _) = &**sh {
+                            let one = crate::knot::cell(inner.clone(), crate::knot::num(0));
+                            let sub = render_scene_body(&one);
+                            body += &format!("<g opacity='{}.{:02}'>{}</g>", a / 100, a % 100, sub);
+                        }
+                    }
+                }
                 "text" => {
                     // payload = [ x y s c ]
                     if let Knot::Cell(xh, r1) = &**payload {
@@ -114,11 +169,7 @@ pub fn render_scene(scene: &N, w: u128, h: u128) -> String {
         }
         cur = rest.clone();
     }
-    format!(
-        "<svg xmlns='http://www.w3.org/2000/svg' width='{}' height='{}' viewBox='0 0 {} {}'>\
-         <rect width='{}' height='{}' fill='#f8f8f4'/>{}</svg>",
-        w, h, w, h, w, h, body
-    )
+    body
 }
 
 #[cfg(test)]

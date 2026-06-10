@@ -1,0 +1,30 @@
+:: ===========================================================================
+:: ui.lat — graphical front ends as Latte data (the Oberon Dialogs idea).
+::
+:: A PANEL is an ordinary noun describing a small user interface: labels,
+:: input fields, and buttons whose commands are system command lines. The host
+:: serializes a panel to the GUI (/api/ui), which renders it as a live viewer;
+:: pressing a button executes its command with $name tokens replaced by the
+:: panel's current field values. So a graphical front end is just a Latte arm
+:: that returns a panel — design it, Compile, and open it with `ui Mod.arm`.
+::
+:: Shapes (each a [ %tag payload ] value):
+::   (label %text)               a caption
+::   (field %name %init)         a named text input with an initial value
+::   (button %text cmdwords)     a button; cmdwords is a list of cords that the
+::                               GUI joins with spaces into one command line,
+::                               e.g. [ %Tool.fib [ %$n 0 ] ]  ->  "Tool.fib 30"
+::   (row items)                 lay items out left-to-right
+::   (panel %title items)        the top-level panel (items stack vertically)
+:: ===========================================================================
+import std
+core ui
+  label  = fn [s] -> [ %label [ s 0 ] ]
+  field  = fn [name init] -> [ %field [ name [ init 0 ] ] ]
+  button = fn [s cmd] -> [ %button [ s [ cmd 0 ] ] ]
+  row    = fn [items] -> [ %row [ items 0 ] ]
+  panel  = fn [title items] -> [ %panel [ title [ items 0 ] ] ]
+
+  :: small helpers
+  buttons = fn [pairs] -> (row (map (fn [p] -> (button (head p) (tail p))) pairs))
+end

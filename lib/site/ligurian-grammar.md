@@ -2,7 +2,7 @@
 
 *Hosted by Orpheus / Hymn. Source: Snapshots of the Labyrinth — "Ligurian Grammar" (kazisiddiqui, April 2026). The Heart Speech forms below are exactly what the system's SCArs engine derives from the Solar Speech.*
 
-Use this script to generate vocabulary: <https://75vwdt.csb.app/>
+Generate vocabulary and derive words **live** at [/derive](/derive): the system’s own SCArs engine derives both Solar Speech (from PIE, stages 0a–9 below) and Heart Speech (Phases II–VII) in real time, and builds new phonotactically valid roots on demand.
 
 **Ligurian** (Greek Λίγυες, Latin *Ligurēs*; natively *Ligos*) is an Indo-European language spoken in the city of Ligos, on the site of present-day Istanbul. Noun *ligā* (f.) = "tongue, binding speech." In a parallel dimension, Ligurian never went extinct. Despite being conquered by Greeks several times during their wars with the Persians and Medes, the Ancient Ligurians still rule the **Kingdom of the Strait** (*Rezā Dorās*, Heart Speech *Reazō-yō Nuorō̃*).
 

@@ -26,6 +26,11 @@ core gfx
   poly   = fn [pts c]         -> [ %poly   [ pts [ c 0 ] ] ]
   text   = fn [x y s c]       -> [ %text   [ x  [ y  [ s  [ c 0 ] ] ] ] ]
 
+  ellipse = fn [x y rx ry c]  -> [ %ellipse [ x [ y [ rx [ ry [ c 0 ] ] ] ] ] ]
+  pline  = fn [pts w c]       -> [ %pline  [ pts [ w [ c 0 ] ] ] ]   :: open polyline, stroke width w
+  ring   = fn [x y r w c]     -> [ %ring   [ x [ y [ r [ w [ c 0 ] ] ] ] ] ]  :: unfilled circle
+  fade   = fn [a shape]       -> [ %fade   [ a [ shape 0 ] ] ]       :: opacity a in 0..100
+
   :: a point for a polygon/polyline is a [x y] pair-list
   pt = fn [x y] -> [ x [ y 0 ] ]
 
@@ -43,6 +48,17 @@ core gfx
       else again(+(i), [ (circle (add x (mul i d)) y r c) acc ])
     end
 
+  :: plot a function f over x = 0..n-1 as an open polyline scaled into a box
+  fplot = fn [f n x0 y0 w h c] ->
+    let ys = (map (fn [i] -> (f i)) (range n)) in
+    let mm = (foldl (fn [a v] -> (max a v)) 1 ys) in
+    let pts = loop with [i = 0, c2 = ys, acc = 0] :
+                if (c2 == 0) then (reverse acc)
+                else again(+(i), (tail c2),
+                  [ (pt (add x0 (div (mul i w) (max 1 (sub n 1)))) (sub (add y0 h) (div (mul (head c2) h) mm))) acc ])
+              end in
+    (pline pts 2 c)
+
   :: ---- a demo scene: a little house with a sun, from primitives ----------
   demo = fn [_] ->
     [ (rect 40 120 170 95 (brown 0))
@@ -53,6 +69,9 @@ core gfx
     [ (circle 262 58 30 (yellow 0))
     [ (line 262 58 305 26 (yellow 0))
     [ (line 262 58 300 70 (yellow 0))
+    [ (fade 40 (ellipse 125 232 95 14 (rgb 120 120 140)))
+    [ (ring 262 58 38 2 (rgb 220 160 40))
+    [ (fplot (fn [i] -> (add 4 (mul i (sub 12 i)))) 13 30 8 120 36 (blue 0))
     [ (text 40 245 %orpheus (black 0))
-    0 ] ] ] ] ] ] ] ] ]
+    0 ] ] ] ] ] ] ] ] ] ] ] ]
 end
