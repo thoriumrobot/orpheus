@@ -1,0 +1,134 @@
+:: ===========================================================================
+:: fin.lat — practical financial machine learning, in Latte.
+::
+:: A small pipeline in the spirit of Lopez de Prado's "Advances in Financial
+:: Machine Learning": engineer stationary features from a price series, label
+:: each observation by its forward return, split the data WALK-FORWARD (train
+:: on the past, test on the future — no shuffling, to avoid look-ahead leakage),
+:: and fit a classifier.  The model here is multi-feature LOGISTIC REGRESSION
+:: (built on `nn`/`num`), giving a probability of an up move.
+::
+:: Prices and features are signed fixed-point numbers (×1000).  Returns are
+:: expressed in percent (×100 of the raw ratio) so magnitudes stay informative
+:: at fixed-point precision.
+:: ===========================================================================
+import nn
+core fin
+  :: ---- feature engineering ------------------------------------------------
+  :: simple returns in percent:  r_t = 100·(p_t − p_{t-1})/p_{t-1}
+  rets = fn [ps] ->
+    loop with [c = ps, prev = (head ps), acc = 0] :
+      if ((tail c) == 0) then (reverse acc)
+      else let p = (head (tail c)) in
+        again((tail c), p, [ (nmul (nint 100) (ndiv (nsub p prev) prev)) acc ])
+    end
+
+  vzeros = fn [k] -> (map (fn [_] -> [0 0]) (range k))
+
+  :: build a supervised dataset: feature vector = the previous k returns;
+  :: label = 1 if the NEXT return is positive, else 0.  Returns [xs ys].
+  dataset = fn [rs k] ->
+    loop with [c = rs, fx = 0, fy = 0] :
+      if (lt (len c) (+(k))) then [ (reverse fx) (reverse fy) ]
+      else
+        let feat = (take k c) in
+        let nextret = (nth c k) in
+        let y = if (nlt [0 0] nextret) then 1 else 0 in
+        again((tail c), [ feat fx ], [ y fy ])
+    end
+
+  :: ---- logistic regression classifier ------------------------------------
+  lr_score = fn [w b x] -> (nadd (ndot w x) b)
+  lr_prob  = fn [w b x] -> (nsigmoid (lr_score w b x))
+  lr_pred  = fn [w b x] -> if (nlt (lr_prob w b x) [0 500]) then 0 else 1
+  yval     = fn [y] -> if (y == 0) then [0 0] else [0 1000]
+
+  :: one batch gradient-descent step (cross-entropy gradient = prob − y)
+  lr_step = fn [w b xs ys lr] ->
+    let n = (npos (mul (len xs) 1000)) in
+    let g = loop with [px = xs, py = ys, gw = (vzeros (len w)), gb = [0 0]] :
+              if (px == 0) then [ gw gb ]
+              else
+                let e = (nsub (lr_prob w b (head px)) (yval (head py))) in
+                again((tail px), (tail py), (vadd gw (vscale e (head px))), (nadd gb e))
+            end in
+    let step = (ndiv lr n) in
+    [ (vsub w (vscale step (head g))) (nsub b (nmul step (tail g))) ]
+
+  lr_train = fn [xs ys lr iters] ->
+    loop with [w = (vzeros (len (head xs))), b = [0 0], k = 0] :
+      if (k == iters) then [ w b ]
+      else let p = (lr_step w b xs ys lr) in again((head p), (tail p), +(k))
+    end
+
+  :: classification accuracy as a signed fraction (e.g. [0 560] = 0.560)
+  lr_acc = fn [w b xs ys] ->
+    let c = loop with [px = xs, py = ys, n = 0] :
+              if (px == 0) then n
+              else if ((lr_pred w b (head px)) == (head py)) then again((tail px), (tail py), +(n))
+                   else again((tail px), (tail py), n)
+            end in
+    (ndiv (npos (mul c 1000)) (npos (mul (len xs) 1000)))
+
+  :: majority-class baseline accuracy on a label list
+  base_acc = fn [ys] ->
+    let ups = (foldl (fn [a y] -> if (y == 0) then a else +(a)) 0 ys) in
+    let n = (len ys) in
+    let frac = (ndiv (npos (mul ups 1000)) (npos (mul n 1000))) in
+    (nmax frac (nsub [0 1000] frac))
+
+  :: ---- the end-to-end pipeline --------------------------------------------
+  :: prices → returns → (features,labels) → walk-forward split → train → eval.
+  :: `split` is the number of training samples (the rest are the future test set).
+  :: returns [ train_acc test_acc baseline_test ].
+  pipeline = fn [prices k iters split] ->
+    let ds = (dataset (rets prices) k) in
+    let xs = (head ds) in let ys = (tail ds) in
+    let xtr = (take split xs) in let ytr = (take split ys) in
+    let xte = (drop split xs) in let yte = (drop split ys) in
+    let wb = (lr_train xtr ytr [0 200] iters) in
+    let w = (head wb) in let b = (tail wb) in
+    [ (lr_acc w b xtr ytr) [ (lr_acc w b xte yte) [ (base_acc yte) 0 ] ] ]
+
+  :: predictions over a feature set (for charting a strategy equity curve)
+  preds = fn [w b xs] -> (map (fn [x] -> (lr_pred w b x)) xs)
+
+  :: ---- equity-curve helpers (for visualization) --------------------------
+  cumsum  = fn [xs] -> loop with [c = xs, acc = [0 0], out = 0] : if (c == 0) then (reverse out) else let a = (nadd acc (head c)) in again((tail c), a, [ a out ]) end
+  zipwith = fn [f a b] -> loop with [x = a, y = b, out = 0] : if (x == 0) then (reverse out) else again((tail x), (tail y), [ (f (head x) (head y)) out ]) end
+  :: the forward return that labels each sample (percent), one per dataset row
+  labret  = fn [rs k] -> loop with [c = rs, out = 0] : if (lt (len c) (+(k))) then (reverse out) else again((tail c), [ (nth c k) out ]) end
+
+  :: ---- feature standardization (z-score), fit on the training rows only ---
+  heads = fn [rows] -> (map (fn [r] -> (head r)) rows)
+  tails = fn [rows] -> (map (fn [r] -> (tail r)) rows)
+  transpose = fn [rows] -> loop with [rs = rows, out = 0] : if ((head rs) == 0) then (reverse out) else again((tails rs), [ (heads rs) out ]) end
+  nstd = fn [c] -> let m = (nmean c) in (nsqrt (nmean (map (fn [v] -> let d = (nsub v m) in (nmul d d)) c)))
+  colstats = fn [cols] -> (map (fn [c] -> [ (nmean c) (nstd c) ]) cols)   :: per-column [mean std]
+  zrow = fn [stats row] ->
+    (zipwith (fn [st x] -> let m = (head st) in let s = (tail st) in
+       if (nlt s [0 1]) then (nsub x m) else (ndiv (nsub x m) s)) stats row)
+
+  :: full run for the gold demo: returns
+  ::   [ train_acc test_acc baseline_test strategy_equity buyhold_equity ]
+  :: where the two equity curves are cumulative percent returns over the TEST set
+  :: (strategy = take the long return only on days the model predicts an up move).
+  gold_run = fn [prices k iters split] ->
+    let rs = (rets prices) in
+    let ds = (dataset rs k) in
+    let xraw = (head ds) in let ys = (tail ds) in
+    let stats = (colstats (transpose (take split xraw))) in    :: train-only statistics
+    let xs = (map (fn [r] -> (zrow stats r)) xraw) in           :: standardized features
+    let xtr = (take split xs) in let ytr = (take split ys) in
+    let xte = (drop split xs) in let yte = (drop split ys) in
+    let wb = (lr_train xtr ytr [0 200] iters) in
+    let w = (head wb) in let b = (tail wb) in
+    let lte = (drop split (labret rs k)) in
+    let ps = (preds w b xte) in
+    let strat = (zipwith (fn [p r] -> if (p == 0) then [0 0] else r) ps lte) in
+    [ (lr_acc w b xtr ytr)
+    [ (lr_acc w b xte yte)
+    [ (base_acc yte)
+    [ (cumsum strat)
+    [ (cumsum lte) 0 ] ] ] ] ]
+end

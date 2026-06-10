@@ -215,3 +215,116 @@ your data so the meaningful digits sit above `0.001`).
 | `lib/plot.lat` | chart layout (`maxof`, `bars`, `points`) |
 | `latte tensor` / `latte ml` / `latte chart` | CLI demos |
 | `/`, `/editor`, `/chart` | the GUI: console, Facet editor, charts (start with `latte`) |
+
+---
+
+## More models
+
+`lib/ml.lat` now carries three further model families beyond linear regression, all written in
+Latte over the signed fixed-point library (no transcendental functions required):
+
+| model | arms | demo |
+|-------|------|------|
+| **Perceptron** — online linear classifier, classes {0,1} | `pscore`, `pclass`, `ppredict`, `pepoch`, `ptrain` | `latte ml perceptron` — learns to classify x>0 vs x<0; predictions `1 1 0 0` |
+| **k-means** (k = 2) — unsupervised clustering | `kdist2`, `knearest`, `kmean`, `kstep`, `kmeans2` | `latte ml kmeans` — clusters {1,2,3,10,11,12} to centroids ≈ 2.0 and 11.0 |
+| **k-NN** (k = 1) — instance-based classification | `kdist2`, `knn1` | `latte ml knn` — labels a query by its nearest training point |
+
+The perceptron uses the classic mistake-driven update `w ← w + lr·(y − ŷ)·x`; k-means alternates
+nearest-centroid assignment with mean recomputation; 1-NN returns the label of the closest point by
+squared distance. Each is checked in the test suite (`ml_new_models_learn`).
+
+---
+
+## Chess: a searching evaluator
+
+`lib/chessml.lat` learns piece values by gradient descent (the `trained` weights) and used to play
+a 1-ply greedy move. It now adds a **positional evaluation** (`centerbonus`/`evalpos`: a small bonus
+for occupying the four central squares) and an **alpha-beta minimax search** (`minimax`, `choose_ab`)
+that looks several plies ahead — so the machine no longer hangs pieces or misses recaptures, and it
+finds forced mates (verified on a mate-in-one in `chess_ab_search_finds_mate_and_legal_moves`). The
+GUI's "play the model" runs `choose_ab` at depth 2 through the compiled engine.
+
+---
+
+## Neural networks (`lib/nn.lat`)
+
+The neural-network library treats a network as **composable data**: an architecture is a *list of
+layers*, and a forward pass is a fold (`net_fwd`) over that list. Layers are tagged:
+
+| layer | meaning |
+|-------|---------|
+| `[%dense [W b]]` | a fully-connected layer, `W·x + b` (W is a list of rows, b a bias vector) |
+| `[%relu 0]` | rectified-linear activation, elementwise `max(0, x)` |
+| `[%tanh 0]` | a fast fixed-point `tanh` activation |
+| `[%res SUB]` | a **residual / skip connection**: `SUB(x) + x` |
+
+Because `%res` carries its own sub-network, you can nest blocks — a `resblock W1 b1 W2 b2` is just
+`[%res …]` wrapping two dense layers and ReLUs, exactly the building block of a ResNet. `net_fwd`
+runs any such architecture, so deeper nets are built by consing more layers onto the list. The
+vector/matrix plumbing (`vadd`, `vsub`, `vmul`, `vscale`, `matvec`, `outer`, `matTvec`, `mscale`,
+`msub`) is all in the library, over the signed fixed-point numbers of `num`.
+
+### Training by backpropagation
+
+Beyond inference, the library trains a one-hidden-layer MLP (ReLU hidden, linear output, MSE loss)
+by full backprop: `mlp_fwd`, `mlp_step` (one SGD step over a sample), `mlp_epoch`, `mlp_train`, and
+`mlp_loss`. The gradient flows the textbook way — output error `out − y`, then `outer(dout, h)` for
+the output weights, `matTvec(W2, dout)` back to the hidden layer, gated by `drelu` on the
+pre-activations, then `outer(dz1, x)` for the input weights.
+
+`latte nn` demonstrates it on `y = |x|`, a function no linear model can fit but a two-unit ReLU
+hidden layer can. Starting away from the solution the loss falls from ≈ 2.7 to ≈ 0 and the network
+reproduces `|−3|,|−1|,|1|,|3| = 3,1,1,3`. The command also writes a **loss curve** (`nn-loss.svg`).
+Convergence and the residual-block forward pass are both checked in the test suite
+(`nn_mlp_learns_abs_by_backprop`, `nn_composable_residual_forward`).
+
+---
+
+## Visualization for machine learning
+
+`viz.rs` gains a **multi-series line chart** (`render_lines`) — the plot ML actually needs: a shared
+y-scale, gridlines with value labels, a titled frame, and a legend. It is what draws the MLP loss
+curve and, below, the trading strategy's equity curve against its benchmark. (The earlier single-
+series `bar`/`line`/`scatter` charts laid out by `lib/plot.lat` remain for `latte chart` and the
+`/chart` GUI page.)
+
+---
+
+## Financial machine learning (`lib/fin.lat`)
+
+`fin.lat` is a small, honest pipeline in the spirit of Lopez de Prado's *Advances in Financial
+Machine Learning*. The tool **composes the other libraries** — `num` for arithmetic, `nn` for the
+vector/dot-product plumbing, `plot`/`viz` for the chart — into the standard quant workflow:
+
+1. **Features** — `rets` turns a price series into percent returns; `dataset rs k` builds a
+   supervised set whose feature vector is the previous `k` returns.
+2. **Labels** — fixed-horizon labeling: `1` if the next return is positive, else `0`.
+3. **Standardization** — `transpose`/`colstats`/`zrow` z-score the features using **training-set
+   statistics only**, so no information leaks from the future.
+4. **Walk-forward split** — the first part of the series trains, the later part tests; the data is
+   never shuffled, which is the single most important guard against look-ahead leakage.
+5. **Model** — multi-feature **logistic regression** (`lr_score`/`lr_prob`/`lr_pred`/`lr_step`/
+   `lr_train`), fit by batch gradient descent with the fast fixed-point `nsigmoid`.
+6. **Evaluation** — `lr_acc` and a majority-class `base_acc`, plus a strategy/buy-&-hold equity
+   curve (`gold_run`).
+
+### Demo: predicting gold/USD
+
+`latte fin gold` runs the whole pipeline on **480 real daily XAU/USD closes (2020–2022)** embedded
+in the binary (sourced from a public daily-bars dataset). With five lagged returns as features and a
+70/30 walk-forward split it reports:
+
+```
+training accuracy : 49.2%
+TEST accuracy     : 50.3%   (out-of-sample)
+baseline (majority): 50.3%
+edge over baseline: +0.0 pts
+```
+
+That is the *correct* and honest result, not a disappointing one: daily price direction is close to
+a coin flip, because financial data is low signal-to-noise — exactly de Prado's thesis. The same
+classifier earns a **+50-point** edge on a synthetic mean-reverting series
+(`fin_logistic_learns_mean_reversion` in the test suite), so the model works; the gold market simply
+has no easy linear signal at this horizon. `latte fin gold` also writes `gold-fin.svg`, the
+out-of-sample equity of the strategy against buy-and-hold. The deliverable is a working, leak-aware
+pipeline — not a profit machine, and the tool says so.

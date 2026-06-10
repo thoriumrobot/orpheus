@@ -33,4 +33,13 @@ core std
   map = fn [f xs] -> loop with [c = xs, acc = 0] : if (c == 0) then (reverse acc) else again((tail c), [ (f (head c)) acc ]) end
   filter = fn [f xs] -> loop with [c = xs, acc = 0] : if (c == 0) then (reverse acc) else if ((f (head c)) == 0) then again((tail c), [ (head c) acc ]) else again((tail c), acc) end
   foldl = fn [f z xs] -> loop with [c = xs, acc = z] : if (c == 0) then acc else again((tail c), (f acc (head c))) end
+
+  :: --- more list utilities (windowing, pairing, sums) ---
+  take = fn [n xs] -> loop with [k = n, c = xs, acc = 0] : if (k == 0) then (reverse acc) else if (c == 0) then (reverse acc) else again((dec k), (tail c), [ (head c) acc ]) end
+  drop = fn [n xs] -> loop with [k = n, c = xs] : if (k == 0) then c else if (c == 0) then 0 else again((dec k), (tail c)) end
+  last = fn [xs] -> loop with [c = xs] : if ((tail c) == 0) then (head c) else again((tail c)) end
+  sum = fn [xs] -> (foldl (fn [a v] -> (add a v)) 0 xs)
+  replicate = fn [n v] -> loop with [k = n, acc = 0] : if (k == 0) then acc else again((dec k), [ v acc ]) end
+  zip = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else if (y == 0) then (reverse acc) else again((tail x), (tail y), [ [ (head x) (head y) ] acc ]) end
+  foldr = fn [f z xs] -> (foldl (fn [a v] -> (f v a)) z (reverse xs))
 end

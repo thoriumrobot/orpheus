@@ -62,9 +62,14 @@ pub fn board_side(state: &N) -> (Vec<u128>, u128) {
 /// (Minerva); otherwise the fast greedy chooser. `None` = no move (game over). Used by
 /// the GUI's `/api/chess` to play "against the model".
 pub fn ai_move(state: &N, ml: bool) -> Option<N> {
+    // search depth (plies) for the learned machine; 2-ply alpha-beta with a positional
+    // evaluation plays markedly stronger than the old 1-ply greedy chooser.
+    const DEPTH: u128 = 2;
     let mv = if ml {
         let a = ai()?;
-        a.ml.call("choose_ml", cell(state.clone(), a.weights.clone())).ok()?
+        a.ml
+            .call("choose_ab", cell(state.clone(), cell(a.weights.clone(), num(DEPTH))))
+            .ok()?
     } else {
         rules_engine()?.call("choose", state.clone()).ok()?
     };
@@ -347,6 +352,27 @@ mod tests {
     fn chess_opening_is_legal() {
         assert_eq!(val("(len (legal (initial 0)))"), 20);
         assert_eq!(val("(status (initial 0))"), 0);
+    }
+
+    #[test]
+    fn chess_ab_search_finds_mate_and_legal_moves() {
+        // run with the learned evaluator + search
+        let valml = |expr: &str| {
+            latte::run_with_libs(expr, &["std", "chess", "num", "chessml"])
+                .unwrap_or_else(|e| panic!("EXPR <{}> ERR <{}>", expr, e))
+                .as_atom()
+                .unwrap()
+                .to_u128()
+                .unwrap()
+        };
+        // mate in one: bK a8, wK c7, wQ b1, White to move → Qb7#. A 2-ply alpha-beta search
+        // (cheap here — only three pieces) must return a real move (a cell) whose resulting
+        // position is checkmate. (Deeper searches from dense positions use the compiled engine,
+        // which is far faster than this reference interpreter.)
+        let s = board(1, &[(0, 12), (10, 6), (57, 5)]);
+        assert_eq!(valml(&format!("(iscell (choose_ab {0} (trained 20) 2))", s)), 0);
+        let mate = format!("(status (apply (nth {0} 0) 1 (choose_ab {0} (trained 20) 2)))", s);
+        assert_eq!(valml(&mate), 1, "alpha-beta search should find the mate in one");
     }
     #[test]
     fn chess_detects_checkmate() {

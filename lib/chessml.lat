@@ -99,4 +99,71 @@ core chessml
              if (if (side == 1) then (nlt bestv v) else (nlt v bestv))
                then again((tail c), m, v) else again((tail c), best, bestv)
          end
+
+  :: ===========================================================================
+  :: Stronger play: a positional evaluation plus alpha-beta minimax search.
+  :: The static evaluation adds a small central-control term to the learned
+  :: material value; minimax then looks several plies ahead (so the machine no
+  :: longer hangs pieces or misses recaptures the way the 1-ply chooser does).
+  :: ===========================================================================
+
+  :: central-control bonus (White's view): ±0.1 per minor piece/pawn on d4 e4 d5 e5
+  centerbonus = fn [board] ->
+    (foldl (fn [acc i] ->
+       let p = (nth board i) in
+       if (member p [1 [2 [3 0]]]) then (nadd acc (npos 100))
+       else (if (member p [7 [8 [9 0]]]) then (nsub acc (npos 100)) else acc))
+     [0 0] [27 [28 [35 [36 0]]]])
+
+  :: static evaluation of a board from White's view: learned material + position
+  evalpos = fn [board w] -> (nadd (evalv board w) (centerbonus board))
+
+  :: leaf value of a state (White's view): mate/stalemate aware, else static eval
+  leafval = fn [state w] ->
+    let st = (status state) in
+    if (st == 1) then (if ((nth state 1) == 1) then (nnegate (si 1000)) else (si 1000))
+    else (if (st == 2) then [0 0] else (evalpos (nth state 0) w))
+
+  :: alpha-beta minimax to `depth` plies; value in White's view (White max, Black min)
+  minimax = fn [state depth w a b] ->
+    if (depth == 0) then (leafval state w)
+    else
+      let ms = (legal state) in
+      if (ms == 0) then (leafval state w)
+      else
+        let board = (nth state 0) in let side = (nth state 1) in
+        if (side == 1)
+          then loop with [c = ms, alpha = a, val = (nnegate (si 100000))] :
+                 if (c == 0) then val
+                 else (if (nlt b alpha) then val
+                   else
+                     let v = (minimax (apply board side (head c)) (dec depth) w alpha b) in
+                     let nv = (if (nlt val v) then v else val) in
+                     again((tail c), (if (nlt alpha nv) then nv else alpha), nv))
+               end
+          else loop with [c = ms, beta = b, val = (si 100000)] :
+                 if (c == 0) then val
+                 else (if (nlt beta a) then val
+                   else
+                     let v = (minimax (apply board side (head c)) (dec depth) w a beta) in
+                     let nv = (if (nlt v val) then v else val) in
+                     again((tail c), (if (nlt nv beta) then nv else beta), nv))
+               end
+
+  :: choose the move whose `depth`-ply minimax value is best for the side to move
+  choose_ab = fn [state w depth] ->
+    let board = (nth state 0) in let side = (nth state 1) in
+    let ms = (legal state) in
+    if (ms == 0) then 0
+    else
+      let lo = (nnegate (si 100000)) in let hi = (si 100000) in
+      loop with [c = (tail ms), best = (head ms),
+                 bestv = (minimax (apply board side (head ms)) (dec depth) w lo hi)] :
+        if (c == 0) then best
+        else
+          let m = (head c) in
+          let v = (minimax (apply board side m) (dec depth) w lo hi) in
+          if (if (side == 1) then (nlt bestv v) else (nlt v bestv))
+            then again((tail c), m, v) else again((tail c), best, bestv)
+      end
 end

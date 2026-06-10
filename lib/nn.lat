@@ -1,0 +1,110 @@
+:: ===========================================================================
+:: nn.lat — neural networks in Latte, over the signed fixed-point library.
+::
+:: A network is built from composable LAYERS, so architectures (including
+:: residual/skip connections, as in ResNets) are ordinary data you can fold a
+:: forward pass over.  A trainable 1-hidden-layer MLP comes with full
+:: backpropagation (ReLU hidden, linear output, MSE loss) so the structure is
+:: not just expressible but learnable.
+::
+:: Conventions
+::   vector  = list of signed numbers            (e.g. [ [0 1000] [ [1 500] 0 ] ])
+::   matrix  = list of rows, each a vector;  W is (outputs x inputs)
+::   dense layer params = [W b]
+::   MLP params         = [ W1 [ b1 [ W2 [ b2 0 ] ] ] ]
+:: ===========================================================================
+import num
+core nn
+  :: ---- vector / matrix algebra over signed numbers ------------------------
+  vadd  = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (nadd (head x) (head y)) acc ]) end
+  vsub  = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (nsub (head x) (head y)) acc ]) end
+  vmul  = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (nmul (head x) (head y)) acc ]) end
+  vscale = fn [s v] -> (map (fn [vi] -> (nmul s vi)) v)
+  vrelu = fn [v] -> (map (fn [vi] -> (nrelu vi)) v)
+  vtanh = fn [v] -> (map (fn [vi] -> (ntanh vi)) v)
+  matvec = fn [W x] -> (map (fn [row] -> (ndot row x)) W)
+  mscale = fn [s M] -> (map (fn [row] -> (vscale s row)) M)
+  msub  = fn [A B] -> loop with [a = A, b = B, acc = 0] : if (a == 0) then (reverse acc) else again((tail a), (tail b), [ (vsub (head a) (head b)) acc ]) end
+  outer = fn [u v] -> (map (fn [ui] -> (vscale ui v)) u)         :: u (col) x v (row) -> matrix
+  matTvec = fn [W d] ->                                          :: W^T . d  (W out x in, d out) -> in
+    loop with [rows = W, ds = d, acc = 0] :
+      if (rows == 0) then acc
+      else let term = (vscale (head ds) (head rows)) in
+        again((tail rows), (tail ds), if (acc == 0) then term else (vadd acc term))
+    end
+
+  :: ---- a dense (fully-connected) layer ------------------------------------
+  dense = fn [W b x] -> (vadd (matvec W x) b)
+
+  :: ---- composable layers: a network is a LIST of layers -------------------
+  :: layer forms:  [%dense [W b]]   [%relu 0]   [%tanh 0]   [%res sublayers]
+  layer_fwd = fn [L x] ->
+    case (head L) of
+      %dense -> let p = (tail L) in (dense (head p) (head (tail p)) x) ;
+      %relu  -> (vrelu x) ;
+      %tanh  -> (vtanh x) ;
+      %res   -> (vadd (net_fwd (tail L) x) x) ;
+      _      -> x
+    end
+  :: forward pass over a whole network (any architecture, ResNet-style included)
+  net_fwd = fn [layers x] -> (foldl (fn [acc L] -> (layer_fwd L acc)) x layers)
+
+  :: a residual block as a ready-made layer: y = relu(W2 . relu(W1 x + b1) + b2) + x
+  resblock = fn [W1 b1 W2 b2] ->
+    [ %res [ [%dense [ W1 [ b1 0 ] ] ] [ [%relu 0] [ [%dense [ W2 [ b2 0 ] ] ] [ [%relu 0] 0 ] ] ] ] ]
+
+  :: ---- trainable 1-hidden-layer MLP: ReLU hidden, linear output -----------
+  mlp_fwd = fn [p x] ->
+    let W1 = (nth p 0) in let b1 = (nth p 1) in let W2 = (nth p 2) in let b2 = (nth p 3) in
+    (dense W2 b2 (vrelu (dense W1 b1 x)))
+
+  drelu = fn [z] -> if (nlt [0 0] z) then [0 1000] else [0 0]    :: 1 if z>0 else 0
+
+  :: one SGD step on a single (x,y) example; MSE loss, gradient = (out - y)
+  mlp_step = fn [p x y lr] ->
+    let W1 = (nth p 0) in let b1 = (nth p 1) in let W2 = (nth p 2) in let b2 = (nth p 3) in
+    let z1 = (dense W1 b1 x) in
+    let h  = (vrelu z1) in
+    let out = (dense W2 b2 h) in
+    let dout = (vsub out y) in
+    let dW2 = (outer dout h) in
+    let dh  = (matTvec W2 dout) in
+    let dz1 = (vmul dh (map (fn [zi] -> (drelu zi)) z1)) in
+    let dW1 = (outer dz1 x) in
+    [ (msub W1 (mscale lr dW1))
+    [ (vsub b1 (vscale lr dz1))
+    [ (msub W2 (mscale lr dW2))
+    [ (vsub b2 (vscale lr dout)) 0 ] ] ] ]
+
+  :: one pass over the dataset
+  mlp_epoch = fn [p xs ys lr] ->
+    loop with [px = xs, py = ys, cp = p] :
+      if (px == 0) then cp
+      else again((tail px), (tail py), (mlp_step cp (head px) (head py) lr))
+    end
+  mlp_train = fn [p xs ys lr epochs] ->
+    loop with [cp = p, k = 0] : if (k == epochs) then cp else again((mlp_epoch cp xs ys lr), +(k)) end
+
+  :: mean squared error of the model over the data (a signed number)
+  mlp_loss = fn [p xs ys] ->
+    let s = loop with [px = xs, py = ys, acc = [0 0]] :
+              if (px == 0) then acc
+              else let e = (vsub (mlp_fwd p (head px)) (head py)) in
+                again((tail px), (tail py), (nadd acc (ndot e e)))
+            end in
+    (ndiv s (npos (mul (len xs) 1000)))
+
+  :: ---- demo: learn y = |x|, which needs a nonlinearity (two ReLU units) ----
+  :: starts away from the solution; loss should fall sharply over the epochs.
+  demo_data_x = fn [_] -> [ [ [1 3000] 0 ] [ [ [1 1000] 0 ] [ [ [0 1000] 0 ] [ [ [0 3000] 0 ] 0 ] ] ] ]
+  demo_data_y = fn [_] -> [ [ [0 3000] 0 ] [ [ [0 1000] 0 ] [ [ [0 1000] 0 ] [ [ [0 3000] 0 ] 0 ] ] ] ]
+  demo_init = fn [_] ->
+    [ [ [ [0 500] 0 ] [ [ [1 300] 0 ] 0 ] ]            :: W1 (2 hidden x 1 input)
+    [ [ [0 100] [ [1 100] 0 ] ]                        :: b1 (2)
+    [ [ [ [0 400] [ [0 600] 0 ] ] 0 ]                  :: W2 (1 output x 2 hidden)
+    [ [ [0 200] 0 ] 0 ] ] ] ]                          :: b2 (1)
+  nn_demo = fn [epochs] -> (mlp_train (demo_init 0) (demo_data_x 0) (demo_data_y 0) [0 80] epochs)
+  nn_demo_loss = fn [epochs] -> (mlp_loss (nn_demo epochs) (demo_data_x 0) (demo_data_y 0))
+  nn_demo_pred = fn [epochs] ->
+    let p = (nn_demo epochs) in (map (fn [x] -> (head (mlp_fwd p x))) (demo_data_x 0))
+end

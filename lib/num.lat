@@ -6,6 +6,7 @@ import std
 core num
   nscale = fn [_] -> 1000
   npos   = fn [m] -> [0 m]               :: a positive number from a fixed-point magnitude
+  nint   = fn [n] -> [0 (mul n 1000)]    :: a signed number from a whole integer (n.000)
   nzero  = fn [_] -> [0 0]
   nsign  = fn [x] -> head x
   nmag   = fn [x] -> tail x
@@ -28,4 +29,24 @@ core num
            if ((head a) == (head b))
              then (if ((head a) == 0) then (lt (tail a) (tail b)) else (lt (tail b) (tail a)))
              else (if ((head a) == 1) then 0 else 1)
+
+  :: --- helpers for numerics / machine learning ---
+  nabs  = fn [x] -> [ 0 (tail x) ]                      :: |x|
+  nmax  = fn [a b] -> if (nlt a b) then b else a
+  nmin  = fn [a b] -> if (nlt a b) then a else b
+  nrelu = fn [x] -> (nmax [0 0] x)                      :: rectified linear unit
+  nsum  = fn [xs] -> (foldl (fn [acc v] -> (nadd acc v)) [0 0] xs)
+  nmean = fn [xs] -> if (xs == 0) then [0 0] else (ndiv (nsum xs) (npos (mul (len xs) 1000)))
+  ndot  = fn [u v] -> loop with [a = u, b = v, acc = [0 0]] :   :: signed dot product
+            if (a == 0) then acc else again((tail a), (tail b), (nadd acc (nmul (head a) (head b)))) end
+  :: fast, numerically-stable activations (no transcendental needed):
+  ::   tanh(x) ≈ x / (1 + |x|)        sigmoid(x) ≈ 0.5 + 0.5·x/(1+|x|)
+  ntanh    = fn [x] -> (ndiv x (nadd [0 1000] (nabs x)))
+  nsigmoid = fn [x] -> (nadd [0 500] (nmul [0 500] (ntanh x)))
+  :: fixed-point square root by Newton's method (x ≥ 0)
+  nsqrt = fn [x] ->
+    if (nlt x [0 1]) then [0 0]
+    else loop with [r = (nmax [0 1000] x), k = 0] :
+           if (k == 24) then r else again((nmul [0 500] (nadd r (ndiv x r))), +(k))
+         end
 end

@@ -26,6 +26,8 @@ pub enum Sym {
     Sel,  // conditional select  (2 aux: a γ-bundle [then else], result)
     Head, // take a γ's first child (1 aux: result), erasing the second
     Tail, // take a γ's second child (1 aux: result), erasing the first
+    Pred, // predecessor / dec: faces a number, 1 aux = result
+    Ref(u32), // a reference to a top-level definition (defs[i]); unrolled lazily (HVM-style)
 }
 
 /// A port is (agent index, slot). Slot 0 is always the principal port.
@@ -37,11 +39,13 @@ pub struct Net {
     alive: Vec<bool>,
     link: Vec<[Port; 3]>,
     pub steps: usize,
+    defs: Vec<R>, // top-level definitions referenced by Ref(i); unrolled lazily
+    work: Vec<usize>, // active-pair worklist: agents whose principal was (re)wired
 }
 
 impl Net {
     pub fn new() -> Net {
-        Net { sym: Vec::new(), alive: Vec::new(), link: Vec::new(), steps: 0 }
+        Net { sym: Vec::new(), alive: Vec::new(), link: Vec::new(), steps: 0, defs: Vec::new(), work: Vec::new() }
     }
 
     fn add(&mut self, s: Sym) -> usize {
@@ -60,10 +64,17 @@ impl Net {
     pub fn free(&mut self) -> usize {
         self.add(Sym::Free)
     }
-    /// Connect two ports (symmetric).
+    /// Connect two ports (symmetric). Wiring a principal port (slot 0) may create a new active
+    /// pair, so the affected agents are pushed onto the worklist for the reducer to revisit.
     pub fn wire(&mut self, p: Port, q: Port) {
         self.link[p.0][p.1] = q;
         self.link[q.0][q.1] = p;
+        if p.1 == 0 {
+            self.work.push(p.0);
+        }
+        if q.1 == 0 {
+            self.work.push(q.0);
+        }
     }
 
     fn kill(&mut self, a: usize) {
@@ -73,6 +84,12 @@ impl Net {
     /// Is there a reduction rule for this (unordered) pair of symbols?
     fn has_rule(&self, a: Sym, b: Sym) -> bool {
         use Sym::*;
+        // A Ref interacts with whatever sits on its principal port: a consumer triggers a
+        // (lazy) unrolling, an eraser collects it (so recursion halts). This is the HVM-style
+        // REF extension that gives net-level fixpoints / general recursion.
+        if matches!(a, Ref(_)) || matches!(b, Ref(_)) {
+            return true;
+        }
         matches!(
             (a, b),
             (Eps, Eps)
@@ -98,15 +115,35 @@ impl Net {
                 | (Sel, Succ) | (Succ, Sel)
                 | (Head, Gamma) | (Gamma, Head)
                 | (Tail, Gamma) | (Gamma, Tail)
+                | (Pred, Zero) | (Zero, Pred)
+                | (Pred, Succ) | (Succ, Pred)
+                | (Eps, Pred) | (Pred, Eps)
         )
     }
 
     /// Find a reducible active pair, in scan order (forward = lowest agent first, reverse =
     /// highest first). The order is what differs between the confluence strategies.
-    fn find_pair(&self, reverse: bool) -> Option<(usize, usize)> {
+    /// Find a reducible active pair. The forward strategy drains an **active-pair worklist**
+    /// (amortised O(1) per step instead of a full O(n) scan), falling back to a single linear
+    /// scan when the worklist empties — which both confirms the normal form and guarantees no
+    /// pair is ever missed. The reverse strategy keeps the plain scan (used to demonstrate that
+    /// reduction order does not affect the result). Neither path allocates per step.
+    fn find_pair(&mut self, reverse: bool) -> Option<(usize, usize)> {
+        if !reverse {
+            while let Some(a) = self.work.pop() {
+                if self.alive[a] && self.sym[a] != Sym::Free {
+                    let (b, s) = self.link[a][0];
+                    if s == 0 && b != a && self.alive[b] && self.has_rule(self.sym[a], self.sym[b]) {
+                        return Some((a, b));
+                    }
+                }
+            }
+        }
         let n = self.sym.len();
-        let order: Vec<usize> = if reverse { (0..n).rev().collect() } else { (0..n).collect() };
-        for a in order {
+        let mut k = 0;
+        while k < n {
+            let a = if reverse { n - 1 - k } else { k };
+            k += 1;
             if !self.alive[a] || self.sym[a] == Sym::Free {
                 continue;
             }
@@ -131,6 +168,20 @@ impl Net {
         };
         use Sym::*;
         match (self.sym[a], self.sym[b]) {
+            // ---- HVM-style REF unrolling (net-level fixpoints) -----------------
+            // Ref meets an eraser → collect it (this is what lets recursion halt).
+            (Ref(_), Eps) => self.ref_erase(a, b),
+            (Eps, Ref(_)) => self.ref_erase(b, a),
+            // Ref meets any consumer → unroll its definition into the net.
+            (Ref(i), _) => self.ref_expand(a, i, b),
+            (_, Ref(i)) => self.ref_expand(b, i, a),
+            // ---- predecessor (dec) --------------------------------------------
+            (Pred, Zero) => self.pred_zero(a, b),
+            (Zero, Pred) => self.pred_zero(b, a),
+            (Pred, Succ) => self.pred_succ(a, b),
+            (Succ, Pred) => self.pred_succ(b, a),
+            (Eps, Pred) => self.erase(a, b),
+            (Pred, Eps) => self.erase(b, a),
             (Eps, Eps) => {
                 self.kill(a);
                 self.kill(b);
@@ -444,6 +495,155 @@ impl Net {
         self.kill(gamma);
     }
 
+    // ε ⋈ Ref: collect the reference (do NOT unroll). Its argument subnet is erased. This is
+    // the rule that lets a recursive function terminate: the unselected branch's recursive Ref
+    // meets an eraser and is dropped instead of expanding forever.
+    fn ref_erase(&mut self, r: usize, eps: usize) {
+        let arg = self.link[r][1];
+        let e2 = self.add(Sym::Eps);
+        self.wire((e2, 0), arg);
+        self.kill(r);
+        self.kill(eps);
+    }
+
+    // Ref ⋈ (any consumer): unroll the definition `defs[idx]` into the net, wiring its parameter
+    // input to the Ref's argument and its result to the consumer that demanded it. The body may
+    // itself contain Refs (recursive calls), which expand on demand in turn.
+    fn ref_expand(&mut self, r: usize, idx: u32, _other: usize) {
+        let target = self.link[r][0]; // the exact port that demanded this reference
+        let arg = self.link[r][1];
+        let rp = self.build_def(idx as usize, arg);
+        self.wire(rp, target);
+        self.kill(r);
+    }
+
+    // Pred ⋈ Zero: dec(0) = 0.
+    fn pred_zero(&mut self, pred: usize, zero: usize) {
+        let res = self.link[pred][1];
+        let z = self.add(Sym::Zero);
+        self.wire((z, 0), res);
+        self.kill(pred);
+        self.kill(zero);
+    }
+    // Pred ⋈ Succ: dec(S(p)) = p.
+    fn pred_succ(&mut self, pred: usize, succ: usize) {
+        let res = self.link[pred][1];
+        let p = self.link[succ][1];
+        self.wire(p, res);
+        self.kill(pred);
+        self.kill(succ);
+    }
+
+    /// Register a definition body, returning its index for a `Ref`.
+    fn push_def(&mut self, body: R) -> u32 {
+        self.defs.push(body);
+        (self.defs.len() - 1) as u32
+    }
+
+    /// Fan `src` out into `k` copies using δ duplicators (k=0 erases it, k=1 returns it).
+    fn fan(&mut self, src: Port, k: usize) -> Vec<Port> {
+        if k == 0 {
+            let e = self.add(Sym::Eps);
+            self.wire((e, 0), src);
+            return Vec::new();
+        }
+        if k == 1 {
+            return vec![src];
+        }
+        let mut copies = Vec::with_capacity(k);
+        let mut cur = src;
+        for _ in 0..k - 1 {
+            let d = self.add(Sym::Delta);
+            self.wire((d, 0), cur);
+            copies.push((d, 1));
+            cur = (d, 2);
+        }
+        copies.push(cur);
+        copies
+    }
+
+    /// Instantiate definition `idx` applied to the value at `arg`, returning the result port.
+    fn build_def(&mut self, idx: usize, arg: Port) -> Port {
+        let body = self.defs[idx].clone();
+        let k = nparams(&body);
+        let mut supply = self.fan(arg, k);
+        supply.reverse(); // so build() pops parameter copies in source order
+        self.build(&body, &mut supply)
+    }
+
+    /// Compile a recursion expression into the net, consuming parameter copies from `supply`.
+    /// `if` is compiled lazily by hoisting both branches into `Ref` closures: the selector wires
+    /// the taken branch's Ref to the result (so it unrolls) and erases the other (so it halts).
+    fn build(&mut self, r: &R, supply: &mut Vec<Port>) -> Port {
+        match r {
+            R::Num(n) => build_num(self, *n),
+            R::Param => supply.pop().expect("net recursion: parameter supply underflow"),
+            R::Add(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                let a = self.add(Sym::Add);
+                self.wire((a, 0), lp);
+                self.wire((a, 1), rp);
+                (a, 2)
+            }
+            R::Mul(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                let a = self.add(Sym::Mul);
+                self.wire((a, 0), lp);
+                self.wire((a, 1), rp);
+                (a, 2)
+            }
+            R::Lt(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                let a = self.add(Sym::Lt);
+                self.wire((a, 0), lp);
+                self.wire((a, 1), rp);
+                (a, 2)
+            }
+            R::Dec(x) => {
+                let xp = self.build(x, supply);
+                let p = self.add(Sym::Pred);
+                self.wire((p, 0), xp);
+                (p, 1)
+            }
+            R::SubK(x, k) => {
+                let mut cur = self.build(x, supply);
+                for _ in 0..*k {
+                    let p = self.add(Sym::Pred);
+                    self.wire((p, 0), cur);
+                    cur = (p, 1);
+                }
+                cur
+            }
+            R::Rec(a) => {
+                let ap = self.build(a, supply);
+                let rf = self.add(Sym::Ref(0)); // the main function is always defs[0]
+                self.wire((rf, 1), ap);
+                (rf, 0)
+            }
+            R::If(c, t, e) => {
+                let cp = self.build(c, supply);
+                let base_arg = supply.pop().expect("net recursion: missing then-branch argument");
+                let rec_arg = supply.pop().expect("net recursion: missing else-branch argument");
+                let base_idx = self.push_def((**t).clone());
+                let rec_idx = self.push_def((**e).clone());
+                let bref = self.add(Sym::Ref(base_idx));
+                self.wire((bref, 1), base_arg);
+                let rref = self.add(Sym::Ref(rec_idx));
+                self.wire((rref, 1), rec_arg);
+                let bundle = self.add(Sym::Gamma);
+                self.wire((bundle, 1), (bref, 0));
+                self.wire((bundle, 2), (rref, 0));
+                let sel = self.add(Sym::Sel);
+                self.wire((sel, 0), cp);
+                self.wire((sel, 1), (bundle, 0));
+                (sel, 2)
+            }
+        }
+    }
+
     /// Reduce to normal form (forward strategy). Returns the number of steps.
     pub fn normalize(&mut self) -> usize {
         let start = self.steps;
@@ -455,7 +655,42 @@ impl Net {
         self.steps - start
     }
 
-    /// Reduce to normal form preferring the highest-index active pair (reverse strategy).
+    /// Reduce to normal form, then force any recursive `Ref` left dangling on the lazy spine
+    /// (e.g. an additive recursive call whose result sits in a `Succ` predecessor and so never
+    /// gained principal-to-principal contact). After a full `normalize`, every `if` selector has
+    /// already fired, so the only un-expanded references are genuine demanded-but-not-yet-forced
+    /// tails; expanding one and renormalizing advances the recursion one level. Loops until the
+    /// result is fully evaluated or the step budget is exhausted.
+    pub fn normalize_forcing(&mut self) -> usize {
+        let start = self.steps;
+        loop {
+            self.normalize();
+            if self.steps - start > 4_000_000 {
+                break;
+            }
+            // find a reference still facing a live, non-eraser agent (a forced demand)
+            let mut stuck = None;
+            for a in 0..self.sym.len() {
+                if self.alive[a] && matches!(self.sym[a], Sym::Ref(_)) {
+                    let (b, _) = self.link[a][0];
+                    if b != a && self.alive[b] && self.sym[b] != Sym::Eps {
+                        stuck = Some(a);
+                        break;
+                    }
+                }
+            }
+            match stuck {
+                Some(a) => {
+                    if let Sym::Ref(i) = self.sym[a] {
+                        self.ref_expand(a, i, a);
+                        self.steps += 1;
+                    }
+                }
+                None => break,
+            }
+        }
+        self.steps - start
+    }
     pub fn normalize_rev(&mut self) -> usize {
         let start = self.steps;
         while self.step_with(true) {
@@ -732,6 +967,10 @@ fn lower(a: &crate::latte::Ast, env: &mut LowerEnv, fuel: u32) -> Result<Lowered
 /// Parse a Latte expression, compile its supported fragment to an interaction net, reduce it, and
 /// return `(value, interaction-steps)`.
 pub fn run_str(src: &str) -> Result<(u128, usize), String> {
+    // A self-recursive function is evaluated by net-level REF unrolling (genuine fixpoints).
+    if let Some(res) = run_rec(src)? {
+        return Ok(res);
+    }
     let ast = crate::latte::parse(src)?;
     let e = latte_to_expr(&ast)?;
     Ok(eval_net(&e))
@@ -819,6 +1058,153 @@ pub fn eval_net(e: &Expr) -> (u128, usize) {
     net.wire(res, (out, 0));
     let steps = net.normalize();
     (decode_num(&net, out), steps)
+}
+
+/// A recursion-capable expression over a single natural parameter. Compiled to the net by
+/// HVM-style REF unrolling — genuine net-level fixpoints, where the *reducer* expands the
+/// recursive definition on demand and collects it (against an eraser) at the base case.
+#[derive(Clone)]
+enum R {
+    Num(u128),
+    Param,
+    Add(Box<R>, Box<R>),
+    Mul(Box<R>, Box<R>),
+    Lt(Box<R>, Box<R>),
+    Dec(Box<R>),
+    SubK(Box<R>, u128),
+    Rec(Box<R>),
+    If(Box<R>, Box<R>, Box<R>),
+}
+
+/// Parameter copies the *top level* of `r` consumes. `if` does not descend into its branches
+/// (they become separate closures), but reserves one copy for each branch closure's argument.
+fn nparams(r: &R) -> usize {
+    match r {
+        R::Num(_) => 0,
+        R::Param => 1,
+        R::Add(a, b) | R::Mul(a, b) | R::Lt(a, b) => nparams(a) + nparams(b),
+        R::Dec(a) | R::SubK(a, _) | R::Rec(a) => nparams(a),
+        R::If(c, _, _) => nparams(c) + 2,
+    }
+}
+
+/// Convert a Latte gate body to `R`: the parameter becomes `Param`, self-calls become `Rec`.
+fn to_r(a: &crate::latte::Ast, param: &str, fname: &str) -> Result<R, String> {
+    use crate::latte::Ast;
+    match a {
+        Ast::Lit(n) => Ok(R::Num(*n)),
+        Ast::Var(x) if x == param => Ok(R::Param),
+        Ast::Var(x) => Err(format!(
+            "net recursion: free variable '{}' (only the parameter '{}' is supported)",
+            x, param
+        )),
+        Ast::Inc(e) => Ok(R::Add(Box::new(to_r(e, param, fname)?), Box::new(R::Num(1)))),
+        Ast::Fast(_, b) => to_r(b, param, fname),
+        Ast::If(c, t, e) => Ok(R::If(
+            Box::new(to_r(c, param, fname)?),
+            Box::new(to_r(t, param, fname)?),
+            Box::new(to_r(e, param, fname)?),
+        )),
+        Ast::Call(name, args) if name == fname => {
+            if args.len() != 1 {
+                return Err("net recursion: the recursive function must take one argument".into());
+            }
+            Ok(R::Rec(Box::new(to_r(&args[0], param, fname)?)))
+        }
+        Ast::Call(name, args) => {
+            let two = |k: fn(Box<R>, Box<R>) -> R| -> Result<R, String> {
+                if args.len() != 2 {
+                    return Err(format!("net recursion: '{}' expects 2 arguments", name));
+                }
+                Ok(k(
+                    Box::new(to_r(&args[0], param, fname)?),
+                    Box::new(to_r(&args[1], param, fname)?),
+                ))
+            };
+            match name.as_str() {
+                "add" => two(R::Add),
+                "mul" => two(R::Mul),
+                "lt" => two(R::Lt),
+                "dec" => {
+                    if args.len() != 1 {
+                        return Err("net recursion: 'dec' expects 1 argument".into());
+                    }
+                    Ok(R::Dec(Box::new(to_r(&args[0], param, fname)?)))
+                }
+                "sub" => match args.get(1) {
+                    Some(Ast::Lit(k)) if args.len() == 2 => {
+                        Ok(R::SubK(Box::new(to_r(&args[0], param, fname)?), *k))
+                    }
+                    _ => Err("net recursion: 'sub' on the net needs a literal second operand".into()),
+                },
+                other => Err(format!("net recursion: unsupported operation '{}'", other)),
+            }
+        }
+        Ast::Eq(_, _) => {
+            Err("net recursion: use '(lt n 1)' rather than '==' for the base test".into())
+        }
+        other => Err(format!(
+            "net recursion: unsupported construct {:?}",
+            std::mem::discriminant(other)
+        )),
+    }
+}
+
+fn mentions(a: &crate::latte::Ast, name: &str) -> bool {
+    use crate::latte::Ast;
+    match a {
+        Ast::Call(n, args) => n == name || args.iter().any(|x| mentions(x, name)),
+        Ast::If(c, t, e) => mentions(c, name) || mentions(t, name) || mentions(e, name),
+        Ast::Inc(e) | Ast::Fast(_, e) | Ast::Head(e) | Ast::Tail(e) | Ast::IsCell(e) => {
+            mentions(e, name)
+        }
+        Ast::Let(_, v, b) => mentions(v, name) || mentions(b, name),
+        Ast::Gate(_, b) => mentions(b, name),
+        Ast::Eq(x, y) => mentions(x, name) || mentions(y, name),
+        Ast::Loop(bs, b) => bs.iter().any(|(_, e)| mentions(e, name)) || mentions(b, name),
+        Ast::Again(es) | Ast::Tuple(es) => es.iter().any(|x| mentions(x, name)),
+        Ast::Case(s, arms) => mentions(s, name) || arms.iter().any(|(_, e)| mentions(e, name)),
+        _ => false,
+    }
+}
+
+/// Detect a self-recursive `let f = fn [n] -> BODY in (f K)` and evaluate it on the net by
+/// REF unrolling. Returns `Ok(None)` when the source is not of that shape (the caller then falls
+/// back to the non-recursive lowering).
+pub fn run_rec(src: &str) -> Result<Option<(u128, usize)>, String> {
+    use crate::latte::Ast;
+    let ast = crate::latte::parse(src)?;
+    let (name, gate, body_in) = match &ast {
+        Ast::Let(n, v, b) => (n, v.as_ref(), b.as_ref()),
+        _ => return Ok(None),
+    };
+    let (params, gbody) = match gate {
+        Ast::Gate(ps, b) => (ps, b.as_ref()),
+        _ => return Ok(None),
+    };
+    if params.len() != 1 {
+        return Ok(None);
+    }
+    let (callee, args) = match body_in {
+        Ast::Call(c, a) => (c, a),
+        _ => return Ok(None),
+    };
+    if callee != name || args.len() != 1 || !mentions(gbody, name) {
+        return Ok(None);
+    }
+    let body_r = to_r(gbody, &params[0], name)?;
+    let arg_expr = latte_to_expr(&args[0])?;
+    let arg_val = fold(&arg_expr).ok_or("net recursion: the initial argument must be constant")?;
+
+    let mut net = Net::new();
+    net.push_def(body_r); // defs[0] = the function body; Rec → Ref(0)
+    let argp = build_num(&mut net, arg_val);
+    let rf = net.agent(Sym::Ref(0));
+    net.wire((rf, 1), argp);
+    let out = net.free();
+    net.wire((rf, 0), (out, 0));
+    let steps = net.normalize_forcing();
+    Ok(Some((decode_num(&net, out), steps)))
 }
 
 /// The same expression as Latte source, for cross-checking against the Loom interpreter.
@@ -1318,6 +1704,41 @@ mod tests {
         }
         // sum 1..5 = 15
         assert_eq!(super::run_str("loop with [acc = 0, i = 5] : if (i == 0) then acc else again((add acc i), (dec i)) end").unwrap().0, 15);
+    }
+
+    #[test]
+    fn net_ref_recursion_matches_loom() {
+        // Genuine net-level fixpoints: a self-recursive function is unrolled by the net reducer
+        // (HVM-style REF nodes). Latte's `let` is not recursive, so the reference value is the
+        // SAME function written as a `loop` and run on the Loom interpreter — a cross-engine,
+        // cross-formulation check that the net's recursion is correct.
+        let cases = [
+            // (net: self-recursive let,                                   interpreter: loop)
+            ("let fac = fn [n] -> if (lt n 1) then 1 else (mul n (fac (dec n))) in (fac 6)",
+             "loop with [a = 1, i = 6] : if (lt i 1) then a else again((mul a i), (dec i)) end"),
+            ("let sum = fn [n] -> if (lt n 1) then 0 else (add n (sum (dec n))) in (sum 10)",
+             "loop with [a = 0, i = 10] : if (lt i 1) then a else again((add a i), (dec i)) end"),
+            ("let tri = fn [n] -> if (lt n 1) then 0 else (add n (tri (dec n))) in (tri 50)",
+             "loop with [a = 0, i = 50] : if (lt i 1) then a else again((add a i), (dec i)) end"),
+            ("let fib = fn [n] -> if (lt n 2) then n else (add (fib (sub n 1)) (fib (sub n 2))) in (fib 10)",
+             "loop with [a = 0, b = 1, i = 10] : if (lt i 1) then a else again(b, (add a b), (dec i)) end"),
+        ];
+        for (net_src, loop_src) in cases {
+            let (v, _) = super::run_str(net_src).expect(net_src);
+            let want = crate::latte::run_with_libs(loop_src, &["std"]).unwrap()
+                .as_atom().and_then(|a| a.to_u128()).unwrap();
+            assert_eq!(v, want, "net recursion vs loom-loop for {}", net_src);
+        }
+        assert_eq!(super::run_str("let fac = fn [n] -> if (lt n 1) then 1 else (mul n (fac (dec n))) in (fac 6)").unwrap().0, 720);
+        assert_eq!(super::run_str("let tri = fn [n] -> if (lt n 1) then 0 else (add n (tri (dec n))) in (tri 100)").unwrap().0, 5050);
+    }
+
+    #[test]
+    fn net_recursion_is_detected_only_when_recursive() {
+        // a non-recursive let still goes through the ordinary (folding) lowering
+        assert!(super::run_rec("let x = (add 2 3) in (mul x x)").unwrap().is_none());
+        // a genuinely recursive let is handled by the REF engine
+        assert!(super::run_rec("let f = fn [n] -> if (lt n 1) then 0 else (f (dec n)) in (f 3)").unwrap().is_some());
     }
 
     #[test]

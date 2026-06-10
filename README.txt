@@ -302,6 +302,28 @@ close the descent can creep before the `lr·gradient` update underflows).
 latte ml --iters 5000     # learned w = 2.011, learned b = 0.968
 ```
 
+`lib/ml.lat` also carries three further model families, all in Latte over the signed-number
+library: a **perceptron** (`latte ml perceptron`, an online linear classifier — learns `1 1 0 0`
+on a separable set), **k-means** clustering (`latte ml kmeans` — recovers centroids ≈ 2.0 and
+11.0), and **k-NN** (`latte ml knn` — labels a query by its nearest training point).
+
+**Neural networks** live in `lib/nn.lat`, where a network is *composable data* — a list of tagged
+layers (`%dense`, `%relu`, `%tanh`, and `%res` for a residual/skip connection) that `net_fwd`
+folds into a forward pass. A `resblock` is just a `%res` layer wrapping two dense layers, so
+ResNet-style nets are built by consing more blocks onto the list. Beyond inference, a
+one-hidden-layer MLP trains by **full backpropagation** (ReLU hidden, linear output, MSE).
+`latte nn` learns `y = |x|` — impossible for a linear model, easy with one ReLU layer — driving
+the loss from ≈ 2.7 to ≈ 0 (predictions 3.0/1.0/1.0/3.0) and writing a loss-curve SVG.
+
+**Practical financial ML** lives in `lib/fin.lat`, a small leak-aware pipeline after Lopez de
+Prado: percent-return features, fixed-horizon labels, train-only standardization, a
+**walk-forward split** (never shuffled), and a logistic-regression classifier — composing `num`,
+`nn`, and the chart renderer. `latte fin gold` trains on **480 real daily XAU/USD closes
+(2020–2022)** embedded in the binary and honestly reports ≈ 50% out-of-sample (daily gold
+direction is near-random — low signal-to-noise, exactly de Prado's point), while the same model
+earns a +50-point edge on a synthetic mean-reverting series. It writes a strategy-vs-buy-&-hold
+equity curve (`gold-fin.svg`). The deliverable is a working, honest pipeline, not a profit machine.
+
 For **data visualization**, `lib/plot.lat` computes chart *layout* in Latte — scaling data
 to pixel geometry — and Hymn serializes it to SVG. Bar, line, and scatter charts are
 available from the CLI, the `/chart` GUI page, or `POST /api/plot`:
@@ -445,7 +467,7 @@ Latte on the Loom.
   flow, entirely by interaction. `(mul (add 2 3) 2)` reduces to 10 and
   `if (lt 2 3) then (add 10 5) else (mul 100 100)` to 15, both matching Loom; two 200-formula
   randomized batteries (nested `+`/`*`, and `+`/`*`/`<`/`if`) are cross-checked against the
-  interpreter, alongside the annihilation, commutation, erasure-cascade, and confluence tests. `latte net "<expr>"` compiles a real Latte expression (its supported fragment) to a net and reduces it, printing the result and the interaction-step count next to the interpreter's answer. Beyond the bare `+`/`*`/`<`/`if` primitives the lowering now accepts a richer fragment — `let`, `+()`, `==`, **let-bound user functions** (inlined), and `loop … again(…)` (**bounded unrolling**, the net's form of recursion) — and the `if` is **lazy**: the (closed) condition is evaluated and only the *taken* branch is built into the net, so the untaken branch is never reduced (`docs/interaction-nets.md`).
+  interpreter, alongside the annihilation, commutation, erasure-cascade, and confluence tests. `latte net "<expr>"` compiles a real Latte expression (its supported fragment) to a net and reduces it, printing the result and the interaction-step count next to the interpreter's answer. Beyond the bare `+`/`*`/`<`/`if` primitives the lowering now accepts a richer fragment — `let`, `+()`, `==`, **let-bound user functions**, and `loop … again(…)` — and the `if` is **lazy** (only the taken branch is built). **Unbounded recursion now runs on the net** as a genuine fixpoint: a self-recursive `let f = fn [n] -> … (f …) … in (f K)` compiles to HVM-style **`Ref` nodes** that the reducer unrolls lazily and collects against an eraser at the base case (factorial, sum, Fibonacci, and a 100-deep triangular all match the interpreter). An **active-pair worklist** in the reducer replaced the per-step rescan, taking recursion-heavy reductions from seconds to milliseconds (`fac 8`: 18.8 s → 17 ms) with confluence preserved (`docs/interaction-nets.md`).
 - **The GUI opens in a window from GNOME.** Started in a desktop session, `latte`/`latte gui`
   pops a browser window (app-mode if available, else `xdg-open`); a `orpheus.desktop` entry and
   icon ship for the app grid. `--no-open` disables it; headless use is unaffected.
@@ -456,8 +478,10 @@ Latte on the Loom.
   (Facet — the markup language with tool-call holes), `docs/scars-sound-changes.md` (the SCArs
   sound-change rule language, including stress- and cluster-conditioned changes), and
   `docs/interaction-nets.md` (the interaction-net engine and its compiled fragment). All of the
-  manuals are also served **inside the running GUI at `/docs`** (sidebar + rendered Markdown), and
-  reachable from the System page's `Docs` link or the `System.Docs` command.
+  manuals are also served **inside the running GUI at `/docs`** (sidebar + rendered Markdown) and
+  are **editable in place** there (an Edit/Save toolbar writes the Markdown back to disk, Oberon-
+  style), reachable from the System page's `Docs` link or the `System.Docs` command; the complete
+  **Ligurian reference grammar is hosted at `/grammar`**.
 - **Adaptive JIT compilation is the default.** Formulas are *interpreted while cold* and
   compiled to closures only once they get *hot* (re-entered past a threshold), so compilation is
   the default exactly when it pays for itself — including compile time. A one-shot like
@@ -516,10 +540,11 @@ Latte on the Loom.
   loaded libraries, `:help`, and `:q` to quit.
 - **A boardgame tool with machines as players** (`latte game chess`): each player is its own
   compiled Orpheus core (a "machine"), queried move by move by a game-agnostic match driver. The
-  rules and AI are written entirely in Latte (`lib/chess.lat`) and run on the adaptive VM —
-  legal move generation, king-safety, check/checkmate/stalemate, and a capture/centralization +
-  mate-seeking chooser. Two machines play a full game to a real checkmate. (Castling and en
-  passant are omitted; documented in the file.)
+  rules and AI are written entirely in Latte (`lib/chess.lat`, `lib/chessml.lat`) and run on the
+  adaptive VM — legal move generation, king-safety, check/checkmate/stalemate, learned piece
+  values, and an **alpha-beta minimax search with a positional evaluation** (the GUI's "play the
+  model" searches two plies; it finds forced mates and stops hanging pieces). Two machines play a
+  full game to a real checkmate. (Castling and en passant are omitted; documented in the file.)
 - **A chess evaluator learned in Latte** (`lib/chessml.lat`): a linear model whose piece-value
   weights are fit by batch gradient descent in Latte against labelled positions. After a few
   hundred iterations it recovers sensible values — about `[1, 3, 3, 5, 9]` for P/N/B/R/Q — and

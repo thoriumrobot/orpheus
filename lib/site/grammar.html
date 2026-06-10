@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ligurian Grammar · Orpheus</title>
+<style>
+ :root{--bg:#1a1714;--paper:#f6f1e7;--ink:#241d16;--accent:#7a3b1d;--gold:#9a7b34;--rule:#cbbfa6;--dim:#6b5f4c;--code:#efe7d4}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--ink);font-family:Georgia,'Times New Roman',serif;line-height:1.62}
+ header{position:sticky;top:0;z-index:5;background:#120f0c;color:var(--paper);padding:9px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid var(--gold);font-family:ui-monospace,Menlo,monospace;font-size:13px}
+ header b{color:var(--gold);letter-spacing:.5px}
+ header a{color:#d8c79a;text-decoration:none;margin-left:14px}
+ header a:hover{text-decoration:underline}
+ .page{max-width:900px;margin:0 auto;padding:34px 40px 90px;background:var(--paper);box-shadow:0 0 40px #0008;min-height:100vh}
+ h1{font-size:34px;text-align:center;color:var(--accent);margin:.2em 0 .1em;letter-spacing:.5px}
+ h1+p em, .page>p:first-of-type{color:var(--dim)}
+ h1.section{font-size:27px;border-bottom:2px solid var(--gold);padding-bottom:6px;margin-top:46px;color:var(--accent)}
+ h2{font-size:21px;color:var(--accent);margin-top:32px;border-bottom:1px solid var(--rule);padding-bottom:3px}
+ h3{font-size:17px;color:var(--gold);margin-top:24px}
+ h4{font-size:15px;color:var(--dim);margin-top:16px}
+ hr{border:0;border-top:2px solid var(--gold);opacity:.5;margin:34px 0}
+ table{border-collapse:collapse;margin:14px 0;font-size:14px;width:100%}
+ th,td{border:1px solid var(--rule);padding:5px 10px;text-align:left;vertical-align:top}
+ th{background:#ece1c8;color:var(--accent)}
+ tr:nth-child(even) td{background:#faf6ec}
+ code{background:var(--code);padding:1px 5px;border-radius:3px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+ a{color:var(--accent)}
+ em{color:#3a2c1e}
+ blockquote{border-left:4px solid var(--gold);margin:14px 0;padding:4px 16px;color:var(--dim)}
+ ul,ol{padding-left:26px}
+ .loading{color:var(--dim);text-align:center;padding:60px;font-family:ui-monospace,monospace}
+</style></head>
+<body>
+<header>
+  <span><b>ORPHEUS</b> · hosting <i>Sauleis Bazdā &amp; Mazdō-yō Heardō̃</i></span>
+  <span><a href="/">System</a><a href="/docs">Docs</a><a href="/">Ligurian demo</a></span>
+</header>
+<div class="page"><div id="doc" class="loading">Loading the grammar…</div></div>
+<script>
+"use strict";
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function inline(s){
+  s=esc(s);
+  s=s.replace(/`([^`]+)`/g,function(_,c){return '<code>'+c+'</code>';});
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+  s=s.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s=s.replace(/&lt;(https?:[^ >]+)&gt;/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+function mdToHtml(md){
+  var lines=md.split('\n'), out=[], i=0;
+  function cells(r){ return r.trim().replace(/^\||\|$/g,'').split('|').map(function(c){return c.trim();}); }
+  while(i<lines.length){
+    var ln=lines[i];
+    if(/^\s*\|.*\|\s*$/.test(ln)){
+      var rows=[]; while(i<lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ rows.push(lines[i]); i++; }
+      if(rows.length>=2){
+        var head=cells(rows[0]);
+        var h='<table><thead><tr>'+head.map(function(c){return '<th>'+inline(c)+'</th>';}).join('')+'</tr></thead><tbody>';
+        for(var k=2;k<rows.length;k++){ h+='<tr>'+cells(rows[k]).map(function(c){return '<td>'+inline(c)+'</td>';}).join('')+'</tr>'; }
+        out.push(h+'</tbody></table>'); continue;
+      } else { out.push('<p>'+inline(rows.join(' '))+'</p>'); continue; }
+    }
+    var m=ln.match(/^(#{1,4})\s+(.*)$/);
+    if(m){ var n=m[1].length; var cls=(n===1)?' class="section"':''; out.push('<h'+n+cls+'>'+inline(m[2])+'</h'+n+'>'); i++; continue; }
+    if(/^\s*---\s*$/.test(ln)){ out.push('<hr>'); i++; continue; }
+    if(/^\s*[-*]\s+/.test(ln)){ var it=[]; while(i<lines.length && /^\s*[-*]\s+/.test(lines[i])){ it.push('<li>'+inline(lines[i].replace(/^\s*[-*]\s+/,''))+'</li>'); i++; } out.push('<ul>'+it.join('')+'</ul>'); continue; }
+    if(/^\s*$/.test(ln)){ i++; continue; }
+    var p=[]; while(i<lines.length && !/^\s*$/.test(lines[i]) && !/^#{1,4}\s/.test(lines[i]) && !/^\s*\|.*\|\s*$/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) && !/^\s*---\s*$/.test(lines[i])){ p.push(lines[i]); i++; }
+    out.push('<p>'+inline(p.join(' '))+'</p>');
+  }
+  return out.join('\n');
+}
+fetch('/ligurian-grammar.md').then(function(r){return r.text();}).then(function(md){
+  document.getElementById('doc').className='';
+  document.getElementById('doc').innerHTML=mdToHtml(md);
+}).catch(function(e){ document.getElementById('doc').textContent='Could not load grammar: '+e; });
+</script>
+</body></html>

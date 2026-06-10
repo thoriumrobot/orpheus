@@ -78,11 +78,16 @@ and compiles a fragment of Latte into interaction nets that *compute by local re
 Multiplication duplicates an operand with the δ duplicator; the unused parts of a computation are
 erased with ε. The net's primitive agents are naturals under `+`, `*`, `<`, and `if`, but the
 compiler now accepts a richer source fragment by expanding it into those primitives: `let`,
-`+(…)`, `==`, **let-bound user functions** (inlined at each call site), and `loop … again(…)`,
-which is the net's form of recursion — **bounded unrolling** to a fuel budget (a closed
-expression's loop conditions fold to constants, so it lowers to a finite net). The `if` is
-**lazy**: the compiler evaluates the closed condition and builds *only the taken branch* into the
-net, so the unused branch is never constructed and never reduced.
+`+(…)`, `==`, **let-bound user functions** (inlined at each call site), and `loop … again(…)`.
+The `if` is **lazy**: the compiler evaluates the closed condition and builds *only the taken
+branch* into the net, so the unused branch is never constructed and never reduced. And recursion
+now runs *on the net itself*: borrowing HVM's trick, a top-level definition becomes a **`Ref`
+node** that the reducer unrolls lazily when something demands its value and **collects against an
+eraser** when it does not — exactly what lets a recursive function stop instead of expanding
+forever. So a self-recursive factorial reduces to 40320 by genuine net-level fixpoint, and `fib`,
+`sum`, and a 100-level `tri` all check out. A small change — draining an *active-pair worklist*
+instead of rescanning the whole net each step — took the heaviest of these from seconds to
+milliseconds (`fac 8`: 18.8 s → 17 ms). As for that lazy `if`:
 `latte net "if (lt 7 4) then (add 1 1) else (mul 6 7)"` reduces to 42 on the net engine with the
 `add 1 1` absent entirely; `latte net "let sq = fn [x] -> (mul x x) in (add (sq 3) (sq 4))"`
 reduces to 25. Both agree with the interpreter, which — along with two 200-formula randomized
@@ -104,10 +109,21 @@ Everything is a subcommand of `latte`:
 - `latte jit "<expr>"` — compare interpreter / adaptive / forced-compile and time them.
 - `latte game chess [--human white]` — two machines play a full game to checkmate; the machine
   player is its own compiled Orpheus core, and with `--human` you can play against the learned
-  evaluator by typing moves like `e2e4`.
-- `latte ml`, `latte tensor`, `latte chart`, `latte plan` — train a model, do n-dimensional
+  evaluator (now an **alpha-beta search with a positional eval**, not just a one-ply grab) by
+  typing moves like `e2e4`.
+- `latte ml [linear|perceptron|kmeans|knn]`, `latte tensor`, `latte chart`, `latte plan` — train a
+  model (linear regression, a perceptron, k-means, or k-NN — all in Latte), do n-dimensional
   tensor math, render an SVG chart, or solve a little planning problem, all computed in Latte
   libraries on the VM.
+- `latte nn` — a neural network in Latte: composable layers (`%dense`/`%relu`/`%tanh`/`%res`)
+  folded by `net_fwd`, with residual blocks for ResNet-style nets, and a one-hidden-layer MLP
+  trained by **backpropagation**. The demo learns `y = |x|` (loss ≈ 2.7 → 0) and writes a loss
+  curve. Deeper nets are just longer layer lists.
+- `latte fin gold` — practical financial ML after Lopez de Prado: return features, fixed-horizon
+  labels, train-only standardization, a **walk-forward split**, and logistic regression — trained
+  on 480 real daily XAU/USD closes. It reports an *honest* ≈ 50% out-of-sample (daily gold
+  direction is near-random; the same model gets +50 points on a synthetic mean-reverting series),
+  and plots strategy vs buy-and-hold. A working, leak-aware pipeline — not a profit machine.
 - `latte sca <words>` — evolve words through ordered sound changes (for constructed languages);
   `latte sca --file rules.sca <words>` applies a whole rule file, including stress- and
   cluster-conditioned changes (see `lib/breaking.sca`).
@@ -115,9 +131,10 @@ Everything is a subcommand of `latte`:
 - `latte cache [path|clear]` — manage the compiled-program cache.
 - `latte gui` — the web GUI: a System console, a WYSIWYG document editor, charts, the planner,
   an Oberon-style **module compiler page** where you paste a `core` module, compile it (with
-  line/column errors), and have it loaded live into the running system — and the **manuals
-  themselves, served at `/docs`** (Latte, Facet, SCArs, and interaction nets, rendered in a
-  sidebar+pane viewer).
+  line/column errors), and have it loaded live into the running system; the **manuals
+  themselves, served at `/docs`** and now **editable in place** (an Edit/Save toolbar writes the
+  Markdown straight back to disk, true to Oberon's every-text-is-a-document spirit); and the
+  complete **Ligurian reference grammar hosted at `/grammar`**.
 - `latte node` — join a content-addressed, event-logged distributed runtime.
 
 ## Some engineering worth calling out
@@ -166,15 +183,15 @@ building-and-running guide.
 ## What's still open
 
 Orpheus is honest about its frontier. The interaction-net compiler now handles a first-order
-fragment with `let`, user-defined functions, bounded recursion (by unrolling), and a lazy `if`
-that builds only the taken branch — but **unbounded** general recursion on the net still needs
-net-level fixpoints (the affine-variable limit of pure interaction combinators, `λx.(x x)`, is
-exactly why Loom and not the net is the canonical core), and a fully *dynamic* lazy `if` for
-non-constant conditions awaits interaction-net boxes. There's no native desktop GUI yet — the
-browser GUI stands in — and bit-for-bit self-hosting of the whole compiler in Latte remains
-future work. (Stress- and cluster-conditioned sound changes, once listed here, are now
-expressible directly in SCArs rules; see `lib/breaking.sca`.) None of that detracts from the core
-idea, which the system already demonstrates end to end: that a complete, multi-engine,
-self-hosting functional environment can be small, dependency-free, deterministic, and verifiable —
-and still do real work, from playing chess to learning piece values to compiling itself to native
-code.
+fragment with `let`, user-defined functions, a lazy `if` that builds only the taken branch, and
+**genuine net-level recursion** (single-argument fixpoints unrolled by the reducer) — what's left
+there is *multi-argument* net recursion and a fully *dynamic* lazy `if` for non-constant
+conditions, which awaits interaction-net boxes. (The affine-variable limit of pure interaction
+combinators, `λx.(x x)`, is still why Loom and not the net is the canonical core.) There's no
+native desktop GUI yet — the browser GUI stands in — and bit-for-bit self-hosting of the whole
+compiler in Latte remains future work. (Unbounded net recursion, and stress- and
+cluster-conditioned sound changes, once listed here, are now implemented.) None of that detracts
+from the core idea, which the system already demonstrates end to end: that a complete,
+multi-engine, self-hosting functional environment can be small, dependency-free, deterministic,
+and verifiable — and still do real work, from playing chess to learning piece values to compiling
+itself to native code.

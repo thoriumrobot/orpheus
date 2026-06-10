@@ -267,6 +267,7 @@ fn content_type(ext: &str) -> Option<(&'static str, bool)> {
     Some(match ext {
         "css" => ("text/css; charset=utf-8", false),
         "txt" | "sca" | "lat" => ("text/plain; charset=utf-8", false),
+        "md" => ("text/markdown; charset=utf-8", false),
         "html" | "htm" => ("text/html; charset=utf-8", false),
         "js" => ("text/javascript; charset=utf-8", false),
         "json" => ("application/json; charset=utf-8", false),
@@ -469,6 +470,20 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 match std::fs::read(&p) {
                     Ok(b) => simple(200, "text/markdown; charset=utf-8", b),
                     Err(_) => simple(404, "text/plain; charset=utf-8", b"no such doc".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad doc name".to_vec()),
+        },
+        // save an edited document back to docs/<name>.md (Oberon-style: documents are editable
+        // in place from within the GUI). The name is validated; writes are confined to docs/.
+        ("POST", "/api/doc") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let dir = docs_dir(root);
+                let _ = std::fs::create_dir_all(&dir);
+                let p = dir.join(format!("{}.md", name));
+                match std::fs::write(&p, &req.body) {
+                    Ok(_) => simple(200, "text/plain; charset=utf-8", b"saved".to_vec()),
+                    Err(e) => simple(500, "text/plain; charset=utf-8", format!("write failed: {}", e).into_bytes()),
                 }
             }
             None => simple(400, "text/plain; charset=utf-8", b"bad doc name".to_vec()),

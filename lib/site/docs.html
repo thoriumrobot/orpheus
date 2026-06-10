@@ -34,15 +34,24 @@
  article hr{border:0;border-top:1px solid #cdc8b8;margin:22px 0}
  article ul,article ol{padding-left:24px}
  article li{margin:3px 0}
+ .tb{font:inherit;font-size:12px;background:var(--btn);color:var(--ink);border:1px solid var(--rule);border-radius:3px;padding:2px 9px;margin-left:8px;cursor:pointer}
+ .tb:hover{background:#fff}
+ .st{margin-left:10px;color:#9fe6b0;font-size:12px}
+ #ed{display:none;width:100%;height:100%;border:1.5px solid var(--rule);border-radius:4px;padding:12px 14px;font:inherit;font-size:13px;line-height:1.5;background:#fbfbf6;color:var(--ink);resize:none;tab-size:2}
 </style></head>
 <body>
 <header>
   <span><b>Orpheus · Docs</b> &nbsp;—&nbsp; the system's manuals, served from the running environment</span>
-  <span><a href="/">System</a><a href="/chess">Chess</a><a href="/editor">Editor</a><a href="/chart">Charts</a></span>
+  <span>
+    <button id="editbtn" class="tb" title="Edit this document in place">✎ Edit</button>
+    <button id="savebtn" class="tb" style="display:none">✓ Save</button>
+    <button id="cancelbtn" class="tb" style="display:none">✕ Cancel</button>
+    <span id="status" class="st"></span>
+    <a href="/">System</a><a href="/chess">Chess</a><a href="/editor">Editor</a><a href="/chart">Charts</a></span>
 </header>
 <div class="wrap">
   <nav id="nav"><div class="h">Documents</div></nav>
-  <main><article id="doc">Loading…</article></main>
+  <main><article id="doc">Loading…</article><textarea id="ed" spellcheck="false"></textarea></main>
 </div>
 <script>
 "use strict";
@@ -96,10 +105,13 @@ function mdToHtml(md){
 }
 
 var current=null;
+var rawmd="";
 function load(name){
   current=name;
+  exitEdit();
   document.querySelectorAll('#nav a').forEach(function(a){ a.classList.toggle('active', a.dataset.name===name); });
   fetch('/api/doc?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(md){
+    rawmd=md;
     var art=document.getElementById('doc');
     art.innerHTML=mdToHtml(md);
     art.querySelectorAll('a.doclink').forEach(function(a){
@@ -111,7 +123,42 @@ function load(name){
 }
 function main(){ return document.querySelector('main'); }
 
+// ---- Oberon-style in-place editing: edit the document text and save it back ----
+function setStatus(s){ var el=document.getElementById('status'); el.textContent=s; if(s){ setTimeout(function(){ if(el.textContent===s) el.textContent=''; },2500); } }
+function enterEdit(){
+  if(!current) return;
+  var ed=document.getElementById('ed');
+  ed.value=rawmd; ed.style.display='block';
+  document.getElementById('doc').style.display='none';
+  document.getElementById('editbtn').style.display='none';
+  document.getElementById('savebtn').style.display='inline-block';
+  document.getElementById('cancelbtn').style.display='inline-block';
+  ed.focus();
+}
+function exitEdit(){
+  document.getElementById('ed').style.display='none';
+  document.getElementById('doc').style.display='block';
+  document.getElementById('editbtn').style.display='inline-block';
+  document.getElementById('savebtn').style.display='none';
+  document.getElementById('cancelbtn').style.display='none';
+}
+function saveEdit(){
+  if(!current) return;
+  var text=document.getElementById('ed').value;
+  fetch('/api/doc?name='+encodeURIComponent(current),{method:'POST',body:text}).then(function(r){return r.text();}).then(function(msg){
+    if(msg==='saved'){ rawmd=text; document.getElementById('doc').innerHTML=mdToHtml(text); exitEdit(); setStatus('saved ✓'); }
+    else setStatus('error: '+msg);
+  }).catch(function(e){ setStatus('error: '+e); });
+}
+
 window.addEventListener('load', function(){
+  document.getElementById('editbtn').addEventListener('click', enterEdit);
+  document.getElementById('savebtn').addEventListener('click', saveEdit);
+  document.getElementById('cancelbtn').addEventListener('click', exitEdit);
+  document.getElementById('ed').addEventListener('keydown', function(e){
+    if((e.ctrlKey||e.metaKey) && e.key==='s'){ e.preventDefault(); saveEdit(); }
+    if(e.key==='Escape'){ e.preventDefault(); exitEdit(); }
+  });
   fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
     var names=t.split('\n').filter(Boolean), nav=document.getElementById('nav');
     names.forEach(function(n){

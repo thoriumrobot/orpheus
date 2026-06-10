@@ -637,6 +637,10 @@ pub const NUM_LAT: &str = include_str!("../lib/num.lat");
 pub const TENSOR_LAT: &str = include_str!("../lib/tensor.lat");
 /// Machine-learning training, linkable via `import ml`.
 pub const ML_LAT: &str = include_str!("../lib/ml.lat");
+/// Neural networks (composable layers, residual blocks, backprop), via `import nn`.
+pub const NN_LAT: &str = include_str!("../lib/nn.lat");
+/// Practical financial machine learning (features, labels, models), via `import fin`.
+pub const FIN_LAT: &str = include_str!("../lib/fin.lat");
 /// Data visualization layout, linkable via `import plot`.
 pub const PLOT_LAT: &str = include_str!("../lib/plot.lat");
 /// Small vector library, linkable via `import vec`.
@@ -656,6 +660,8 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "num" => Some(NUM_LAT),
         "tensor" => Some(TENSOR_LAT),
         "ml" => Some(ML_LAT),
+        "nn" => Some(NN_LAT),
+        "fin" => Some(FIN_LAT),
         "plot" => Some(PLOT_LAT),
         "vec" => Some(VEC_LAT),
         "chess" => Some(CHESS_LAT),
