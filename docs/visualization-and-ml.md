@@ -328,3 +328,111 @@ classifier earns a **+50-point** edge on a synthetic mean-reverting series
 has no easy linear signal at this horizon. `latte fin gold` also writes `gold-fin.svg`, the
 out-of-sample equity of the strategy against buy-and-hold. The deliverable is a working, leak-aware
 pipeline — not a profit machine, and the tool says so.
+
+---
+
+## A graphics library (`lib/gfx.lat`)
+
+`gfx` makes drawings *data*. A scene is a 0-terminated list of tagged shapes — `[%line …]`,
+`[%rect …]`, `[%circle …]`, `[%poly …]`, `[%text …]` — built with Latte constructors over
+packed-RGB colours (`rgb r g b`). The host renderer (`src/gfx.rs`) walks the noun and serializes
+it to SVG; the *structure* of the picture lives entirely in Latte, exactly the split the chart
+library uses for plots. `latte gfx` builds a demo scene (a little house) and writes it to SVG, and
+the `/gpu` GUI page renders it live via `POST /api/gfx`. Two unit tests cover the renderer.
+
+## A GPU compute library (`lib/gpu.lat`)
+
+`gpu` is a *data-parallel programming model* for Latte. Programs describe GPU work as data: a
+device, buffers (lists of numbers), and a pipeline of kernels — `map`, `zipWith`, `reduce`,
+`saxpy`, `dot`, `matmul`, and a per-pixel `shade`. The **target device is an NVIDIA GeForce RTX
+4070 Ti SUPER** (16 GB VRAM — the card's real configuration — 8448 CUDA cores, 66 SMs). The kernel
+set, buffer model, and call sites are exactly what a CUDA backend would use, so dispatching to the
+card is a drop-in backend swap.
+
+In this build there is no CUDA driver and there are zero external crates, so the *active* backend
+is a genuine multi-core CPU backend (`std::thread::scope`) that runs each kernel in parallel across
+the host's cores — honest about what is executing while keeping the device-facing API intact.
+
+It integrates with the other libraries:
+- **ML.** `matmul` is the core neural-network kernel (the dense layer of `nn.lat`). `latte gpu`
+  benchmarks the parallel matmul against a serial reference and checks they agree to the bit.
+- **GFX.** The per-pixel Mandelbrot `shade` kernel — the canonical embarrassingly-parallel GPU
+  workload — produces a colour field that is rendered through the graphics path to an SVG raster.
+
+`latte gpu` prints the device, runs the matmul benchmark, executes a small Latte `gpu` program
+(`saxpy` then `reduce`) on the backend, and writes the Mandelbrot image. The `/gpu` GUI page shows
+all of it live via `POST /api/gpu`. Three unit tests cover matmul (parallel == serial), the
+parallel primitives, and the shader.
+
+---
+
+## Financial ML, continued: choosing the right market
+
+The gold experiment (above) was the honest negative result that pointed the way: a price-only model
+is near-chance on gold out-of-sample. So **which market should a price-only momentum/volatility
+model be applied to?** The literature is consistent — time-series momentum and volatility clustering
+are *strongest in cryptocurrency* (Moskowitz, Ooi & Pedersen 2012 on time-series momentum across
+asset classes; Shen, Urquhart & Wang 2022 on Bitcoin momentum; Katsiampa 2017 on Bitcoin GARCH
+volatility). Crypto trades 24/7, is highly volatile, and shows persistent ARCH effects.
+
+So the demo now targets **Bitcoin (BTC/USD)** — 1300 daily closes spanning a 2022 bear bottom
+through the 2023–2025 recovery (Coin Metrics community data). The features are unchanged in spirit
+(multi-horizon momentum + realized volatility); the default task is **next-day volatility-regime
+prediction** (is tomorrow a high- or low-|return| day, relative to the training-set median). On the
+walk-forward out-of-sample test this reaches roughly **55% vs a ~51% baseline — a genuine +3–4 point
+edge**, stable across training lengths. Daily *direction* remains near-chance even here, which is the
+honest finding: the predictable thing in markets is *volatility*, not direction, and crypto is where
+that predictability is strongest. `latte fin` runs it (`--dir` for the direction variant, `--vol` for
+volatility, `--horizon N` for the direction horizon); the `/fin` GUI page runs it live.
+
+---
+
+## GPU auto-detection (use it when present, never rely on it)
+
+The compute backend is chosen automatically. `gpu::detect_backend()` probes the host with pure
+filesystem/PATH checks (no external crates, never panics): the NVIDIA kernel driver's
+`/proc/driver/nvidia/gpus/*/information`, the `/dev/nvidia0` device node, and `nvidia-smi` on
+`PATH`. If a device is found it returns `Backend::Cuda(name)` (a real CUDA build would dispatch
+kernels to it); otherwise `Backend::Cpu(lanes)`. The ML kernel path (`matmul_auto`) and the GUI's
+compute page both go through the detected backend, so a present GPU accelerates them and an absent
+one transparently falls back to the multi-core CPU backend. `latte gpu` prints the detection result
+("GPU detected: yes/no") and the active backend; on a machine without a GPU it correctly reports
+"no" and runs on CPU. A test asserts detection never panics and that the auto-dispatched matmul
+always equals the serial reference regardless of backend.
+
+## Sentiment analysis from news (`lib/sentiment.lat` + `src/sentiment.rs`)
+
+Lexicon-based financial sentiment after Loughran & McDonald (2011), who showed general-purpose
+dictionaries misclassify finance text and built finance-specific word lists. The scorer tokenizes
+text in the host, tallies positive/negative finance words from an embedded subset of the LM lists,
+and computes polarity = (pos − neg) / (pos + neg) — with the ratio arithmetic done in Latte
+(`polarity`, signed fixed-point), so the language is in the loop. `latte sentiment "<text>"` (and
+`POST /api/sentiment`) returns the counts, polarity, and a BULLISH/neutral/BEARISH label; validated
+on real headlines (a "rally/recover/surge higher" headline scores +1.0, a "selloff/falter/recession
+fears" headline −1.0). News sentiment is most useful on information-driven markets (equities,
+indices, single names), where it is an exogenous feature fed to the model and the trading advisor.
+
+## The trading advisor (`latte trade`)
+
+An automatic advisor that calls the best model and recommends *whether* and *how much* to trade.
+Its design follows the honest finding that the dependable edge is volatility, not direction, plus
+standard position-sizing theory (Kelly; volatility targeting):
+
+1. **Direction** — a momentum lean (price vs its 10-day average), with the rule's *measured*
+   out-of-sample hit rate reported as confidence (typically near 50% on daily data).
+2. **Sizing** — **fractional Kelly** from the directional edge (`f = 2W − 1`, scaled to ¼–½),
+   combined with **volatility targeting** (scale exposure toward a target daily volatility, and
+   shrink it when the model predicts a high-volatility regime), capped at 2× leverage.
+3. **Discipline** — if momentum is down or the Kelly fraction is ≤ 0 (no positive edge), it advises
+   **FLAT — stand aside** rather than forcing a trade, exactly as the literature recommends.
+
+It accepts `--account N`, `--kelly F`, and an optional `--sentiment S` (e.g. from `latte sentiment`
+on news) that nudges the lean. The `/trade` GUI page runs it live alongside the sentiment scorer.
+Every output carries an explicit disclaimer: this is a research demonstration, not financial advice.
+
+## A fuller standard library
+
+Independent of the tools above, `std.lat` gained general-purpose list machinery so the language is
+fuller on its own terms: predicate combinators `any` / `all` / `count`, `maximum` / `minimum` /
+`argmax`, `enumerate`, `scanl` (prefix folds), and `concat`. These are unit-tested (e.g. `argmax`
+of `[3 1 4 1 5 9 2]` is 5) even where no current tool calls them.

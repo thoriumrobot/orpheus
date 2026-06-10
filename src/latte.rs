@@ -641,6 +641,12 @@ pub const ML_LAT: &str = include_str!("../lib/ml.lat");
 pub const NN_LAT: &str = include_str!("../lib/nn.lat");
 /// Practical financial machine learning (features, labels, models), via `import fin`.
 pub const FIN_LAT: &str = include_str!("../lib/fin.lat");
+/// A graphics library: scene-as-data drawing primitives rendered to SVG, via `import gfx`.
+pub const GFX_LAT: &str = include_str!("../lib/gfx.lat");
+/// A data-parallel GPU compute library, via `import gpu`.
+pub const GPU_LAT: &str = include_str!("../lib/gpu.lat");
+/// Financial sentiment scoring helpers (Loughran-McDonald polarity), via `import sentiment`.
+pub const SENTIMENT_LAT: &str = include_str!("../lib/sentiment.lat");
 /// Data visualization layout, linkable via `import plot`.
 pub const PLOT_LAT: &str = include_str!("../lib/plot.lat");
 /// Small vector library, linkable via `import vec`.
@@ -662,6 +668,9 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "ml" => Some(ML_LAT),
         "nn" => Some(NN_LAT),
         "fin" => Some(FIN_LAT),
+        "gfx" => Some(GFX_LAT),
+        "gpu" => Some(GPU_LAT),
+        "sentiment" => Some(SENTIMENT_LAT),
         "plot" => Some(PLOT_LAT),
         "vec" => Some(VEC_LAT),
         "chess" => Some(CHESS_LAT),
@@ -741,7 +750,7 @@ pub fn runtime_lib_names() -> Vec<String> {
 /// scope without manual `import`s (later libraries shadow earlier ones on name clashes).
 pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
+        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "gfx", "gpu", "sentiment", "plot", "vec", "chess", "chessml",
         "tool",
     ]
     .iter()
@@ -906,6 +915,31 @@ pub fn run_with_libs(expr_src: &str, libs: &[&str]) -> Result<N, String> {
 /// Evaluate a bare expression with the standard library and mold system in scope.
 pub fn eval_with_std(expr_src: &str) -> Result<N, String> {
     run_with_libs(expr_src, &["std", "mold"])
+}
+
+/// Like `run_with_libs`, but with an explicit interaction (fuel) budget — for deliberate,
+/// long-running computations such as machine-learning training, where the default ceiling
+/// is too low. The cost is bounded by the caller's budget, not unbounded.
+pub fn run_with_libs_fuel(expr_src: &str, libs: &[&str], fuel: u64) -> Result<N, String> {
+    crate::jets::register_std_jets();
+    let ast = parse(expr_src)?;
+    let mut lists: Vec<Vec<Arm>> = Vec::new();
+    for lib in libs {
+        lists.push(gather_lib(lib)?);
+    }
+    lists.push(vec![("__main".to_string(), vec!["_".to_string()], ast)]);
+    let arms = merge_arms(lists);
+    let (core, axes) = compile_arms(&arms)?;
+    let main_axis = axes
+        .iter()
+        .find(|(n, _)| n == "__main")
+        .map(|(_, a)| *a)
+        .ok_or("missing __main")?;
+    let core2 = crate::loom::edit(&crate::atom::Atom::from_u128(3), &num(0), &core)
+        .map_err(|e| format!("{:?}", e))?;
+    let armf = crate::loom::slot(&crate::atom::Atom::from_u128(main_axis), &core2)
+        .map_err(|e| format!("{:?}", e))?;
+    crate::loom::tar_with_fuel(&core2, &armf, fuel).map_err(|e| format!("{:?}", e))
 }
 
 /// Gather an expression plus its library closure into the full merged arm list (the program),

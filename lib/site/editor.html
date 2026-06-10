@@ -41,14 +41,36 @@ var src = document.getElementById('src');
 var preview = document.getElementById('preview');
 var status = document.getElementById('status');
 var OB = '{' + '{', CB = '}' + '}';
-var DEFAULT =
-  '<h2>Heart Speech</h2>\n<table border=1 cellpadding=6>\n' +
-  OB + 'each w in ["ligā","nīvō","mazdā","bendā","genton"]' + CB + '\n' +
-  '  <tr><td>' + OB + 'w' + CB + '</td><td>' + OB + ' SCArs.evolve(w) ' + CB + '</td></tr>\n' +
-  OB + 'end' + CB + '\n</table>\n<p>' +
-  OB + 'if "1"' + CB + 'derived live by SCArs on Loom.' + OB + 'end' + CB + '</p>';
+var GRAMMAR = 'ligurian-grammar.md';
 var timer;
+// minimal Markdown -> HTML for the live preview (headings, bold/italic/code, lists, rules)
+function mdToHtml(t){
+  var esc = function(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  var lines = t.split('\n'), out = [], inList = false, inCode = false;
+  for (var i=0;i<lines.length;i++){
+    var l = lines[i];
+    if (l.trim().indexOf('```') === 0){ inCode=!inCode; out.push(inCode?'<pre><code>':'</code></pre>'); continue; }
+    if (inCode){ out.push(esc(l)); continue; }
+    var m;
+    if (m = l.match(/^(#{1,6})\s+(.*)$/)){ if(inList){out.push('</ul>');inList=false;} out.push('<h'+m[1].length+'>'+inline(m[2])+'</h'+m[1].length+'>'); continue; }
+    if (/^\s*[-*]\s+/.test(l)){ if(!inList){out.push('<ul>');inList=true;} out.push('<li>'+inline(l.replace(/^\s*[-*]\s+/,''))+'</li>'); continue; }
+    if (inList){ out.push('</ul>'); inList=false; }
+    if (/^\s*---+\s*$/.test(l)){ out.push('<hr>'); continue; }
+    if (l.trim()===''){ out.push(''); continue; }
+    out.push('<p>'+inline(l)+'</p>');
+  }
+  if (inList) out.push('</ul>');
+  function inline(s){ s = esc(s);
+    s = s.replace(/`([^`]+)`/g,'<code>$1</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    s = s.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+    return s;
+  }
+  return out.join('\n');
+}
+function looksMarkdown(t){ return /^\s*#/.test(t) || t.indexOf('\n#') >= 0; }
 function renderNow() {
+  if (looksMarkdown(src.value)) { preview.innerHTML = mdToHtml(src.value); return; }
   fetch('/api/render', {method:'POST', headers:{'Content-Type':'text/plain'}, body: src.value})
     .then(function(r){ return r.text(); })
     .then(function(html){ preview.innerHTML = html; });
@@ -82,7 +104,7 @@ function saveFile(){
 function saveAs(){
   var name = document.getElementById('newname').value.trim();
   if(!name) return;
-  if(name.indexOf('.facet') < 0) name = name + '.facet';
+  if(name.indexOf('.facet') < 0 && name.indexOf('.md') < 0) name = name + '.facet';
   fetch('/api/file?path=' + encodeURIComponent(name), {method:'POST', headers:{'Content-Type':'text/plain; charset=utf-8'}, body: src.value})
     .then(function(r){ return r.text(); })
     .then(function(msg){
@@ -90,11 +112,16 @@ function saveAs(){
       refreshFiles().then(function(){ document.getElementById('files').value = name; });
     });
 }
+// On open, show the Ligurian grammar — the document the editor is for.
 window.addEventListener('load', function(){
-  refreshFiles();
-  fetch('/api/load').then(function(r){ return r.text(); }).then(function(t){
-    src.value = t && t.length ? t : DEFAULT; renderNow();
-  }).catch(function(){ src.value = DEFAULT; renderNow(); });
+  refreshFiles().then(function(){
+    var sel = document.getElementById('files');
+    if (sel) sel.value = GRAMMAR;
+  });
+  fetch('/api/file?path=' + encodeURIComponent(GRAMMAR))
+    .then(function(r){ return r.text(); })
+    .then(function(t){ src.value = (t && t.length) ? t : '# Ligurian grammar\n\n(grammar file not found)'; renderNow(); flash('Ligurian grammar'); })
+    .catch(function(){ src.value = '# Ligurian grammar'; renderNow(); });
 });
 </script>
 </body></html>

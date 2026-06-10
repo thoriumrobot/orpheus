@@ -1,0 +1,18 @@
+:: sentiment — financial sentiment scoring helpers for Latte.
+::
+:: The Loughran-McDonald method scores a text by counting finance-specific positive and
+:: negative words, then reporting polarity = (pos - neg) / (pos + neg). Tokenization and the
+:: word lists live in the host scorer (src/sentiment.rs); this library computes the polarity
+:: ratio in signed fixed-point (num.lat), and keeps a small reference lexicon as data.
+import std
+import num
+core sentiment
+  :: polarity in [-1,1] as a signed fixed-point number; 0 when no sentiment words occur.
+  polarity = fn [pos neg] ->
+    if ((add pos neg) == 0) then [ 0 0 ]
+    else (ndiv (nsub (nint pos) (nint neg)) (nint (add pos neg)))
+
+  :: a tiny reference lexicon as data (the full Loughran-McDonald lists live in the host).
+  poswords = fn [_] -> [ %rally [ %rebound [ %surge [ %gain [ %strong [ %higher 0 ] ] ] ] ] ]
+  negwords = fn [_] -> [ %selloff [ %plunge [ %decline [ %risk [ %weak [ %fear 0 ] ] ] ] ] ]
+end

@@ -27,8 +27,11 @@ mod mocha;
 mod plan;
 mod jets;
 mod numerics;
-mod golddata;
+mod marketdata;
 mod viz;
+mod gfx;
+mod gpu;
+mod sentiment;
 mod game;
 mod rustgen;
 mod icomb;
@@ -224,7 +227,11 @@ fn main() {
         "tensor" => numerics::cmd_tensor(&args[1..]),
         "ml" => numerics::cmd_ml(&args[1..]),
         "nn" => numerics::cmd_nn(&args[1..]),
-        "fin" | "trade" => numerics::cmd_fin(&args[1..]),
+        "fin" => numerics::cmd_fin(&args[1..]),
+        "trade" | "advisor" => numerics::cmd_trade(&args[1..]),
+        "sentiment" | "news" => numerics::cmd_sentiment(&args[1..]),
+        "gfx" | "draw" => numerics::cmd_gfx(&args[1..]),
+        "gpu" | "compute" => numerics::cmd_gpu(&args[1..]),
         "chart" => viz::cmd_chart(&args[1..]),
         "jit" => cmd_jit(&args[1..]),
         "game" => game::cmd_game(&args[1..]),
@@ -244,7 +251,7 @@ fn main() {
   latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
   latte plan [--iters N]             planning calc (Towards a New Socialism)
   latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
             );
         }
     }

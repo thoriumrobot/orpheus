@@ -51,7 +51,7 @@
     <a href="/grammar">Grammar</a>
     <a href="/chess">Chess</a>
     <a href="#" onclick="openModule('tool');return false">open tool</a>
-    <a href="/editor">Editor</a><a href="/chart">Charts</a><a href="/plan">Planner</a>
+    <a href="/editor">Editor</a><a href="/chart">Charts</a><a href="/fin">Finance</a><a href="/trade">Trade</a><a href="/gpu">GPU</a><a href="/plan">Planner</a>
   </span>
 </header>
 
@@ -180,6 +180,20 @@ function exec(line, fromViewer){
   if(headTok==='System.New'){ logEcho(line); newModuleViewer(rest||'mymod'); return; }
   if(headTok==='System.Chess'||headTok==='Game.Chess'){ logEcho(line); window.location='/chess'; return; }
   if(headTok==='System.Docs'||headTok==='System.Help'){ logEcho(line); window.location = rest ? ('/docs#'+rest) : '/docs'; return; }
+  if(headTok==='System.Finance'||headTok==='Fin.Run'){ logEcho(line); window.location='/fin'; return; }
+  if(headTok==='System.Charts'||headTok==='Chart.Open'){ logEcho(line); window.location='/chart'; return; }
+  if(headTok==='System.Gpu'||headTok==='Gpu.Run'){ logEcho(line); window.location='/gpu'; return; }
+  if(headTok==='System.Trade'||headTok==='Trade.Advise'){ logEcho(line); window.location='/trade'; return; }
+  // Oberon-style: a command that operates on the text after it (the selection).
+  if(headTok==='System.Sentiment'||headTok==='News.Score'){
+    logEcho(line);
+    if(!rest){ logOut('System.Sentiment: type some headline text after the command', true); return; }
+    post('/api/sentiment', rest, function(out){
+      try { var j=JSON.parse(out); logOut('sentiment: polarity '+(j.polarity>=0?'+':'')+j.polarity+'  (pos '+j.positive+', neg '+j.negative+')'); }
+      catch(e){ logOut(out, true); }
+    });
+    return;
+  }
 
   // ---- Compiler.* : edit -> compile -> run, on the running system ----
   if(headTok==='Compiler.Compile'){
@@ -286,6 +300,16 @@ var SYSTEM_TOOL =
 '#\n'+
 '# Play chess (vs the model, local, or a connected machine):\n'+
 'System.Chess\n'+
+'#\n'+
+'# Financial ML, GPU compute, graphics, and the trading advisor:\n'+
+'System.Finance\n'+
+'System.Trade\n'+
+'System.Gpu\n'+
+'System.Charts\n'+
+'#\n'+
+'# Score a news headline in place (Oberon-style: the command reads the text after it):\n'+
+'System.Sentiment stocks rally and recover as chip shares surge higher\n'+
+'System.Sentiment selloff deepens as tech stocks falter amid recession fears\n'+
 '#\n'+
 '# Edit -> compile -> run (the Oberon loop):\n'+
 '#   1. middle-click into the hello.Mod frame to mark it\n'+

@@ -119,11 +119,22 @@ Everything is a subcommand of `latte`:
   folded by `net_fwd`, with residual blocks for ResNet-style nets, and a one-hidden-layer MLP
   trained by **backpropagation**. The demo learns `y = |x|` (loss ≈ 2.7 → 0) and writes a loss
   curve. Deeper nets are just longer layer lists.
-- `latte fin gold` — practical financial ML after Lopez de Prado: return features, fixed-horizon
-  labels, train-only standardization, a **walk-forward split**, and logistic regression — trained
-  on 480 real daily XAU/USD closes. It reports an *honest* ≈ 50% out-of-sample (daily gold
-  direction is near-random; the same model gets +50 points on a synthetic mean-reverting series),
-  and plots strategy vs buy-and-hold. A working, leak-aware pipeline — not a profit machine.
+- `latte fin` — practical financial ML after Lopez de Prado: momentum + realized-volatility
+  features, train-only standardization, a **walk-forward split**, and logistic regression. After a
+  price-only model proved near-chance on gold, it was moved to where momentum and volatility
+  clustering are strongest — **Bitcoin** (1300 daily BTC/USD closes, 2022–2026). Daily direction
+  stays near-random, but the default **volatility-regime** task earns a genuine **+3–4 point
+  out-of-sample edge** (≈ 55% vs ≈ 51% baseline); the same model gets +50 points on a synthetic
+  mean-reverting series. Plots a variance-timing equity curve. A working, leak-aware pipeline — not
+  a profit machine.
+- `latte gfx` — a **graphics library**: a scene is a list of tagged shapes
+  (`%line`/`%rect`/`%circle`/`%poly`/`%text`) over packed-RGB colours, built in Latte and rendered
+  to SVG by the host. The structure of a drawing is ordinary data.
+- `latte gpu` — a **data-parallel GPU compute library**: buffers and kernels (`map`/`zipWith`/
+  `reduce`/`saxpy`/`dot`/`matmul`/`shade`) as data, targeting an **NVIDIA GeForce RTX 4070 Ti
+  SUPER** (16 GB; multi-core-CPU reference backend in this zero-dependency build, CUDA being a
+  drop-in swap). It integrates with `nn`/`ml` (matmul is the dense-layer kernel) and `gfx` (a
+  parallel Mandelbrot shader renders through the graphics path).
 - `latte sca <words>` — evolve words through ordered sound changes (for constructed languages);
   `latte sca --file rules.sca <words>` applies a whole rule file, including stress- and
   cluster-conditioned changes (see `lib/breaking.sca`).
@@ -195,3 +206,9 @@ from the core idea, which the system already demonstrates end to end: that a com
 multi-engine, self-hosting functional environment can be small, dependency-free, deterministic,
 and verifiable — and still do real work, from playing chess to learning piece values to compiling
 itself to native code.
+
+- `latte trade` — an **automatic trading advisor**: it calls the best model and recommends whether
+  and how much to trade, sizing positions with **fractional Kelly + volatility targeting** and
+  standing aside when the edge is not positive. `latte sentiment` adds Loughran-McDonald **news
+  sentiment** as an optional input. (Research demo, not financial advice.) The GPU backend is
+  **auto-detected** — used when present, with a transparent CPU fallback when not.

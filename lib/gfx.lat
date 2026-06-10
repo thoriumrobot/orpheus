@@ -1,0 +1,58 @@
+:: gfx — a small graphics library for Latte.
+::
+:: A *scene* is an ordinary 0-terminated list of shape values. Each shape is a
+:: tagged pair  [ %kind payload ]  that the host renderer (src/gfx.rs) walks and
+:: serializes to SVG. Colours are packed RGB naturals (r*65536 + g*256 + b).
+:: This keeps the structure of a drawing in Latte; only the final pixel encoding
+:: lives in the host — the same split the chart library (plot) uses.
+import std
+core gfx
+  :: ---- colours -----------------------------------------------------------
+  rgb = fn [r g b] -> (add (mul r 65536) (add (mul g 256) b))
+
+  black  = fn [_] -> (rgb 30 30 40)
+  white  = fn [_] -> (rgb 250 250 250)
+  red    = fn [_] -> (rgb 200 40 40)
+  green  = fn [_] -> (rgb 40 160 80)
+  blue   = fn [_] -> (rgb 50 90 200)
+  yellow = fn [_] -> (rgb 240 200 70)
+  brown  = fn [_] -> (rgb 170 110 70)
+
+  :: ---- shape constructors -------------------------------------------------
+  :: each returns a [ %tag payload ] value; a scene is a list of these.
+  line   = fn [x1 y1 x2 y2 c] -> [ %line   [ x1 [ y1 [ x2 [ y2 [ c 0 ] ] ] ] ] ]
+  rect   = fn [x y w h c]     -> [ %rect   [ x  [ y  [ w  [ h  [ c 0 ] ] ] ] ] ]
+  circle = fn [x y r c]       -> [ %circle [ x  [ y  [ r  [ c 0 ] ] ] ] ]
+  poly   = fn [pts c]         -> [ %poly   [ pts [ c 0 ] ] ]
+  text   = fn [x y s c]       -> [ %text   [ x  [ y  [ s  [ c 0 ] ] ] ] ]
+
+  :: a point for a polygon/polyline is a [x y] pair-list
+  pt = fn [x y] -> [ x [ y 0 ] ]
+
+  :: ---- small compositions -------------------------------------------------
+  :: a filled square centred-ish at (x,y) with side s
+  square = fn [x y s c] -> (rect x y s s c)
+
+  :: append two scenes (lists of shapes)
+  over = fn [a b] -> (append a b)
+
+  :: a row of n circles of radius r spaced d apart, starting at (x,y)
+  dots = fn [x y r d n c] ->
+    loop with [i = 0, acc = 0] :
+      if (gte i n) then (reverse acc)
+      else again(+(i), [ (circle (add x (mul i d)) y r c) acc ])
+    end
+
+  :: ---- a demo scene: a little house with a sun, from primitives ----------
+  demo = fn [_] ->
+    [ (rect 40 120 170 95 (brown 0))
+    [ (poly [ (pt 30 122) [ (pt 125 52) [ (pt 220 122) 0 ] ] ] (red 0))
+    [ (rect 100 168 42 47 (rgb 90 60 40))
+    [ (rect 60 140 34 34 (yellow 0))
+    [ (rect 158 140 34 34 (yellow 0))
+    [ (circle 262 58 30 (yellow 0))
+    [ (line 262 58 305 26 (yellow 0))
+    [ (line 262 58 300 70 (yellow 0))
+    [ (text 40 245 %orpheus (black 0))
+    0 ] ] ] ] ] ] ] ] ]
+end

@@ -10,40 +10,74 @@
  .panel { background:#f4f1e8; border:1px solid #1a1a2e; margin:8px; }
  .title { background:#c9c4b4; border-bottom:1px solid #1a1a2e; padding:4px 10px; font-size:12px; font-weight:600; }
  .body { padding:12px; }
- input { font:14px ui-monospace,monospace; padding:6px; width:60%; border:1px solid #1a1a2e; background:#fff; }
+ input, textarea { font:13px ui-monospace,monospace; padding:6px; border:1px solid #1a1a2e; background:#fff; box-sizing:border-box; }
+ input { width:100%; }
+ textarea { width:100%; height:96px; resize:vertical; }
+ label { font-size:12px; color:#333; display:block; margin:8px 0 3px; }
  button { font:13px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:6px 12px; margin:0 2px; }
  button:hover { background:#fff; }
  #out { margin-top:14px; background:#fff; border:1px solid #c9c4b4; display:inline-block; }
  .hint { color:#555; font-size:12px; margin-top:8px; }
  code { background:#e8e4d8; padding:0 3px; }
+ .row { display:flex; gap:14px; flex-wrap:wrap; }
+ .col { flex:1; min-width:280px; }
 </style></head>
 <body>
 <header>
-  <span>Orpheus · Charts &nbsp;—&nbsp; data visualization (lib/plot.lat → SVG)</span>
-  <span><a href="/">System</a><a href="/editor">Editor</a></span>
+  <span>Orpheus · Charts &nbsp;—&nbsp; multi-series visualization (viz → SVG)</span>
+  <span><a href="/">System</a><a href="/editor">Editor</a><a href="/fin">Finance</a><a href="/trade">Trade</a><a href="/gpu">GPU</a></span>
 </header>
-<div class="panel">
-  <div class="title">Data — space-separated numbers</div>
-  <div class="body">
-    <input id="data" value="3 1 4 1 5 9 2 6" spellcheck="false">
-    <div style="margin-top:10px">
-      <button onclick="draw('bar')">Bar</button>
-      <button onclick="draw('line')">Line</button>
-      <button onclick="draw('scatter')">Scatter</button>
+
+<div class="row">
+  <div class="col panel">
+    <div class="title">Multi-series line chart</div>
+    <div class="body">
+      <label>Title</label>
+      <input id="mtitle" value="Three series — shared y-scale, legend, gridlines" spellcheck="false">
+      <label>Series labels (one per line, '|'-separated)</label>
+      <input id="mlabels" value="alpha | beta | gamma" spellcheck="false">
+      <label>Series data — one line per series, space-separated numbers</label>
+      <textarea id="mdata" spellcheck="false">3 5 4 7 9 8 11 13 12 15
+2 3 5 4 6 7 6 8 9 11
+9 8 7 7 6 5 5 4 3 2</textarea>
+      <div style="margin-top:10px"><button onclick="drawN()">Plot series</button></div>
+      <div class="hint">Each line becomes a labelled series sharing one y-axis — the chart machine-learning
+        needs (loss curves, equity-vs-benchmark). Same renderer as <code>latte nn</code> and <code>latte fin</code>.</div>
     </div>
-    <div id="out"></div>
-    <div class="hint">The layout (scaling values to pixel geometry) is computed by <code>lib/plot.lat</code>
-      on Loom; Hymn serializes it to SVG. Same engine as the CLI: <code>latte chart line 3 1 4 1 5</code>.</div>
+  </div>
+
+  <div class="col panel">
+    <div class="title">Single series (bar / line / scatter)</div>
+    <div class="body">
+      <label>Data — space-separated numbers</label>
+      <input id="data" value="3 1 4 1 5 9 2 6" spellcheck="false">
+      <div style="margin-top:10px">
+        <button onclick="draw('bar')">Bar</button>
+        <button onclick="draw('line')">Line</button>
+        <button onclick="draw('scatter')">Scatter</button>
+      </div>
+      <div class="hint">Layout computed by <code>lib/plot.lat</code> on Loom; Hymn serializes to SVG.</div>
+    </div>
   </div>
 </div>
+
+<div class="panel"><div class="title">Output</div><div class="body"><div id="out"></div></div></div>
+
 <script>
 var out = document.getElementById('out');
 function draw(kind){
   var nums = document.getElementById('data').value.trim();
   fetch('/api/plot', {method:'POST', headers:{'Content-Type':'text/plain'}, body: kind + ' ' + nums})
-    .then(function(r){ return r.text(); })
-    .then(function(svg){ out.innerHTML = svg; });
+    .then(function(r){ return r.text(); }).then(function(svg){ out.innerHTML = svg; });
 }
-window.addEventListener('load', function(){ draw('bar'); });
+function drawN(){
+  var title = document.getElementById('mtitle').value.trim();
+  var labels = document.getElementById('mlabels').value.trim();
+  var data = document.getElementById('mdata').value.replace(/\r/g,'');
+  var body = title + '\n' + labels + '\n' + data;
+  fetch('/api/plotn', {method:'POST', headers:{'Content-Type':'text/plain'}, body: body})
+    .then(function(r){ return r.text(); }).then(function(svg){ out.innerHTML = svg; });
+}
+window.addEventListener('load', function(){ drawN(); });
 </script>
 </body></html>

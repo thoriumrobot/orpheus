@@ -1,0 +1,33 @@
+:: gpu — a data-parallel compute library for Latte.
+::
+:: Programs describe GPU work as DATA: a device, buffers (lists of numbers), and a
+:: pipeline of kernels — [%map ...], [%zip ...], [%reduce ...], [%saxpy ...],
+:: [%matmul ...], [%shade ...]. The host backend (src/gpu.rs) runs each kernel on the
+:: device. The target device is an NVIDIA GeForce RTX 4070 Ti SUPER; in this environment
+:: the active backend is a genuine multi-core CPU backend (std::thread), so the same
+:: programs run unchanged and a CUDA backend is a drop-in replacement.
+::
+:: Integrates with `ml`/`nn` (matmul is the core neural-net kernel) and `gfx` (the
+:: per-pixel shader produces a scene the gfx renderer draws).
+import std
+core gpu
+  :: device descriptor as data: [ name vram_gb cuda_cores ]
+  device = fn [_] -> [ %rtx4070tisuper [ 16 [ 8448 0 ] ] ]
+
+  :: kernel constructors (a program is a list of these) ---------------------
+  buf    = fn [xs] -> [ %buf xs ]                 :: a device buffer (list of nums)
+  kmap   = fn [op a] -> [ %map [ op [ a 0 ] ] ]   :: elementwise unary
+  kzip   = fn [op a b] -> [ %zip [ op [ a [ b 0 ] ] ] ]  :: elementwise binary
+  ksaxpy = fn [al x y] -> [ %saxpy [ al [ x [ y 0 ] ] ] ]
+  kreduce= fn [a] -> [ %reduce [ a 0 ] ]          :: sum-reduction
+  kdot   = fn [a b] -> [ %dot [ a [ b 0 ] ] ]
+  :: matmul descriptor: dims m k n with row-major buffers a, b
+  kmatmul= fn [m k n a b] -> [ %matmul [ m [ k [ n [ a [ b 0 ] ] ] ] ] ]
+  :: per-pixel shader (Mandelbrot): [ width height max_iter ]
+  kshade = fn [w h it] -> [ %shade [ w [ h [ it 0 ] ] ] ]
+
+  :: a tiny demo program the host can execute: saxpy then reduce.
+  demo = fn [_] ->
+    [ (ksaxpy 3 [ 1 [ 2 [ 3 [ 4 0 ] ] ] ] [ 10 [ 20 [ 30 [ 40 0 ] ] ] ])
+    [ (kreduce [ 1 [ 2 [ 3 [ 4 0 ] ] ] ]) 0 ] ]
+end

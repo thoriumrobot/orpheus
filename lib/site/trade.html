@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Trade</title>
+<style>
+ body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#d8d4c8; color:#1a1a1a; }
+ header { background:#1a1a2e; color:#f4f1e8; padding:8px 14px; font-size:14px; display:flex; justify-content:space-between; }
+ header a { color:#bcd; text-decoration:none; margin-left:14px; }
+ .panel { background:#f4f1e8; border:1px solid #1a1a2e; margin:8px; }
+ .title { background:#c9c4b4; border-bottom:1px solid #1a1a2e; padding:4px 10px; font-size:12px; font-weight:600; }
+ .body { padding:12px; }
+ button { font:13px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:6px 12px; }
+ button:hover { background:#fff; }
+ input, textarea { font:13px ui-monospace,monospace; padding:5px; border:1px solid #1a1a2e; background:#fff; box-sizing:border-box; }
+ textarea { width:100%; height:64px; }
+ label { font-size:12px; color:#333; margin-right:6px; }
+ table.m { border-collapse:collapse; margin:8px 0; }
+ table.m td { border:1px solid #c9c4b4; padding:3px 10px; font-size:13px; }
+ table.m td:first-child { color:#444; background:#efeadd; white-space:nowrap; }
+ .note { color:#444; font-size:12px; max-width:720px; line-height:1.5; }
+ .warn { color:#7a1a1a; font-size:12px; font-weight:600; }
+ .row { display:flex; gap:14px; flex-wrap:wrap; }
+ .col { flex:1; min-width:300px; }
+ #status { color:#666; font-size:12px; margin-left:8px; }
+</style></head>
+<body>
+<header>
+  <span>Orpheus · Trade &nbsp;—&nbsp; automatic advisor: best model + position sizing (lib/fin.lat)</span>
+  <span><a href="/">System</a><a href="/fin">Finance</a><a href="/gpu">GPU</a><a href="/chart">Charts</a></span>
+</header>
+<div class="row">
+  <div class="col panel">
+    <div class="title">News sentiment (Loughran-McDonald) — optional input</div>
+    <div class="body">
+      <textarea id="news" spellcheck="false">Wall Street rebound rally as chip stocks recover and shares surge higher</textarea>
+      <div style="margin-top:8px"><button onclick="score()">Score sentiment</button><span id="spol"></span></div>
+      <p class="note">Counts finance-specific positive/negative words; polarity = (pos−neg)/(pos+neg),
+        computed in Latte. Paste real headlines. Most useful on equities/indices.</p>
+    </div>
+  </div>
+  <div class="col panel">
+    <div class="title">Trade advice</div>
+    <div class="body">
+      <label>account $</label><input id="acct" value="10000" size="8">
+      <label>frac. Kelly</label><input id="kelly" value="0.25" size="4">
+      <button onclick="advise()">Get advice</button><span id="status"></span>
+      <div id="out" style="margin-top:10px">click <b>Get advice</b>…</div>
+      <p class="warn">Research demonstration only — not financial advice. Markets are risky.</p>
+    </div>
+  </div>
+</div>
+<script>
+var lastPol = null;
+function score(){
+  var t = document.getElementById('news').value;
+  fetch('/api/sentiment',{method:'POST',headers:{'Content-Type':'text/plain'},body:t})
+    .then(function(r){return r.json();}).then(function(j){
+      lastPol = j.polarity;
+      document.getElementById('spol').textContent =
+        '  polarity ' + (j.polarity>=0?'+':'') + j.polarity + '  (pos '+j.positive+', neg '+j.negative+')';
+    });
+}
+function advise(){
+  var s=document.getElementById('status'); s.textContent='running model…';
+  var body = 'account=' + document.getElementById('acct').value +
+             '\nkelly=' + document.getElementById('kelly').value +
+             (lastPol!==null ? ('\nsentiment=' + lastPol) : '');
+  fetch('/api/trade',{method:'POST',headers:{'Content-Type':'text/plain'},body:body})
+    .then(function(r){return r.text();}).then(function(h){ document.getElementById('out').innerHTML=h; s.textContent=''; });
+}
+window.addEventListener('load', function(){ score(); advise(); });
+</script>
+</body></html>

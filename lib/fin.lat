@@ -131,4 +131,57 @@ core fin
     [ (base_acc yte)
     [ (cumsum strat)
     [ (cumsum lte) 0 ] ] ] ] ]
+
+  :: ---- richer features: multi-horizon momentum + moving-average trend ------
+  sublist = fn [ps lo n] -> (take n (drop lo ps))
+  rocf    = fn [ps t n] -> let a = (nth ps t) in let b = (nth ps (sub t n)) in (nmul (nint 100) (ndiv (nsub a b) b))
+  maratio = fn [ps t n] -> let a = (nth ps t) in let m = (nmean (sublist ps (add (sub t n) 1) n)) in (nmul (nint 100) (ndiv (nsub a m) m))
+
+  :: feature vector = [ ROC1 ROC3 ROC5 ROC10 (price/MA10 − 1) ] ; forward h-day
+  :: direction label; also the next-1-day return per sample (for the equity curve).
+  :: returns [ xs ys r1s ].
+  feats2 = fn [ps h] ->
+    let n = (len ps) in
+    loop with [t = 10, fx = 0, fy = 0, fr = 0] :
+      if (gte (add t h) n) then [ (reverse fx) [ (reverse fy) [ (reverse fr) 0 ] ] ]
+      else
+        let x = [ (rocf ps t 1) [ (rocf ps t 3) [ (rocf ps t 5) [ (rocf ps t 10) [ (maratio ps t 10) 0 ] ] ] ] ] in
+        let y = if (nlt (nth ps t) (nth ps (add t h))) then 1 else 0 in
+        again(+(t), [ x fx ], [ y fy ], [ (rocf ps (add t 1) 1) fr ])
+    end
+
+  :: improved gold pipeline: multi-horizon momentum/trend features, forward-h
+  :: direction labels, train-only standardization, walk-forward split.
+  gold_run2 = fn [prices h iters split] ->
+    let ds = (feats2 prices h) in
+    let xraw = (head ds) in let ys = (head (tail ds)) in let r1s = (head (tail (tail ds))) in
+    let stats = (colstats (transpose (take split xraw))) in
+    let xs = (map (fn [r] -> (zrow stats r)) xraw) in
+    let xtr = (take split xs) in let ytr = (take split ys) in
+    let xte = (drop split xs) in let yte = (drop split ys) in
+    let wb = (lr_train xtr ytr [0 300] iters) in
+    let w = (head wb) in let b = (tail wb) in
+    let rte = (drop split r1s) in
+    let strat = (zipwith (fn [p r] -> if (p == 0) then [0 0] else r) (preds w b xte) rte) in
+    [ (lr_acc w b xtr ytr)
+    [ (lr_acc w b xte yte)
+    [ (base_acc yte)
+    [ (cumsum strat)
+    [ (cumsum rte) 0 ] ] ] ] ]
+
+  :: train + evaluate on already-prepared (standardized) features.
+  ::   xs = feature rows, ys = 0/1 labels, r1 = next-day return per row (percent).
+  :: returns [ train_acc test_acc baseline_test strategy_equity buyhold_equity ].
+  fit_eval = fn [xs ys r1 split iters] ->
+    let xtr = (take split xs) in let ytr = (take split ys) in
+    let xte = (drop split xs) in let yte = (drop split ys) in
+    let wb = (lr_train xtr ytr [0 1500] iters) in
+    let w = (head wb) in let b = (tail wb) in
+    let rte = (drop split r1) in
+    let strat = (zipwith (fn [p r] -> if (p == 0) then [0 0] else r) (preds w b xte) rte) in
+    [ (lr_acc w b xtr ytr)
+    [ (lr_acc w b xte yte)
+    [ (base_acc yte)
+    [ (cumsum strat)
+    [ (cumsum rte) 0 ] ] ] ] ]
 end

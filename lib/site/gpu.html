@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · GPU &amp; Graphics</title>
+<style>
+ body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#d8d4c8; color:#1a1a1a; }
+ header { background:#1a1a2e; color:#f4f1e8; padding:8px 14px; font-size:14px; display:flex; justify-content:space-between; }
+ header a { color:#bcd; text-decoration:none; margin-left:14px; }
+ .panel { background:#f4f1e8; border:1px solid #1a1a2e; margin:8px; }
+ .title { background:#c9c4b4; border-bottom:1px solid #1a1a2e; padding:4px 10px; font-size:12px; font-weight:600; }
+ .body { padding:12px; }
+ button { font:13px ui-monospace,monospace; border:1px solid #1a1a2e; background:#e8e4d8; cursor:pointer; padding:6px 12px; }
+ button:hover { background:#fff; }
+ table.m { border-collapse:collapse; margin:8px 0; }
+ table.m td { border:1px solid #c9c4b4; padding:3px 10px; font-size:13px; }
+ table.m td:first-child { color:#444; background:#efeadd; white-space:nowrap; }
+ .svgbox { margin-top:8px; background:#fff; border:1px solid #c9c4b4; display:inline-block; }
+ .note { color:#444; font-size:12px; max-width:720px; line-height:1.5; }
+ h4 { margin:14px 0 4px; font-size:13px; }
+ .row { display:flex; gap:14px; flex-wrap:wrap; }
+ .col { flex:1; min-width:300px; }
+ #status { color:#666; font-size:12px; margin-left:10px; }
+</style></head>
+<body>
+<header>
+  <span>Orpheus · GPU &amp; Graphics &nbsp;—&nbsp; lib/gpu.lat (parallel compute) + lib/gfx.lat (drawing)</span>
+  <span><a href="/">System</a><a href="/chart">Charts</a><a href="/fin">Finance</a><a href="/editor">Editor</a></span>
+</header>
+<div class="row">
+  <div class="col panel">
+    <div class="title">GPU compute — device, ML kernel benchmark, GPU+GFX shader</div>
+    <div class="body">
+      <button onclick="runGpu()">Run on device</button><span id="status"></span>
+      <div id="gpu" style="margin-top:10px">click <b>Run on device</b>…</div>
+    </div>
+  </div>
+  <div class="col panel">
+    <div class="title">Graphics library — a scene built in Latte, rendered to SVG</div>
+    <div class="body">
+      <button onclick="runGfx()">Render gfx demo</button>
+      <div id="gfx" class="svgbox" style="margin-top:10px"></div>
+      <p class="note">A scene is a list of shape values (line/rect/circle/poly/text) built by
+        <code>lib/gfx.lat</code>; the host walks the noun and emits SVG. Same library the charts use.</p>
+    </div>
+  </div>
+</div>
+<script>
+function runGpu(){
+  var s=document.getElementById('status'); s.textContent='dispatching kernels…';
+  fetch('/api/gpu',{method:'POST'}).then(function(r){return r.text();})
+    .then(function(h){ document.getElementById('gpu').innerHTML=h; s.textContent=''; });
+}
+function runGfx(){
+  fetch('/api/gfx',{method:'POST'}).then(function(r){return r.text();})
+    .then(function(svg){ document.getElementById('gfx').innerHTML=svg; });
+}
+window.addEventListener('load', function(){ runGpu(); runGfx(); });
+</script>
+</body></html>
