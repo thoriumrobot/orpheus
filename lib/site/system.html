@@ -171,7 +171,7 @@ function makeViewer(opts){
   var body = el('div','body');
   if(opts.kind==='mods'){
     var md = el('div','mods'); v.mods = md; body.appendChild(md);
-  } else if(opts.kind==='log'){
+  } else if(opts.kind==='log'||opts.kind==='out'){
     var rl = el('div','richlog'); v.rich = rl; wireRichLog(rl, v); body.appendChild(rl);
   } else if(opts.kind==='panel'){
     var pb = el('div','panelbody'); v.panelbody = pb; body.appendChild(pb);
@@ -300,6 +300,60 @@ function openPanel(spec){
   });
 }
 
+/* ---- per-tool OUTPUT viewers: every tool gets its own window -------------- */
+/* The Oberon discipline: a tool's results open in the tool's own viewer, so
+   several tools can run AT THE SAME TIME, each filling its own frame, while
+   you keep editing text in others (Hymn serves each request on its own
+   thread). The Log keeps the command trail and quick textual answers. */
+function outViewer(name){
+  var v = viewers.find(function(x){ return x.kind==='out' && x.name===name; });
+  if(!v){
+    v = makeViewer({name:name, track:'user', kind:'out', menu:outMenu,
+      foot:'tool output — re-run from any command line; several tools can run at once'});
+  }
+  return v;
+}
+var runSeq = 0;
+function runInto(name, line, fire){
+  // echo into the Log, mark the tool viewer busy, fire the async request(s)
+  logEcho(line);
+  var v = outViewer(name); mark(v);
+  var seq = ++runSeq;
+  v.busySeq = seq;
+  v.rich.innerHTML = '';
+  var hdr = el('div','ln echo', '▸ '+line);
+  var run = el('div','ln', '  … running ('+new Date().toLocaleTimeString()+')');
+  v.rich.appendChild(hdr); v.rich.appendChild(run);
+  fire(function(html, isText, isErr){
+    if(v.busySeq!==seq) return;             // a newer run took the viewer
+    run.remove();
+    if(isText){
+      String(html).replace(/\n+$/,'').split('\n').forEach(function(l){
+        v.rich.appendChild(el('div','ln'+(isErr?' err':''),(isErr?'! ':'  ')+l));
+      });
+    } else {
+      var d=el('div','obj'); d.innerHTML=html; v.rich.appendChild(d);
+    }
+    v.rich.scrollTop=0;
+  });
+}
+
+/* ---- documents as first-class frames: edit several at once ---------------- */
+function openDoc(name){
+  fetch('/api/doc?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(md){
+    var v = makeViewer({name:name+'.md', track:'user', kind:'frame', content:md, menu:docMenu,
+      foot:'editing docs/'+name+'.md — Edit.Save writes it back; open as many documents as you like'});
+    v.docname = name;
+    mark(v);
+  });
+}
+function saveDoc(v){
+  if(!v||!v.docname||!v.textarea){ logOut('Edit.Save: mark a document frame first', true); return; }
+  fetch('/api/doc?name='+encodeURIComponent(v.docname),{method:'POST',body:v.textarea.value})
+    .then(function(r){return r.text();})
+    .then(function(msg){ logOut(msg==='saved' ? 'saved docs/'+v.docname+'.md' : msg, msg!=='saved'); });
+}
+
 /* ---- the command interpreter -------------------------------------------- */
 function resolveArgs(line){
   var sel=(window.getSelection && String(window.getSelection()))||'';
@@ -326,48 +380,100 @@ function exec(line, fromViewer){
   if(headTok==='System.Gpu'||headTok==='Gpu.Run'){ logEcho(line); window.location='/gpu'; return; }
   if(headTok==='System.Trade'||headTok==='Trade.Advise'){ logEcho(line); window.location='/trade'; return; }
   if(headTok==='System.Derive'||headTok==='Derive.Open'){ logEcho(line); window.location='/derive'; return; }
+  // open a documentation file as an editable frame (several at once is the point)
+  if(headTok==='System.Edit'||headTok==='Edit.Doc'){ logEcho(line); if(rest) openDoc(rest); else logOut('System.Edit: name a doc, e.g.  System.Edit latte-language', true); return; }
+  if(headTok==='Edit.Save'){ logEcho(line); saveDoc(targetViewer(rest, fromViewer)); return; }
   // Oberon-style: a command that operates on the text after it (the selection).
   if(headTok==='System.Sentiment'||headTok==='News.Score'){
     logEcho(line);
     if(!rest){ logOut('System.Sentiment: type some headline text after the command', true); return; }
     post('/api/sentiment', rest, function(out){
-      try { var j=JSON.parse(out); logOut('sentiment: polarity '+(j.polarity>=0?'+':'')+j.polarity+'  (pos '+j.positive+', neg '+j.negative+')'); }
+      try {
+        var j=JSON.parse(out);
+        logOut('sentiment: '+(j.polarity>=0?'+':'')+j.polarity+'   [trained model '+(j.model>=0?'+':'')+j.model+' · lexicon '+(j.lexicon>=0?'+':'')+j.lexicon+']');
+      }
       catch(e){ logOut(out, true); }
     });
     return;
   }
+  // score a whole DOCUMENT (a report) with the trained classifier, sentence by
+  // sentence — the evidence table opens in its own viewer.
+  if(headTok==='Doc.Score'||headTok==='Report.Score'){
+    if(!rest){ logEcho(line); logOut('Doc.Score: name a doc, e.g.  Doc.Score visualization-and-ml', true); return; }
+    runInto('Score.Out', line, function(done){
+      fetch('/api/doc?name='+encodeURIComponent(rest.replace(/\.md$/,'')))
+        .then(function(r){ if(!r.ok) throw new Error('no such doc'); return r.text(); })
+        .then(function(md){ return fetch('/api/sentiment',{method:'POST',headers:{'Content-Type':'text/plain; charset=utf-8'},body:md}); })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var lbl = j.polarity>0.15?'POSITIVE':(j.polarity<-0.15?'NEGATIVE':'neutral');
+          var h='<h3>docs/'+rest+'.md — document score '+(j.polarity>=0?'+':'')+j.polarity+' ('+lbl+')</h3>'+
+                '<p class="note">trained classifier, sentence-level; confidence-weighted aggregate over '+j.sentences.length+' sentences. Strongest evidence:</p>'+
+                '<table class="m"><tr><td><b>score</b></td><td><b>sentence</b></td></tr>';
+          var ranked=j.sentences.slice().sort(function(a,b){return Math.abs(b.polarity)-Math.abs(a.polarity);}).slice(0,10);
+          ranked.forEach(function(sx){
+            var c = sx.polarity>0.15?'#1a6e2a':(sx.polarity<-0.15?'#7a1a1a':'#555');
+            h+='<tr><td style="color:'+c+'">'+(sx.polarity>=0?'+':'')+sx.polarity+'</td><td>'+sx.text.replace(/&/g,'&amp;').replace(/</g,'&lt;').slice(0,140)+'</td></tr>';
+          });
+          h+='</table>';
+          done(h,false);
+        })
+        .catch(function(e){ done('Doc.Score: '+e,true,true); });
+    });
+    return;
+  }
 
-  // ---- embedded-object commands: results render INTO the Log as objects ----
+  // ---- tool commands: each tool runs in ITS OWN viewer (in parallel) -------
   // gfx <expr|Mod.arm args> : a Latte gfx scene, rendered to SVG
   if(headTok==='gfx'||headTok==='draw'){
-    logEcho(line);
-    post('/api/gfx', rest, function(svg){
-      if(/^\s*<svg/.test(svg)) logObj(svg); else logOut(svg, true);
+    runInto('Gfx.Out', line, function(done){
+      post('/api/gfx', rest, function(svg){
+        if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true);
+      });
+    });
+    return;
+  }
+  // trace [w=N h=N] : the Latte ray tracer (lib/trace.lat) -> SVG raster
+  if(headTok==='trace'||headTok==='render'){
+    runInto('Trace.Out', line, function(done){
+      post('/api/trace', rest.split(/\s+/).filter(Boolean).join('\n'), function(svg){
+        if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true);
+      });
     });
     return;
   }
   // chart bar|line|scatter <nums> : a chart (layout computed in lib/plot.lat)
   // chart market [days=N] [live=1] : the real price series with SMA overlays
   if(headTok==='chart'||headTok==='plot'){
-    logEcho(line);
-    if(/^market\b/.test(rest)){
-      var body = rest.replace(/^market\s*/,'').split(/\s+/).filter(Boolean).join('\n');
-      post('/api/marketchart', body, function(svg){ if(/^\s*<svg/.test(svg)) logObj(svg); else logOut(svg, true); });
-    } else {
-      post('/api/plot', rest, function(svg){ if(/^\s*<svg/.test(svg)) logObj(svg); else logOut(svg, true); });
-    }
+    runInto('Chart.Out', line, function(done){
+      if(/^market\b/.test(rest)){
+        var body = rest.replace(/^market\s*/,'').split(/\s+/).filter(Boolean).join('\n');
+        post('/api/marketchart', body, function(svg){ if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true); });
+      } else {
+        post('/api/plot', rest, function(svg){ if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true); });
+      }
+    });
     return;
   }
   // ta [live=1] [win=N] : the technical-analysis verdict table (lib/ta.lat)
   if(headTok==='ta'||headTok==='indicators'){
-    logEcho(line);
-    post('/api/ta', rest.split(/\s+/).filter(Boolean).join('\n'), function(html){ logObj(html); });
+    runInto('TA.Out', line, function(done){
+      post('/api/ta', rest.split(/\s+/).filter(Boolean).join('\n'), function(html){ done(html,false); });
+    });
     return;
   }
   // trade [account=N] [kelly=F] [live=1] : the full advisor report
   if(headTok==='trade'||headTok==='advise'){
-    logEcho(line);
-    post('/api/trade', rest.split(/\s+/).filter(Boolean).join('\n'), function(html){ logObj(html); });
+    runInto('Trade.Out', line, function(done){
+      post('/api/trade', rest.split(/\s+/).filter(Boolean).join('\n'), function(html){ done(html,false); });
+    });
+    return;
+  }
+  // net <expr> : the interaction-net engine, in its own viewer (audited)
+  if(headTok==='net'){
+    runInto('Net.Out', line, function(done){
+      post('/api/run', resolveArgs(line), function(out){ done(out,true,/^!|error/i.test(out)); });
+    });
     return;
   }
   // ui Mod.arm [args] : open a graphical front end described in Latte
@@ -460,6 +566,8 @@ var sourceMenu=[
   {cmd:'Compiler.Compile *',label:'Compile'},{cmd:'Compiler.Store *',label:'Store'},
   {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var toolMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Close *',label:'Close'}];
+var outMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
+var docMenu=[{cmd:'Edit.Save *',label:'Save'},{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Grow'}];
 var modsMenu=[{cmd:'System.Modules',label:'Refresh'}];
 
@@ -476,13 +584,23 @@ var SYSTEM_TOOL =
 'eval (mul (add 3 4) 5)\n'+
 'type head [1 2]\n'+
 '#\n'+
-'# Drawings, charts and analysis render as EMBEDDED OBJECTS in the Log:\n'+
+'# TOOLS RUN IN PARALLEL: each command below opens (or reuses) its own viewer.\n'+
+'# Middle-click several in a row — they run simultaneously, each filling its\n'+
+'# own frame while you keep editing text anywhere else (Hymn serves every\n'+
+'# request on its own thread). The Log keeps the command trail.\n'+
+'trace\n'+
+'trace w=160 h=120\n'+
 'gfx (demo 0)\n'+
 'gfx Tool.rings 6\n'+
 'chart bar 3 1 4 1 5 9 2 6\n'+
 'chart market days=120\n'+
 'ta\n'+
 'trade account=10000\n'+
+'#\n'+
+'# Documents are frames too — open several and edit them side by side\n'+
+'# (Save is in each frame\'s menu):\n'+
+'System.Edit latte-language\n'+
+'System.Edit interaction-nets\n'+
 '#\n'+
 '# Open a graphical FRONT END designed in Latte (lib/ui.lat + Tool.calc) —\n'+
 '# its buttons call the module\'s own arms with the field\'s value:\n'+
@@ -510,9 +628,12 @@ var SYSTEM_TOOL =
 'System.Gpu\n'+
 'System.Charts\n'+
 '#\n'+
-'# Score a news headline in place (Oberon-style: the command reads the text after it):\n'+
-'System.Sentiment stocks rally and recover as chip shares surge higher\n'+
+'# Score text in place with the TRAINED classifier (it reads context and negation —\n'+
+'# "outflows eased" is positive — where word-counting fails); or score a whole\n'+
+'# document or report, sentence by sentence, into its own viewer:\n'+
+'System.Sentiment etf outflows eased as the market stabilized\n'+
 'System.Sentiment selloff deepens as tech stocks falter amid recession fears\n'+
+'Doc.Score visualization-and-ml\n'+
 '#\n'+
 '# Edit -> compile -> run (the Oberon loop):\n'+
 '#   1. middle-click into the hello.Mod frame to mark it\n'+

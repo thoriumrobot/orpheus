@@ -178,7 +178,18 @@ core fin
     let wb = (lr_train xtr ytr [0 1500] iters) in
     let w = (head wb) in let b = (tail wb) in
     let rte = (drop split r1) in
-    let strat = (zipwith (fn [p r] -> if (p == 0) then [0 0] else r) (preds w b xte) rte) in
+    let ps = (preds w b xte) in
+    :: strategy daily P&L, NET OF TRANSACTION COSTS: 5 bp (0.05%) charged on
+    :: every position change (flat<->long), the realistic-backtest discipline —
+    :: a strategy that trades often must beat its own turnover.
+    let strat = loop with [pp = ps, rr = rte, prev = 1, out = 0] :
+      if (pp == 0) then (reverse out)
+      else
+        let p = (head pp) in
+        let gross = if (p == 0) then (head rr) else [0 0] in
+        let cost = if (p == prev) then [0 0] else [0 50] in
+        again((tail pp), (tail rr), p, [ (nsub gross cost) out ])
+      end in
     [ (lr_acc w b xtr ytr)
     [ (lr_acc w b xte yte)
     [ (base_acc yte)

@@ -66,7 +66,28 @@ fn jets_on() -> bool {
     JETS_ENABLED.load(Ordering::SeqCst)
 }
 fn audit_on() -> bool {
-    JET_AUDIT.load(Ordering::SeqCst)
+    JET_AUDIT.load(Ordering::SeqCst) && !IN_AUDIT.with(|f| f.get())
+}
+
+// Audit is NON-REENTRANT per thread: while one jet's pure reduction runs for
+// comparison, inner hinted calls use their jets WITHOUT re-auditing. Each jet is
+// still audited at its own (outer) call sites, so coverage is unchanged — but a
+// pure body that itself uses hinted arithmetic (e.g. num.lat's `nmul` calling
+// `mul`/`div`) stays fast instead of exploding into successor arithmetic.
+thread_local! {
+    static IN_AUDIT: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+struct AuditGuard;
+impl AuditGuard {
+    fn enter() -> AuditGuard {
+        IN_AUDIT.with(|f| f.set(true));
+        AuditGuard
+    }
+}
+impl Drop for AuditGuard {
+    fn drop(&mut self) {
+        IN_AUDIT.with(|f| f.set(false));
+    }
 }
 /// Enable/disable JIT compilation. When disabled, `tar` uses the tree-walking interpreter.
 /// JIT is on by default and is the production execution path; the interpreter remains the
@@ -272,6 +293,7 @@ fn tar_fuel(subject0: &N, formula0: &N, fuel: &mut u64, tier: bool) -> Eval {
                         if let Some(jet) = lookup_jet(tag.bytes_le()) {
                             let jetted = jet(&subject)?;
                             if audit_on() {
+                                let _guard = AuditGuard::enter();
                                 let pure = tar_fuel(&subject, g, fuel, tier)?;
                                 if pure != jetted {
                                     return Err(Crash::Bottom(format!(
@@ -677,6 +699,7 @@ mod jit {
                                     if let Some(jet) = lookup_jet(&name) {
                                         let jetted = jet(s)?;
                                         if audit_on() {
+                                            let _guard = AuditGuard::enter();
                                             let pure = run_to_value(&cg, s, fuel)?;
                                             if pure != jetted {
                                                 return Err(Crash::Bottom(format!(

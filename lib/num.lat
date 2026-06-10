@@ -12,20 +12,20 @@ core num
   nmag   = fn [x] -> tail x
   nnegate = fn [x] -> [ (if ((head x) == 0) then 1 else 0) (tail x) ]
   nnorm  = fn [x] -> if ((tail x) == 0) then [0 0] else x   :: collapse -0 to +0
-  nadd = fn [a b] ->
+  nadd = fn [a b] -> fast %nadd
            let sa = (head a) in let ma = (tail a) in
            let sb = (head b) in let mb = (tail b) in
            if (sa == sb) then (nnorm [ sa (add ma mb) ])
            else if (gte ma mb) then (nnorm [ sa (sub ma mb) ])
            else (nnorm [ sb (sub mb ma) ])
-  nsub = fn [a b] -> (nadd a (nnegate b))
-  nmul = fn [a b] ->
+  nsub = fn [a b] -> fast %nsub (nadd a (nnegate b))
+  nmul = fn [a b] -> fast %nmul
            let s = (if ((head a) == (head b)) then 0 else 1) in
            (nnorm [ s (div (mul (tail a) (tail b)) (nscale 0)) ])
-  ndiv = fn [a b] ->
+  ndiv = fn [a b] -> fast %ndiv
            let s = (if ((head a) == (head b)) then 0 else 1) in
            (nnorm [ s (div (mul (tail a) (nscale 0)) (tail b)) ])
-  nlt  = fn [a b] ->                       :: signed less-than -> loobean (0 = true)
+  nlt  = fn [a b] -> fast %nlt                       :: signed less-than -> loobean (0 = true)
            if ((head a) == (head b))
              then (if ((head a) == 0) then (lt (tail a) (tail b)) else (lt (tail b) (tail a)))
              else (if ((head a) == 1) then 0 else 1)
@@ -37,14 +37,14 @@ core num
   nrelu = fn [x] -> (nmax [0 0] x)                      :: rectified linear unit
   nsum  = fn [xs] -> (foldl (fn [acc v] -> (nadd acc v)) [0 0] xs)
   nmean = fn [xs] -> if (xs == 0) then [0 0] else (ndiv (nsum xs) (npos (mul (len xs) 1000)))
-  ndot  = fn [u v] -> loop with [a = u, b = v, acc = [0 0]] :   :: signed dot product
+  ndot  = fn [u v] -> fast %ndot loop with [a = u, b = v, acc = [0 0]] :   :: signed dot product
             if (a == 0) then acc else again((tail a), (tail b), (nadd acc (nmul (head a) (head b)))) end
   :: fast, numerically-stable activations (no transcendental needed):
   ::   tanh(x) ≈ x / (1 + |x|)        sigmoid(x) ≈ 0.5 + 0.5·x/(1+|x|)
   ntanh    = fn [x] -> (ndiv x (nadd [0 1000] (nabs x)))
   nsigmoid = fn [x] -> (nadd [0 500] (nmul [0 500] (ntanh x)))
   :: fixed-point square root by Newton's method (x ≥ 0)
-  nsqrt = fn [x] ->
+  nsqrt = fn [x] -> fast %nsqrt
     if (nlt x [0 1]) then [0 0]
     else loop with [r = (nmax [0 1000] x), k = 0] :
            if (k == 24) then r else again((nmul [0 500] (nadd r (ndiv x r))), +(k))

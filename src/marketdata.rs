@@ -307,6 +307,35 @@ pub fn closes(live: bool) -> (Vec<i64>, (String, String), String) {
 /// How many trailing embedded days fall strictly after date `d` (YYYY-MM-DD)?
 /// The embedded series is daily and ends at MARKET_SPAN.1, so this is a date
 /// difference clamped to the press-report window documented above.
+/// "YYYY-MM-DD" -> days since the civil epoch (Howard Hinnant's algorithm).
+pub fn date_ordinal(s: &str) -> Option<i64> {
+    let mut it = s.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let day: i64 = it.next()?.parse().ok()?;
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
+}
+
+/// days since the civil epoch -> "YYYY-MM-DD" (the inverse).
+pub fn ordinal_date(z: i64) -> String {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 fn embedded_days_after(d: &str) -> usize {
     fn ordinal(s: &str) -> Option<i64> {
         let mut it = s.split('-');

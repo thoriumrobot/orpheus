@@ -276,8 +276,25 @@ sequence to one vector. A **transformer block** is therefore ordinary data — a
 residual + layernorm + position-wise dense + residual + layernorm — and `block seed d` builds a
 seeded one (`randmat`/`lcg` give reproducible initializations). `latte nn` runs a 3-token
 sequence through a seeded block live. Customizability is structural: any composition of these
-layers — ResNets, transformer stacks, conv pyramids — is a list you write. Training: the MLP
-ships with full backpropagation; the other layers are forward-only in this release.
+layers — ResNets, transformer stacks, conv pyramids — is a list you write.
+
+**Training is generic now — reverse-mode autodiff over the layer algebra.** Every vector
+layer has a vector-Jacobian product (`layer_bwd`): exact fixed-point derivatives for
+relu/tanh/sigmoid (`ntanh x = x/(1+|x|)` differentiates to `1/(1+|x|)²`), the dense VJP
+`dx = Wᵀdy` with `dW = dy⊗x`, and rmsnorm with the standard straight-through approximation
+(stated, not hidden). `fwd_cache` keeps each layer's input, `stack_bwd` folds the VJPs
+backward, and `stack_train` does SGD on ANY composition — the test suite trains both the
+classic 2-layer |x| net (loss 10822 → 0) and a deeper tanh/relu stack through the same code
+path. Architecture is data; now its gradient is too.
+
+**The post-transformer line is in.** `%ssm` is an S4D/Mamba-style DIAGONAL gated linear
+recurrence (`h_t = a⊙h_{t−1} + b⊙x_t`, `y_t = c⊙h_t + d⊙x_t`) — linear-time in sequence
+length and, having no softmax or exp, a natural fit for fixed point (which is exactly why
+the quantization literature likes SSMs on edge hardware). `%seqlnorm` is per-position
+rmsnorm, and `ssmblock seed d` builds the modern PRENORM block: rmsnorm → ssm → residual →
+rmsnorm → dense → residual. `latte nn` runs both a transformer block and an SSM block live.
+Attention and SSM sequence layers are forward-only in this release; the vector-layer stacks
+train end to end.
 
 ### Training by backpropagation
 
@@ -465,8 +482,10 @@ The advisor **fuses two kinds of evidence** and sizes the position with the vola
 
 1. **Technical analysis (60%)** — `ta.lat`'s composite vote, normalized to a signal in [−1, +1].
 2. **News sentiment (40%)** — every bundled (or `--news`-supplied) headline is scored by the
-   Loughran-McDonald method (the polarity arithmetic runs in `lib/sentiment.lat` on Loom) and
-   aggregated with a 3-day-half-life recency weight; `--sentiment S` overrides.
+   FUSED scorer: 0.65 × the trained classifier (see "The trained text classifier" below) +
+   0.35 × the Loughran-McDonald lexicon (whose polarity arithmetic runs in
+   `lib/sentiment.lat` on Loom), aggregated with a 3-day-half-life recency weight;
+   `--sentiment S` overrides.
 3. **The combined lean** `0.6·TA + 0.4·news` decides direction: above +0.1 → long candidate;
    below −0.1 → bearish → **FLAT** (no shorting in this demo); in between → no edge, FLAT.
 4. **Sizing** — **fractional Kelly** from the *measured* out-of-sample momentum hit rate (the
@@ -479,6 +498,54 @@ polarity, the fusion arithmetic, the measured reliabilities, and the sizing chai
 `--account N --kelly F --live --news FILE --sentiment S`. The `/trade` GUI page renders the same
 evidence; `trade` in the System GUI embeds it in the Log. Every output carries an explicit
 disclaimer: this is a research demonstration, not financial advice.
+
+## The trained text classifier — headlines, reports, and documents
+
+The research verdict on financial sentiment is consistent: learned models beat word-counting
+lexicons, because lexicons cannot read context or negation. Orpheus's answer, inside the
+zero-dependency rule, is a **logistic regression over unigram + bigram features** (stopwords
+filtered, negators kept), trained offline on a labeled corpus of financial text in BOTH
+registers — market headlines *and* report/filing language — with the failure cases lexicons
+get wrong. The ~200 significant weights are embedded in `src/sentiment.rs`; training is
+reproducible from the corpus. The canonical contrasts, straight from the test suite:
+
+- "ETF **outflows eased** as the market stabilized" → lexicon −1.0 (it counts "outflows");
+  model **+0.99** (it learned the bigram).
+- "the company **failed to deliver**" → model strongly negative; "risks **did not
+  materialize**" positive vs "risks **materialized**" negative — negation read correctly.
+- Out-of-vocabulary text scores ≈ 0 (the intercept is regularized to neutral).
+
+**It scores documents, not just headlines.** The scorer is sentence-level: `score_document`
+splits a report, scores each sentence, and aggregates with confidence weights (decisive
+sentences count more; boilerplate self-mutes), returning the per-sentence evidence. So the
+same machinery reads a quarterly review, an analyst note, or a filing:
+
+```
+latte sentiment "ETF outflows eased as the market stabilized"   # all three scores shown
+latte sentiment --file q2-review.txt                            # document mode
+latte sentiment --doc visualization-and-ml                      # score a docs/ page
+```
+
+`POST /api/sentiment` returns the per-sentence JSON; in the System GUI, `System.Sentiment
+<text>` scores in place and **`Doc.Score <name>`** opens a whole document's evidence table in
+its own viewer. The advisor's news leg uses the fused score everywhere.
+
+## Honest validation: embargo, costs, HAR-RV, conformal bands
+
+Four methodology upgrades keep the advisor's claims defensible:
+
+- **Embargoed walk-forward** — the out-of-sample momentum hit rate leaves a 10-day gap
+  between the training span and the test slice, so overlapping windows cannot leak
+  (the purged/embargoed-CV discipline, López de Prado 2018, in single-split form).
+- **Transaction costs** — the strategy equity curves in `lib/fin.lat` charge 5 bp on every
+  position change before compounding; a signal that trades often must beat its own turnover,
+  and the chart says so in its title.
+- **HAR-RV** (Corsi 2009) — next-day volatility is forecast by the daily/weekly/monthly
+  realized-volatility regression (least squares on the full history, R² reported), and that
+  forecast — the dependable edge in this data — drives the volatility-targeted sizing.
+- **A conformal band** — the report states a distribution-free 90% band on tomorrow's move
+  (the split-conformal quantile of the trailing year's |returns|), so the uncertainty is a
+  measured quantity, not an adjective.
 
 ## Charts in your reports — embeddable visualization
 

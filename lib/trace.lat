@@ -1,0 +1,175 @@
+:: ===========================================================================
+:: trace.lat — a ray tracer, written in Latte.
+::
+:: The Oberon proof point: a real graphics workload implemented IN the system's
+:: language, running at usable speed. Three spheres over a checkered ground
+:: plane, one directional light, hard shadows, Blinn-style specular highlights,
+:: a sky gradient, and one reflection bounce on the mirror sphere — all in
+:: signed fixed-point ([sign mag] ×1000) on Loom, accelerated by the audited
+:: `%nadd/%nmul/%ndiv/%ndot/%nsqrt` jets. The Anvil compiler can also compile
+:: this whole module to native code (`latte trace` tries that first).
+::
+:: A pixel is a packed RGB natural (r·65536 + g·256 + b); `render w h` returns
+:: the image as a list of rows. The host rasterizes that to SVG (`latte trace`,
+:: `POST /api/trace`, or the `trace` command in the System GUI).
+:: ===========================================================================
+import std
+import num
+core trace
+  :: ---- 3-vectors of signed numbers, unrolled for speed --------------------
+  v3 = fn [x y z] -> [ x [ y [ z 0 ] ] ]
+  vx = fn [v] -> (head v)
+  vy = fn [v] -> (head (tail v))
+  vz = fn [v] -> (head (tail (tail v)))
+  v3add = fn [a b] -> (v3 (nadd (vx a) (vx b)) (nadd (vy a) (vy b)) (nadd (vz a) (vz b)))
+  v3sub = fn [a b] -> (v3 (nsub (vx a) (vx b)) (nsub (vy a) (vy b)) (nsub (vz a) (vz b)))
+  v3scale = fn [s v] -> (v3 (nmul s (vx v)) (nmul s (vy v)) (nmul s (vz v)))
+  v3dot = fn [a b] -> (nadd (nmul (vx a) (vx b)) (nadd (nmul (vy a) (vy b)) (nmul (vz a) (vz b))))
+  v3norm = fn [v] ->
+    let l = (nsqrt (v3dot v v)) in
+    if (nlt l [0 1]) then v else (v3scale (ndiv [0 1000] l) v)
+  reflect = fn [d n] -> (v3sub d (v3scale (nmul [0 2000] (v3dot d n)) n))
+
+  :: ---- the scene -----------------------------------------------------------
+  :: a sphere is [ center [ radius [ color [ shiny 0 ] ] ] ]; colors are 0..1
+  spheres = fn [_] ->
+    [ [ (v3 [1 700] [0 1000] [0 600])  [ [0 1000] [ (v3 [0 930] [0 320] [0 260]) [ 1 0 ] ] ] ]
+    [ [ (v3 [0 1500] [0 700] [0 200])  [ [0 700]  [ (v3 [0 260] [0 430] [0 920]) [ 0 0 ] ] ] ]
+    [ [ (v3 [0 300] [0 350] [1 900])   [ [0 350]  [ (v3 [0 950] [0 800] [0 280]) [ 0 0 ] ] ] ]
+    0 ] ] ]
+  light = fn [_] -> (v3norm (v3 [1 550] [0 1000] [1 700]))   :: direction toward the light
+  miss  = fn [_] -> [0 999000000]                            :: "no hit" sentinel distance
+
+  :: sky: a vertical gradient
+  sky = fn [rd] ->
+    let t = (nmul [0 500] (nadd [0 1000] (vy rd))) in
+    (v3 (nadd [0 340] (nmul t [0 240]))
+        (nadd [0 430] (nmul t [0 260]))
+        (nadd [0 620] (nmul t [0 330])))
+
+  :: the ground checkerboard at p (plane y = 0); +16 keeps the cell index positive
+  checker = fn [p] ->
+    let ix = (div (tail (nadd (vx p) [0 16000])) 1000) in
+    let iz = (div (tail (nadd (vz p) [0 16000])) 1000) in
+    if ((mod (add ix iz) 2) == 0) then (v3 [0 860] [0 860] [0 830]) else (v3 [0 240] [0 270] [0 320])
+
+  :: ---- intersections -------------------------------------------------------
+  hit_sphere = fn [ro rd c r] ->
+    let oc = (v3sub ro c) in
+    let b  = (v3dot oc rd) in
+    let cc = (nsub (v3dot oc oc) (nmul r r)) in
+    let disc = (nsub (nmul b b) cc) in
+    if (nlt disc [0 0]) then (miss 0)
+    else
+      let t = (nsub (nnegate b) (nsqrt disc)) in
+      if (nlt t [0 25]) then (miss 0) else t
+
+  hit_plane = fn [ro rd] ->
+    if (nlt (vy rd) [1 1]) then
+      let t = (ndiv (nnegate (vy ro)) (vy rd)) in
+      if (nlt t [0 25]) then (miss 0) else t
+    else (miss 0)
+
+  :: nearest surface: [ t idx ]  (idx 0..2 = sphere, 9 = the ground plane)
+  nearest = fn [ro rd] ->
+    loop with [ss = (spheres 0), i = 0, bt = (hit_plane ro rd), bi = 9] :
+      if (ss == 0) then [ bt bi ]
+      else
+        let sp = (head ss) in
+        let t = (hit_sphere ro rd (head sp) (head (tail sp))) in
+        if (nlt t bt) then again((tail ss), +(i), t, i)
+        else again((tail ss), +(i), bt, bi)
+    end
+
+  :: is the point p (offset off the surface) shadowed from the light?  1 = yes
+  shadowed = fn [p] ->
+    let l = (light 0) in
+    loop with [ss = (spheres 0)] :
+      if (ss == 0) then 0
+      else
+        let sp = (head ss) in
+        if (nlt (hit_sphere p l (head sp) (head (tail sp))) [0 900000000]) then 1
+        else again((tail ss))
+    end
+
+  :: ---- shading --------------------------------------------------------------
+  :: local illumination: ambient + lambert + shadow + specular highlight
+  lambert = fn [rd p n col] ->
+    let l = (light 0) in
+    let sh = (shadowed (v3add p (v3scale [0 60] n))) in
+    let dif = (nmax [0 0] (v3dot n l)) in
+    let k = if (sh == 1) then [0 280] else (nadd [0 280] (nmul [0 720] dif)) in
+    let base = (v3 (nmul k (vx col)) (nmul k (vy col)) (nmul k (vz col))) in
+    if (sh == 1) then base
+    else
+      let r2 = (nmax [0 0] (v3dot (reflect rd n) l)) in
+      let s2 = (nmul r2 r2) in let s4 = (nmul s2 s2) in
+      let s8 = (nmul s4 s4) in let s16 = (nmul s8 s8) in
+      let w = (nmul [0 550] s16) in
+      (v3 (nadd (vx base) w) (nadd (vy base) w) (nadd (vz base) w))
+
+  :: surface query: 0 on a miss, else [ p [ n [ col [ shiny 0 ] ] ] ]
+  surf = fn [ro rd] ->
+    let h = (nearest ro rd) in
+    let t = (head h) in
+    if (nlt [0 900000000] t) then 0
+    else
+      let p = (v3add ro (v3scale t rd)) in
+      let i = (tail h) in
+      if (i == 9) then [ p [ (v3 [0 0] [0 1000] [0 0]) [ (checker p) [ 0 0 ] ] ] ]
+      else
+        let sp = (nth (spheres 0) i) in
+        let n = (v3norm (v3sub p (head sp))) in
+        [ p [ n [ (head (tail (tail sp))) [ (head (tail (tail (tail sp)))) 0 ] ] ] ]
+
+  :: one-bounce-free shading (used for the reflected ray)
+  shade0 = fn [ro rd] ->
+    let s = (surf ro rd) in
+    if (s == 0) then (sky rd)
+    else (lambert rd (head s) (head (tail s)) (head (tail (tail s))))
+
+  :: full shading: the mirror sphere mixes in one reflection bounce
+  shade = fn [ro rd] ->
+    let s = (surf ro rd) in
+    if (s == 0) then (sky rd)
+    else
+      let p = (head s) in
+      let n = (head (tail s)) in
+      let col = (head (tail (tail s))) in
+      let shiny = (head (tail (tail (tail s)))) in
+      let base = (lambert rd p n col) in
+      if (shiny == 1) then
+        let r = (v3norm (reflect rd n)) in
+        let rc = (shade0 (v3add p (v3scale [0 60] n)) r) in
+        (v3 (nadd (nmul [0 620] (vx base)) (nmul [0 380] (vx rc)))
+            (nadd (nmul [0 620] (vy base)) (nmul [0 380] (vy rc)))
+            (nadd (nmul [0 620] (vz base)) (nmul [0 380] (vz rc))))
+      else base
+
+  :: ---- camera and the image -------------------------------------------------
+  :: pixel (i, j) of a w x h image: camera at (0, 1, -3.6) looking toward +z
+  pixel = fn [i j w h] ->
+    let fx = (nsub (ndiv (nint (add (mul 2 i) 1)) (nint w)) [0 1000]) in
+    let fy = (nsub [0 1000] (ndiv (nint (add (mul 2 j) 1)) (nint h))) in
+    let aspect = (ndiv (nint w) (nint h)) in
+    let rd = (v3norm (v3 (nmul fx (nmul aspect [0 850]))
+                         (nadd (nmul fy [0 850]) [1 120])
+                         [0 1000])) in
+    (shade (v3 [0 0] [0 1000] [1 3600]) rd)
+
+  :: a signed 0..1 channel -> 0..255
+  chan = fn [c] -> (div (mul (tail (nmax [0 0] (nmin [0 1000] c))) 255) 1000)
+  pack = fn [c] -> (add (mul (chan (vx c)) 65536) (add (mul (chan (vy c)) 256) (chan (vz c))))
+
+  :: the whole image as a list of rows of packed RGB naturals
+  render = fn [w h] ->
+    loop with [j = 0, rows = 0] :
+      if (j == h) then (reverse rows)
+      else
+        let row = loop with [i = 0, acc = 0] :
+                    if (i == w) then (reverse acc)
+                    else again(+(i), [ (pack (pixel i j w h)) acc ])
+                  end in
+        again(+(j), [ row rows ])
+    end
+end

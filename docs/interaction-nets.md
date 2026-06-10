@@ -169,8 +169,47 @@ shown inline. Three compilers, one rule: when the net and the interpreter both p
 value, they must agree — the randomized batteries and the new `general_compiler_matches_interpreter`
 test hold that line.
 
-## 8. Frontier
+## 8. Native numbers — the HVM2 idea
 
-Still open: net-level cells/lists as *surface* data (pairs are internal machinery today), and
+Unary Peano numerals make beautiful rewrite rules and terrible arithmetic: `gcd 1071 462`
+costs 72,758 interactions mostly counting successor cells. The engine now does what HVM2
+does: **numbers are atomic agents**. A `Lit(n)` carries a 64-bit machine number in a single
+cell, and a native ALU agent computes each operation in O(1) interactions — `NOp(k)` meets
+`Lit(a)` and becomes `NOp2(k,a)`; that meets `Lit(b)` and ONE interaction later the wire
+carries `Lit(a∘b)`. Comparisons emit Loobean literals, `Sel`/`Pred`/δ/ε all have `Lit`
+rules, and `div`/`mod` compile to single native agents instead of generated recursions.
+
+The numbers speak for themselves: `gcd 1071 462` drops from 72,758 to **116 interactions**;
+`99999 × 99999` — about 10¹⁰ Peano steps — is **2**. The general compiler emits native
+numbers by default; `latte net --peano` keeps the pedagogical unary mode, and every result
+is still audited against the Loom interpreter.
+
+## 9. Parallel reduction — implemented honestly
+
+Interaction nets are *uniformly confluent*: distinct active pairs touch disjoint redexes, so
+they can be rewritten simultaneously and any order reaches the same normal form. That
+theorem is the formalism's promise, and HVM2's lock-free GPU reducer is its realization.
+
+`latte net --par N` runs this engine's **batch-claimed parallel reducer**: candidate pairs
+drain from the active-pair worklist; each pair's footprint (the two agents plus their
+auxiliary neighbors) is claimed by atomic flags; claimed pairs rewrite across `std::thread`
+workers into pre-reserved private id blocks, recording newly-wired principals in
+thread-local lists (no shared mutation outside the claims); conflicted pairs run inline;
+`Ref` expansions (unbounded) and the Peano lockstep chains stay sequential; the arena
+compacts when mostly dead.
+
+What to believe about it: **correctness is tested** — the parallel engine must produce the
+sequential engine's answer on multi-argument functions, exponential recursion, loops, and
+`gcd`, and does. **Throughput is not the point yet**: this is a working demonstration of
+batch-claimed parallel rewriting, not an optimized runtime. Profiling shows the remaining
+costs are exactly the ones HVM2's design exists to remove (claim conflicts on chained γδ
+trees, certify scans, allocation slack), and the development machine has one CPU, so no
+speedup is even measurable here. The honest summary: the parallelism theorem is exercised
+and verified; HVM2-class performance needs the lock-free linker and redex bags, which
+remain the frontier.
+
+## 10. Frontier
+
+Still open: net-level cells/lists as *surface* data (pairs are internal machinery today);
 sharing `let`-bound subnets instead of rebuilding them per use (pure duplication is correct
-but can repeat work).
+but can repeat work); and the lock-free reduction engine above.

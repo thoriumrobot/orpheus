@@ -773,6 +773,30 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let svg = crate::viz::market_chart(days, live);
             simple(200, "image/svg+xml; charset=utf-8", svg.into_bytes())
         }
+        // the Latte ray tracer: body lines `w=N` `h=N` -> SVG raster + engine caption
+        ("POST", "/api/trace") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut w = 96usize;
+            let mut h = 72usize;
+            for line in body.lines() {
+                let mut it = line.splitn(2, '=');
+                match (it.next().map(str::trim), it.next()) {
+                    (Some("w"), Some(v)) => w = v.trim().parse().unwrap_or(w).clamp(16, 320),
+                    (Some("h"), Some(v)) => h = v.trim().parse().unwrap_or(h).clamp(12, 240),
+                    _ => {}
+                }
+            }
+            let (mut svg, engine, ms) = crate::viz::ray_trace(w, h);
+            // caption the render with its engine and time, inside the SVG itself
+            if let Some(pos) = svg.rfind("</svg>") {
+                let cap = format!(
+                    "<text x='4' y='12' font-family='monospace' font-size='10' fill='#222' opacity='0.85'>lib/trace.lat — {}x{} in {} ms — {}</text>",
+                    w, h, ms, engine
+                );
+                svg.insert_str(pos, &cap);
+            }
+            simple(200, "image/svg+xml; charset=utf-8", svg.into_bytes())
+        }
         // live Ligurian derivation: body lines `mode=pie|solar|gen`, `n=`, `seed=`,
         // then words. Returns JSON rows {pie, solar, heart} — PIE -> Solar runs
         // lib/pie.sca, Solar -> Heart runs lib/ligurian.sca (+ prosodic passes),
@@ -855,12 +879,24 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             json.push_str("]}");
             simple(200, "application/json; charset=utf-8", json.into_bytes())
         }
-        // sentiment scoring: body is the text; returns JSON {pos,neg,polarity}.
+        // sentiment scoring: body is the text (a headline OR a whole document/report);
+        // returns JSON {positive,negative,lexicon,model,polarity,sentences:[{text,polarity}..]}
+        // — the trained classifier scores sentence-by-sentence, so reports work too.
         ("POST", "/api/sentiment") => {
             let text = String::from_utf8_lossy(&req.body);
             let (pos, neg) = crate::sentiment::counts(&text);
-            let pol = crate::sentiment::polarity(&text);
-            let json = format!("{{\"positive\":{},\"negative\":{},\"polarity\":{:.3}}}", pos, neg, pol);
+            let lex = crate::sentiment::polarity(&text);
+            let model = crate::sentiment::model_polarity(&text);
+            let (doc, sents) = crate::sentiment::score_document(&text);
+            let mut json = format!(
+                "{{\"positive\":{},\"negative\":{},\"lexicon\":{:.3},\"model\":{:.3},\"polarity\":{:.3},\"sentences\":[",
+                pos, neg, lex, model, doc
+            );
+            for (i, (t, p)) in sents.iter().enumerate() {
+                if i > 0 { json.push(','); }
+                json.push_str(&format!("{{\"text\":\"{}\",\"polarity\":{:.3}}}", json_escape(t), p));
+            }
+            json.push_str("]}");
             simple(200, "application/json; charset=utf-8", json.into_bytes())
         }
         // multi-series line chart -> SVG. Body is line-oriented:

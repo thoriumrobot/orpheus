@@ -174,13 +174,17 @@ latte eval "(fib 30)"                 # Anvil native compilation (the default en
 latte eval --interp "<expr>"          # the Loom interpreter
 latte eval --net "<expr>"             # the interaction-net engine (audited)
 latte net  "let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)"
+latte net --peano "(mul 12 11)"       # unary Peano mode (the pedagogical engine)
+latte net --par 4 "<expr>"            # the batch-claimed PARALLEL reducer (a verified demo)
 latte repl                            # interactive
 
 # market tools — all run on REAL data; --live refreshes it from Coin Metrics
 latte fetch                           # refresh + cache the daily close series
 latte ta [--live] [--win N]           # technical analysis (lib/ta.lat, on Loom)
 latte trade [--live] [--news FILE] [--account N] [--kelly F] [--sentiment S]
-latte sentiment "<headline text>"     # Loughran-McDonald scoring
+latte sentiment "<headline text>"     # trained classifier + LM lexicon + fused score
+latte sentiment --file report.txt     # score a whole DOCUMENT, sentence by sentence
+latte sentiment --doc <name>          # score docs/<name>.md the same way
 latte chart market [--live] [--days N] > market.svg
 latte chart bar 3 1 4 1 5             # bar | line | scatter (layout in lib/plot.lat)
 
@@ -188,6 +192,7 @@ latte chart bar 3 1 4 1 5             # bar | line | scatter (layout in lib/plot
 latte nn [--epochs N]                 # MLP backprop demo + a seeded transformer block
 latte fin gold                        # the financial-ML pipeline
 latte gfx > scene.svg                 # the gfx demo scene (lib/gfx.lat)
+latte trace --w 160 --h 120 > rt.svg  # the RAY TRACER written in Latte (Anvil-compiled)
 
 # the conlang engine
 latte sca --file lib/pie.sca dʰeh₁s mr̥to     # PIE -> Solar Speech

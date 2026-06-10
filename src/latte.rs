@@ -650,6 +650,8 @@ pub const TA_LAT: &str = include_str!("../lib/ta.lat");
 pub const UI_LAT: &str = include_str!("../lib/ui.lat");
 /// A phonotactic Solar Speech word generator, via `import lexis`.
 pub const LEXIS_LAT: &str = include_str!("../lib/lexis.lat");
+/// A ray tracer written in Latte (spheres, shadows, specular, reflection), via `import trace`.
+pub const TRACE_LAT: &str = include_str!("../lib/trace.lat");
 /// A graphics library: scene-as-data drawing primitives rendered to SVG, via `import gfx`.
 pub const GFX_LAT: &str = include_str!("../lib/gfx.lat");
 /// A data-parallel GPU compute library, via `import gpu`.
@@ -680,6 +682,7 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "ta" => Some(TA_LAT),
         "ui" => Some(UI_LAT),
         "lexis" => Some(LEXIS_LAT),
+        "trace" => Some(TRACE_LAT),
         "gfx" => Some(GFX_LAT),
         "gpu" => Some(GPU_LAT),
         "sentiment" => Some(SENTIMENT_LAT),
@@ -762,7 +765,7 @@ pub fn runtime_lib_names() -> Vec<String> {
 /// scope without manual `import`s (later libraries shadow earlier ones on name clashes).
 pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "chess", "chessml",
+        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml",
         "tool",
     ]
     .iter()

@@ -620,6 +620,20 @@ Latte on the Loom.
   right-nested layout corrupted addressing past ~64 arms) and arm lookup is shallower/faster.
 - **The planner has a GUI** (`/plan`, `/api/plan`): enter a final demand and iteration depth and
   get the labour values and gross outputs computed in `lib/plan.lat` on the (now JIT-compiled) VM.
+- - DONE since this revision: NATIVE NUMBER agents on the net (the HVM2 idea — a 64-bit
+  literal is one agent and each arithmetic op ONE interaction: `gcd 1071 462` fell from
+  72,758 to 116 interactions, `99999*99999` is 2; `--peano` keeps the unary mode) and a
+  batch-claimed PARALLEL reducer (`latte net --par N`) that exercises uniform confluence
+  and is test-verified equivalent to the sequential engine — a correctness demonstration,
+  with HVM2-class lock-free throughput stated plainly as the remaining frontier. Also: a
+  RAY TRACER written in Latte (`lib/trace.lat` — spheres, shadows, speculars, a reflection
+  bounce; `latte trace` compiles it natively through Anvil, ~217 ms warm at 64x48), audited
+  VECTOR JETS for the signed fixed-point kernel (nadd/nmul/ndiv/nlt/ndot/nsqrt — the test
+  suite got 4.5x faster as a side effect), reverse-mode AUTODIFF over the nn layer algebra,
+  S4D/Mamba-style %ssm + prenorm rmsnorm blocks, a TRAINED text classifier that reads
+  context and negation and scores whole DOCUMENTS sentence-by-sentence, and HAR-RV
+  volatility forecasting + embargoed validation + transaction costs + conformal bands in
+  the trading stack.
 - - DONE since the last revision: the interaction-net engine is complete for the numeric
   fragment — net-level `sub` and `==` agents, γ-pairs as net data (so user functions of ANY
   arity and multi-binding `loop`s compile to genuine net-level recursive definitions), a

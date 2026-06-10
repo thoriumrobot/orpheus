@@ -45,12 +45,45 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 
 fn cmd_net(args: &[String]) {
-    let src = args.join(" ");
+    let mut peano = false;
+    let mut par: Option<usize> = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut skip = false;
+    for (i, a) in args.iter().enumerate() {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if a == "--peano" || a == "--unary" {
+            peano = true;
+        } else if a == "--par" || a == "--threads" {
+            par = args.get(i + 1).and_then(|v| v.parse().ok()).or(Some(4));
+            skip = args.get(i + 1).map(|v| v.parse::<usize>().is_ok()).unwrap_or(false);
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    let src = rest.join(" ");
     if src.is_empty() {
-        eprintln!("usage: latte net \"<expr>\"   compile +/*/</if over naturals to an interaction net and reduce it");
+        eprintln!("usage: latte net [--peano] \"<expr>\"   compile the numeric fragment to an interaction net and reduce it");
+        eprintln!("       default: native number agents (one interaction per arithmetic op, the HVM2 idea)");
+        eprintln!("       --peano: unary Peano chains and lockstep agents (the pedagogical mode)");
         return;
     }
-    match icomb::run_str(&src) {
+    if par.is_some() {
+        eprintln!("note: --par demonstrates batch-claimed parallel rewriting (verified equivalent");
+        eprintln!("to the sequential engine by uniform confluence). It is a correctness demo, not");
+        eprintln!("an optimized runtime: HVM2-class throughput needs lock-free linking and redex");
+        eprintln!("bags (see docs/interaction-nets.md), and this machine reports {} CPU(s).", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    }
+    let res = if let Some(t) = par {
+        icomb::run_str_parallel(&src, t)
+    } else if peano {
+        icomb::run_str_peano(&src)
+    } else {
+        icomb::run_str(&src)
+    };
+    match res {
         Ok((v, steps)) => {
             let libs = latte::all_libs();
             let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
@@ -231,6 +264,7 @@ fn main() {
         "trade" | "advisor" => numerics::cmd_trade(&args[1..]),
         "fetch" => numerics::cmd_fetch(),
         "ta" | "indicators" => numerics::cmd_ta(&args[1..]),
+        "trace" | "raytrace" => viz::cmd_trace(&args[1..]),
         "sentiment" | "news" => numerics::cmd_sentiment(&args[1..]),
         "gfx" | "draw" => numerics::cmd_gfx(&args[1..]),
         "gpu" | "compute" => numerics::cmd_gpu(&args[1..]),

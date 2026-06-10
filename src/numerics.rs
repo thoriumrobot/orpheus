@@ -268,8 +268,24 @@ pub fn cmd_nn(args: &[String]) {
     println!("  `net_fwd`/`seq_fwd` fold the forward pass; `block seed d` builds a seeded");
     println!("  transformer block; `randmat` gives reproducible inits — architectures are");
     println!("  ordinary data, so any composition (ResNets, transformers, conv stacks) is");
-    println!("  yours to assemble. Training: the MLP comes with full backprop; the other");
-    println!("  layers are forward-only in this release.");
+    println!("  yours to assemble.");
+    // ---- the SSM (post-transformer) block, forward on Loom ----
+    let ssm_demo = "(seq_run (append (ssmblock 7 4) [ [%pool 0] 0 ]) \
+        [ [ [0 1000] [ [1 500] [ [0 200] [ [0 0] 0 ] ] ] ] \
+        [ [ [0 300] [ [0 800] [ [1 100] [ [0 400] 0 ] ] ] ] \
+        [ [ [1 200] [ [0 100] [ [0 900] [ [1 600] 0 ] ] ] ] 0 ] ] ])";
+    if let Ok(v) = run(ssm_demo, &libs) {
+        let outv: Vec<String> = to_list(&v).iter().map(show_signed).collect();
+        println!("\n  state-space block (S4D/Mamba-style DIAGONAL gated recurrence — no softmax,");
+        println!("  so it suits fixed point): prenorm rmsnorm -> ssm -> residual -> rmsnorm ->");
+        println!("  dense -> residual, pooled  ->  [{}]", outv.join("  "));
+    }
+    println!("\n  TRAINING — reverse-mode autodiff over the layer algebra: every layer has a");
+    println!("  vector-Jacobian product (`layer_bwd`), `stack_train` folds them over ANY");
+    println!("  composition of %dense/%relu/%tanh/%sigmoid/%rmsnorm (exact derivatives for");
+    println!("  the fixed-point activations; rmsnorm uses the standard straight-through");
+    println!("  approximation, stated, not hidden). The hand-rolled MLP remains; attention");
+    println!("  and SSM sequence layers are forward-only in this release.");
 }
 
 /// `latte fin gold` — a practical financial-ML pipeline on real gold/USD data.
@@ -406,7 +422,7 @@ pub fn market_chart(res: &MarketResult) -> String {
         )
     } else {
         (
-            "BTC/USD out-of-sample equity: momentum model (long when up predicted) vs buy & hold (cumulative %)",
+            "BTC/USD out-of-sample equity, NET of 5bp/trade costs: momentum model vs buy & hold (cumulative %)",
             ["momentum model", "buy & hold"],
         )
     };
@@ -597,6 +613,44 @@ mod tests {
     }
 
     #[test]
+    fn nn_autodiff_trains_any_stack() {
+        // the generic reverse-mode trainer: layer-local VJPs folded over the stack.
+        // (1) it matches the hand-rolled MLP result on |x|;
+        let net = "[ [%dense [ [ [ [0 500] 0 ] [ [ [1 300] 0 ] 0 ] ] [ [ [0 100] [ [1 100] 0 ] ] 0 ] ]] \
+                   [ [%relu 0] [ [%dense [ [ [ [0 400] [ [0 600] 0 ] ] 0 ] [ [ [0 200] 0 ] 0 ] ]] 0 ] ] ]";
+        let before = run_i64(&format!("(tail (stack_loss {} (demo_data_x 0) (demo_data_y 0)))", net));
+        let after = run_i64(&format!(
+            "(tail (stack_loss (stack_train {} (demo_data_x 0) (demo_data_y 0) [0 80] 40) (demo_data_x 0) (demo_data_y 0)))",
+            net
+        ));
+        assert!(before > 5_000, "untrained loss should be large, got {}", before);
+        assert!(after * 10 < before, "autodiff training must cut the loss 10x: {} -> {}", before, after);
+        // (2) a DEEPER, rmsnorm-sandwiched stack also trains through the same code path
+        let deep = "[ [%dense [ (randmat 5 3 1 500) [ (map (fn [_] -> [0 0]) (range 3)) 0 ] ]] \
+                    [ [%tanh 0] \
+                    [ [%dense [ (randmat 11 2 3 500) [ (map (fn [_] -> [0 0]) (range 2)) 0 ] ]] \
+                    [ [%relu 0] \
+                    [ [%dense [ (randmat 17 1 2 500) [ [ [0 0] 0 ] 0 ] ]] 0 ] ] ] ] ]";
+        let b2 = run_i64(&format!("(tail (stack_loss {} (demo_data_x 0) (demo_data_y 0)))", deep));
+        let a2 = run_i64(&format!(
+            "(tail (stack_loss (stack_train {} (demo_data_x 0) (demo_data_y 0) [0 60] 50) (demo_data_x 0) (demo_data_y 0)))",
+            deep
+        ));
+        assert!(a2 < b2, "the deep stack should improve: {} -> {}", b2, a2);
+    }
+
+    fn run_i64(src: &str) -> i64 {
+        let libs = crate::latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        crate::latte::run_with_libs(src, &refs)
+            .ok()
+            .and_then(|n| n.as_atom().and_then(|a| a.to_u128()))
+            .map(|v| v as i64)
+            .unwrap_or(-1)
+    }
+
+    #[test]
+    #[test]
     fn fin_logistic_learns_mean_reversion() {
         // alternating prices make the last return perfectly predictive of the next
         // direction; logistic regression must beat the 50% majority baseline.
@@ -763,7 +817,10 @@ pub struct TradeAdvice {
     pub realized_vol: f64,   // daily realized volatility, %
     pub target_vol: f64,     // daily target volatility, %
     pub vol_regime: &'static str, // predicted next-day regime: high/low
-    pub dir_hitrate: f64,    // out-of-sample momentum hit rate
+    pub har_vol: Option<f64>, // HAR-RV next-day volatility forecast, daily %
+    pub har_r2: f64,          // HAR-RV in-sample R^2
+    pub band90: f64,          // conformal 90% next-day |return| band, %
+    pub dir_hitrate: f64,    // out-of-sample momentum hit rate (embargoed walk-forward)
     pub model_acc: f64,      // volatility-model test accuracy
     pub kelly_full: f64,     // full Kelly fraction from the directional edge
     pub kelly_used: f64,     // fractional-Kelly applied
@@ -844,7 +901,7 @@ pub fn score_news(items: &[(String, String, String)]) -> (Vec<NewsRow>, f64) {
     let mut rows = Vec::new();
     let (mut num, mut den) = (0.0f64, 0.0f64);
     for (d, src, h) in items {
-        let pol = crate::sentiment::polarity(h);
+        let pol = crate::sentiment::polarity_fused(h); // trained classifier (0.65) + LM lexicon (0.35)
         let age = (newest - ord(d)).max(0) as f64;
         let wgt = 0.5f64.powf(age / 3.0);
         num += wgt * pol;
@@ -873,6 +930,73 @@ pub fn parse_news_file(text: &str) -> Vec<(String, String, String)> {
 
 /// The volatility model's test accuracy, trained once per process (it is the same
 /// data and configuration every time, so retraining per call was pure waste).
+/// HAR-RV (Corsi 2009): forecast next-day realized volatility from the daily,
+/// weekly (5d) and monthly (22d) average RVs by least squares — the standard,
+/// hard-to-beat volatility benchmark. Returns (forecast, [c, bd, bw, bm], r2).
+pub fn har_rv(absr: &[f64]) -> Option<(f64, [f64; 4], f64)> {
+    let n = absr.len();
+    if n < 80 {
+        return None;
+    }
+    let avg = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+    // rows: predict absr[t] from features at t-1
+    let mut xs: Vec<[f64; 4]> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for t in 23..n {
+        xs.push([1.0, absr[t - 1], avg(&absr[t - 5..t]), avg(&absr[t - 22..t])]);
+        ys.push(absr[t]);
+    }
+    // normal equations (4x4), solved by Gaussian elimination
+    let mut a = [[0.0f64; 5]; 4];
+    for (x, &y) in xs.iter().zip(&ys) {
+        for i in 0..4 {
+            for j in 0..4 {
+                a[i][j] += x[i] * x[j];
+            }
+            a[i][4] += x[i] * y;
+        }
+    }
+    for col in 0..4 {
+        let piv = (col..4).max_by(|&r1, &r2| a[r1][col].abs().partial_cmp(&a[r2][col].abs()).unwrap())?;
+        a.swap(col, piv);
+        if a[col][col].abs() < 1e-12 {
+            return None;
+        }
+        for r in 0..4 {
+            if r != col {
+                let f = a[r][col] / a[col][col];
+                for c in col..5 {
+                    a[r][c] -= f * a[col][c];
+                }
+            }
+        }
+    }
+    let beta = [a[0][4] / a[0][0], a[1][4] / a[1][1], a[2][4] / a[2][2], a[3][4] / a[3][3]];
+    let mean_y = avg(&ys);
+    let (mut ssr, mut sst) = (0.0, 0.0);
+    for (x, &y) in xs.iter().zip(&ys) {
+        let p = beta[0] + beta[1] * x[1] + beta[2] * x[2] + beta[3] * x[3];
+        ssr += (y - p) * (y - p);
+        sst += (y - mean_y) * (y - mean_y);
+    }
+    let last = [1.0, absr[n - 1], avg(&absr[n - 5..]), avg(&absr[n - 22..])];
+    let fc = (beta[0] + beta[1] * last[1] + beta[2] * last[2] + beta[3] * last[3]).max(0.0);
+    Some((fc, beta, if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 }))
+}
+
+/// A conformal-style next-day return interval: the empirical q-quantile of recent
+/// |returns| gives a distribution-free band (split-conformal over the last `win` days).
+pub fn conformal_band(rets: &[f64], win: usize, q: f64) -> f64 {
+    let lo = rets.len().saturating_sub(win);
+    let mut a: Vec<f64> = rets[lo..].iter().map(|r| r.abs()).collect();
+    if a.is_empty() {
+        return 0.0;
+    }
+    a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let idx = ((a.len() as f64) * q).ceil() as usize;
+    a[idx.min(a.len() - 1)]
+}
+
 fn vol_model_acc() -> f64 {
     static ACC: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *ACC.get_or_init(|| market_eval_cfg(60, 1, true).map(|r| r.test).unwrap_or(0.0))
@@ -910,10 +1034,24 @@ pub fn trade_advice(
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let med = sorted[sorted.len() / 2];
     let vol_regime = if realized_vol > med { "high" } else { "low" };
-    // out-of-sample momentum hit rate (walk-forward test slice)
+    // HAR-RV (Corsi): the standard daily/weekly/monthly vol regression, fit on the
+    // full history; its forecast drives the volatility targeting below
+    let har = har_rv(&absr);
+    let (har_vol, har_r2) = match har {
+        Some((fc, _, r2)) => (Some(fc), r2),
+        None => (None, 0.0),
+    };
+    // conformal-style 90% band on tomorrow's |return| (split-conformal quantile
+    // over the trailing year): a distribution-free honesty bound for the report
+    let band90 = conformal_band(&r, 252, 0.90);
+    // out-of-sample momentum hit rate — EMBARGOED walk-forward: a 10-day gap
+    // between the training span and the test slice prevents the leakage from
+    // overlapping windows that plain splits allow (the purged/embargoed CV idea,
+    // López de Prado 2018, applied to the single-split case)
     let split = (n * 7) / 10;
+    let embargo = 10usize;
     let (mut hits, mut tot) = (0usize, 0usize);
-    for t in split..n - 1 {
+    for t in (split + embargo)..n - 1 {
         if t < 10 {
             continue;
         }
@@ -960,8 +1098,12 @@ pub fn trade_advice(
     w += 0.03 * used_sentiment;
     let kelly_full = (2.0 * w - 1.0).clamp(-1.0, 1.0);
     let kelly_used = (kelly_mult * kelly_full).max(0.0); // never go short in this demo
-    // volatility targeting: shrink size when realized/predicted vol is high
-    let fc_vol = if vol_regime == "high" { realized_vol * 1.3 } else { realized_vol };
+    // volatility targeting against the HAR-RV forecast (falling back to the
+    // regime heuristic only if the regression is unavailable)
+    let fc_vol = match har_vol {
+        Some(h) => h.max(0.3 * realized_vol),
+        None => if vol_regime == "high" { realized_vol * 1.3 } else { realized_vol },
+    };
     let vol_scale = if fc_vol > 1e-9 { (target_vol / fc_vol).min(2.0) } else { 0.0 };
     let positive_edge = kelly_full > 0.0;
     let exposure = if long && positive_edge {
@@ -986,6 +1128,9 @@ pub fn trade_advice(
         realized_vol,
         target_vol,
         vol_regime: if vol_regime == "high" { "high" } else { "low" },
+        har_vol,
+        har_r2,
+        band90,
         dir_hitrate: dir_hitrate * 100.0,
         model_acc,
         kelly_full,
@@ -1064,6 +1209,10 @@ pub fn cmd_trade(args: &[String]) {
             println!("  combined lean     : {:+.2}   (= 0.6*TA {:+.2} + 0.4*news {:+.2}) -> {}",
                 a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction);
             println!("  realized vol/day  : {:.2}%   target {:.2}%   predicted regime: {}-vol", a.realized_vol, a.target_vol, a.vol_regime);
+            if let Some(h) = a.har_vol {
+                println!("  HAR-RV forecast   : {:.2}%/day next-day vol  (daily/weekly/monthly regression, R²={:.2}) — drives the sizing", h, a.har_r2);
+            }
+            println!("  90% next-day band : ±{:.2}%  (split-conformal quantile of the trailing year — distribution-free)", a.band90);
             println!("  -- model reliability ----------------------");
             println!("  momentum hit rate : {:.1}%  (out-of-sample)", a.dir_hitrate);
             println!("  volatility model  : {:.1}%  test accuracy (the dependable edge)", a.model_acc);
@@ -1147,23 +1296,75 @@ pub fn cmd_fetch() {
 
 /// `latte sentiment "<text>"` — score finance text with the Loughran-McDonald method.
 pub fn cmd_sentiment(args: &[String]) {
-    let text = args.join(" ");
+    // document mode: score a whole report/file with per-sentence evidence
+    let mut text = String::new();
+    let mut doc_mode = false;
+    let mut i = 0;
+    let mut words: Vec<&str> = Vec::new();
+    while i < args.len() {
+        match args[i].as_str() {
+            "--doc" if i + 1 < args.len() => {
+                let name = &args[i + 1];
+                let path = format!("docs/{}.md", name.trim_end_matches(".md"));
+                match std::fs::read_to_string(&path) {
+                    Ok(t) => { text = t; doc_mode = true; }
+                    Err(e) => { eprintln!("sentiment: cannot read {}: {}", path, e); return; }
+                }
+                i += 1;
+            }
+            "--file" if i + 1 < args.len() => {
+                match std::fs::read_to_string(&args[i + 1]) {
+                    Ok(t) => { text = t; doc_mode = true; }
+                    Err(e) => { eprintln!("sentiment: cannot read {}: {}", args[i + 1], e); return; }
+                }
+                i += 1;
+            }
+            w => words.push(w),
+        }
+        i += 1;
+    }
+    if !doc_mode {
+        text = words.join(" ");
+    }
     if text.trim().is_empty() {
-        println!("sentiment - Loughran-McDonald financial sentiment scoring\n");
-        println!("  usage: latte sentiment \"<headline or text>\"");
-        println!("  example: latte sentiment \"stocks rally and recover, chip shares surge higher\"");
+        println!("sentiment - financial text scoring: a trained classifier + the LM lexicon\n");
+        println!("  usage: latte sentiment \"<headline or text>\"        score a short text");
+        println!("         latte sentiment --doc <name>                score docs/<name>.md");
+        println!("         latte sentiment --file <path>               score any document/report");
         return;
     }
+    let sent_count = text.split(['.', '!', '?']).filter(|s| s.split_whitespace().count() >= 3).count();
+    if doc_mode || sent_count > 1 {
+        // ---- DOCUMENT MODE: per-sentence evidence + confidence-weighted aggregate ----
+        let (doc, sents) = crate::sentiment::score_document(&text);
+        let label = if doc > 0.15 { "POSITIVE" } else if doc < -0.15 { "NEGATIVE" } else { "neutral" };
+        println!("sentiment - document scoring (trained classifier, sentence-level)\n");
+        println!("  sentences : {}", sents.len());
+        println!("  document  : {:+.3}  ->  {}   (confidence-weighted sentence aggregate)\n", doc, label);
+        let mut ranked: Vec<&(String, f64)> = sents.iter().collect();
+        ranked.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+        println!("  strongest evidence:");
+        for (t, p) in ranked.iter().take(8) {
+            let short: String = t.chars().take(86).collect();
+            println!("    {:+.2}  {}{}", p, short, if t.chars().count() > 86 { "…" } else { "" });
+        }
+        println!("\n  The classifier is a logistic regression over unigram+bigram features, trained on");
+        println!("  labeled financial text in both headline and report register — it reads context");
+        println!("  (\"outflows eased\" is positive) and negation (\"failed to deliver\" is negative),");
+        println!("  which word-counting cannot. The same scorer reads the news for `latte trade`.");
+        return;
+    }
+    // ---- SHORT TEXT: show all three scores ----
     let (pos, neg) = crate::sentiment::counts(&text);
-    let pol = crate::sentiment::polarity(&text);
-    let label = if pol > 0.15 { "BULLISH" } else if pol < -0.15 { "BEARISH" } else { "neutral" };
-    println!("sentiment - Loughran-McDonald financial sentiment scoring\n");
+    let lex = crate::sentiment::polarity(&text);
+    let model = crate::sentiment::model_polarity(&text);
+    let fused = crate::sentiment::polarity_fused(&text);
+    let label = if fused > 0.15 { "BULLISH" } else if fused < -0.15 { "BEARISH" } else { "neutral" };
+    println!("sentiment - financial text scoring\n");
     println!("  text      : {}", text);
-    println!("  positive  : {} word(s)", pos);
-    println!("  negative  : {} word(s)", neg);
-    println!("  polarity  : {:+.3}   (= (pos-neg)/(pos+neg), computed in Latte)", pol);
-    println!("  signal    : {}", label);
-    println!("\n  Lexicon-based after Loughran & McDonald (2011). News sentiment is most useful on");
-    println!("  information-driven markets (equities, indices, single names); feed it to the model");
-    println!("  or the advisor with `latte trade --sentiment {:.2}`.", pol);
+    println!("  lexicon   : {:+.3}   (Loughran-McDonald word counts: {} pos / {} neg, ratio on Loom)", lex, pos, neg);
+    println!("  model     : {:+.3}   (trained classifier: unigram+bigram logistic regression)", model);
+    println!("  fused     : {:+.3}   (0.65 model + 0.35 lexicon)  ->  {}", fused, label);
+    println!("\n  Multi-sentence input (or --doc/--file) switches to document mode with");
+    println!("  per-sentence evidence. The advisor (`latte trade`) uses the fused score.");
 }

@@ -33,6 +33,36 @@ pub enum Sym {
     EqZ,  // helper: 0==b facing b (1 aux: result)
     EqB,  // helper: S(a')==b facing b (2 aux: a', result)
     Ref(u32), // a reference to a top-level definition (defs[i]); unrolled lazily (HVM-style)
+    // ---- native machine numbers (the HVM2 idea: numbers as atomic agents) ----
+    Lit(u64),       // a 64-bit number (0 auxiliary ports) — one agent, however large
+    NOp(NK),        // a native binary op facing operand a (2 aux: operand b, result)
+    NOp2(NK, u64),  // …with a captured: faces operand b (1 aux: result)
+}
+
+/// The native ALU: each op is ONE interaction once both operands are literal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NK {
+    Add,
+    Sub, // monus (saturating), matching the Peano agents and Latte's `sub`
+    Mul,
+    Div,
+    Mod,
+    Lt, // → loobean Lit(0|1)
+    Eq, // → loobean Lit(0|1)
+}
+
+fn nk_apply(k: NK, a: u64, b: u64) -> u64 {
+    match k {
+        NK::Add => a.wrapping_add(b),
+        NK::Sub => a.saturating_sub(b),
+        NK::Mul => a.wrapping_mul(b),
+        // division by zero diverges in Latte; the net leaves 0 (and the audit
+        // against the interpreter reports the disagreement honestly)
+        NK::Div => if b == 0 { 0 } else { a / b },
+        NK::Mod => if b == 0 { 0 } else { a % b },
+        NK::Lt => if a < b { 0 } else { 1 },
+        NK::Eq => if a == b { 0 } else { 1 },
+    }
 }
 
 /// A port is (agent index, slot). Slot 0 is always the principal port.
@@ -46,11 +76,12 @@ pub struct Net {
     pub steps: usize,
     defs: Vec<R>, // top-level definitions referenced by Ref(i); unrolled lazily
     work: Vec<usize>, // active-pair worklist: agents whose principal was (re)wired
+    native: bool, // numbers as Lit agents + native ALU ops (HVM2-style) vs Peano chains
 }
 
 impl Net {
     pub fn new() -> Net {
-        Net { sym: Vec::new(), alive: Vec::new(), link: Vec::new(), steps: 0, defs: Vec::new(), work: Vec::new() }
+        Net { sym: Vec::new(), alive: Vec::new(), link: Vec::new(), steps: 0, defs: Vec::new(), work: Vec::new(), native: false }
     }
 
     fn add(&mut self, s: Sym) -> usize {
@@ -102,6 +133,12 @@ impl Net {
                 | (Eps, Delta) | (Delta, Eps)
                 | (Gamma, Gamma) | (Delta, Delta)
                 | (Gamma, Delta) | (Delta, Gamma)
+                | (Eps, Lit(_)) | (Lit(_), Eps)
+                | (Delta, Lit(_)) | (Lit(_), Delta)
+                | (NOp(_), Lit(_)) | (Lit(_), NOp(_))
+                | (NOp2(_, _), Lit(_)) | (Lit(_), NOp2(_, _))
+                | (Sel, Lit(_)) | (Lit(_), Sel)
+                | (Pred, Lit(_)) | (Lit(_), Pred)
                 | (Add, Zero) | (Zero, Add)
                 | (Add, Succ) | (Succ, Add)
                 | (Mul, Zero) | (Zero, Mul)
@@ -205,6 +242,21 @@ impl Net {
                 self.kill(a);
                 self.kill(b);
             }
+            // ---- native-number interactions (each arithmetic op: O(1) steps) ----
+            (Eps, Lit(_)) | (Lit(_), Eps) => {
+                self.kill(a);
+                self.kill(b);
+            }
+            (Delta, Lit(n)) => self.dup_lit(a, b, n),
+            (Lit(n), Delta) => self.dup_lit(b, a, n),
+            (NOp(k), Lit(n)) => self.nop_lit(a, b, k, n),
+            (Lit(n), NOp(k)) => self.nop_lit(b, a, k, n),
+            (NOp2(k, x), Lit(n)) => self.nop2_lit(a, b, k, x, n),
+            (Lit(n), NOp2(k, x)) => self.nop2_lit(b, a, k, x, n),
+            (Sel, Lit(c)) => self.sel_lit(a, b, c),
+            (Lit(c), Sel) => self.sel_lit(b, a, c),
+            (Pred, Lit(n)) => self.pred_lit(a, b, n),
+            (Lit(n), Pred) => self.pred_lit(b, a, n),
             (Zero, Eps) => {
                 self.kill(a);
                 self.kill(b);
@@ -509,6 +561,54 @@ impl Net {
         self.kill(sel);
         self.kill(succ);
     }
+    // ---- native-number rule bodies -------------------------------------------
+    // δ ⋈ Lit: copy the number to both auxiliaries (numbers are atomic data).
+    fn dup_lit(&mut self, dup: usize, lit: usize, n: u64) {
+        let (l1, l2) = (self.link[dup][1], self.link[dup][2]);
+        let c1 = self.add(Sym::Lit(n));
+        let c2 = self.add(Sym::Lit(n));
+        self.wire((c1, 0), l1);
+        self.wire((c2, 0), l2);
+        self.kill(dup);
+        self.kill(lit);
+    }
+    // NOp(k) ⋈ Lit(a): capture a and turn to face operand b.
+    fn nop_lit(&mut self, op: usize, lit: usize, k: NK, n: u64) {
+        let bsrc = self.link[op][1];
+        let r = self.link[op][2];
+        let o2 = self.add(Sym::NOp2(k, n));
+        self.wire((o2, 0), bsrc);
+        self.wire((o2, 1), r);
+        self.kill(op);
+        self.kill(lit);
+    }
+    // NOp2(k, a) ⋈ Lit(b): ONE interaction computes the result.
+    fn nop2_lit(&mut self, op: usize, lit: usize, k: NK, x: u64, n: u64) {
+        let r = self.link[op][1];
+        let out = self.add(Sym::Lit(nk_apply(k, x, n)));
+        self.wire((out, 0), r);
+        self.kill(op);
+        self.kill(lit);
+    }
+    // Sel ⋈ Lit: loobean 0 takes the `then` box, anything else the `else` box.
+    fn sel_lit(&mut self, sel: usize, lit: usize, c: u64) {
+        let bundle = self.link[sel][1];
+        let r = self.link[sel][2];
+        let proj = self.add(if c == 0 { Sym::Head } else { Sym::Tail });
+        self.wire((proj, 0), bundle);
+        self.wire((proj, 1), r);
+        self.kill(sel);
+        self.kill(lit);
+    }
+    // Pred ⋈ Lit: saturating decrement, like the Peano rule at zero.
+    fn pred_lit(&mut self, pred: usize, lit: usize, n: u64) {
+        let r = self.link[pred][1];
+        let out = self.add(Sym::Lit(n.saturating_sub(1)));
+        self.wire((out, 0), r);
+        self.kill(pred);
+        self.kill(lit);
+    }
+
     // Head ⋈ γ: result ← first child; erase the second.
     fn head_gamma(&mut self, head: usize, gamma: usize) {
         let t = self.link[gamma][1];
@@ -715,33 +815,41 @@ impl Net {
     /// Compile a recursion expression into the net, consuming parameter copies from `supply`.
     /// `if` is compiled lazily by hoisting both branches into `Ref` closures: the selector wires
     /// the taken branch's Ref to the result (so it unrolls) and erases the other (so it halts).
+    /// Emit a number: a single Lit agent (native mode) or a Peano chain.
+    fn emit_num(&mut self, n: u128) -> Port {
+        if self.native {
+            let a = self.agent(Sym::Lit(n as u64));
+            (a, 0)
+        } else {
+            build_num(self, n)
+        }
+    }
+    /// Emit a binary arithmetic node: the native ALU agent or the Peano agent.
+    fn emit_bin(&mut self, peano: Sym, k: NK, lp: Port, rp: Port) -> Port {
+        let a = if self.native { self.add(Sym::NOp(k)) } else { self.add(peano) };
+        self.wire((a, 0), lp);
+        self.wire((a, 1), rp);
+        (a, 2)
+    }
+
     fn build(&mut self, r: &R, supply: &mut Vec<Port>) -> Port {
         match r {
-            R::Num(n) => build_num(self, *n),
+            R::Num(n) => self.emit_num(*n),
             R::Param => supply.pop().expect("net recursion: parameter supply underflow"),
             R::Add(l, rr) => {
                 let lp = self.build(l, supply);
                 let rp = self.build(rr, supply);
-                let a = self.add(Sym::Add);
-                self.wire((a, 0), lp);
-                self.wire((a, 1), rp);
-                (a, 2)
+                self.emit_bin(Sym::Add, NK::Add, lp, rp)
             }
             R::Mul(l, rr) => {
                 let lp = self.build(l, supply);
                 let rp = self.build(rr, supply);
-                let a = self.add(Sym::Mul);
-                self.wire((a, 0), lp);
-                self.wire((a, 1), rp);
-                (a, 2)
+                self.emit_bin(Sym::Mul, NK::Mul, lp, rp)
             }
             R::Lt(l, rr) => {
                 let lp = self.build(l, supply);
                 let rp = self.build(rr, supply);
-                let a = self.add(Sym::Lt);
-                self.wire((a, 0), lp);
-                self.wire((a, 1), rp);
-                (a, 2)
+                self.emit_bin(Sym::Lt, NK::Lt, lp, rp)
             }
             R::Dec(x) => {
                 let xp = self.build(x, supply);
@@ -761,18 +869,22 @@ impl Net {
             R::Sub(l, rr) => {
                 let lp = self.build(l, supply);
                 let rp = self.build(rr, supply);
-                let a = self.add(Sym::Sub);
-                self.wire((a, 0), lp);
-                self.wire((a, 1), rp);
-                (a, 2)
+                self.emit_bin(Sym::Sub, NK::Sub, lp, rp)
+            }
+            R::Div(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                self.emit_bin(Sym::Sub, NK::Div, lp, rp) // (Peano fallback never reached)
+            }
+            R::Mod(l, rr) => {
+                let lp = self.build(l, supply);
+                let rp = self.build(rr, supply);
+                self.emit_bin(Sym::Sub, NK::Mod, lp, rp)
             }
             R::Eq(l, rr) => {
                 let lp = self.build(l, supply);
                 let rp = self.build(rr, supply);
-                let a = self.add(Sym::Eq);
-                self.wire((a, 0), lp);
-                self.wire((a, 1), rp);
-                (a, 2)
+                self.emit_bin(Sym::Eq, NK::Eq, lp, rp)
             }
             R::Pair(l, rr) => {
                 let lp = self.build(l, supply);
@@ -859,6 +971,398 @@ impl Net {
             }
         }
         self.steps - start
+    }
+
+    // ========================================================================
+    // PARALLEL REDUCTION. Interaction nets are uniformly confluent: distinct
+    // active pairs touch disjoint redexes, so they may be rewritten in parallel
+    // and any order yields the same normal form (Lafont; the property HVM2's
+    // lock-free reducer exploits on GPUs). This reducer runs BATCHES of
+    // non-conflicting pairs across std::thread workers:
+    //   1. drain candidate pairs from the active-pair worklist; CLAIM each
+    //      pair's footprint — the two agents plus every agent their auxiliary
+    //      ports touch — via atomic flags (conflicts defer to a later batch);
+    //   2. pre-grow the arenas and hand each pair a private block of fresh
+    //      agent ids, so threads allocate without locks;
+    //   3. rewrite all claimed pairs in parallel — each touches only claimed
+    //      or thread-private indices — recording newly-wired principals in a
+    //      THREAD-LOCAL worklist, merged after the batch (no shared pushes);
+    //   4. when the worklist runs dry, one linear scan certifies the normal
+    //      form (so the fast path can never miss a redex).
+    // `Ref` expansions build unbounded subnets, so those reduce sequentially
+    // between batches; the Peano lockstep rules do too (they are inherently
+    // serial chains). The Lit/γ/δ/ε rules — everything the native compiler
+    // emits — run parallel. Equivalence with the sequential engine is enforced
+    // by test (and guaranteed by uniform confluence).
+    // ========================================================================
+    pub fn normalize_parallel(&mut self, threads: usize) -> usize {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let start = self.steps;
+        let threads = threads.max(1);
+        const PRIVATE: usize = 6; // max fresh agents any parallel rule allocates
+        const BATCH: usize = 8192;
+        let mut claims: Vec<AtomicBool> = Vec::new();
+        let mut scanned_clean = false;
+        loop {
+            if self.steps - start > 8_000_000 {
+                break;
+            }
+            // ---- gather candidates: worklist first, full scan only to certify ----
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            let mut seq: Vec<(usize, usize)> = Vec::new();
+            let mut push_candidate = |net: &Net, a: usize, pairs: &mut Vec<(usize, usize)>, seq: &mut Vec<(usize, usize)>| {
+                if !net.alive[a] {
+                    return;
+                }
+                let (b, sb) = net.link[a][0];
+                if sb != 0 || b == a || !net.alive[b] || net.link[b][0] != (a, 0) {
+                    return;
+                }
+                let (a, b) = if a < b { (a, b) } else { (b, a) };
+                if !net.has_rule(net.sym[a], net.sym[b]) {
+                    return;
+                }
+                if Net::par_rule(net.sym[a], net.sym[b]) {
+                    pairs.push((a, b));
+                } else {
+                    seq.push((a, b));
+                }
+            };
+            while let Some(a) = self.work.pop() {
+                push_candidate(self, a, &mut pairs, &mut seq);
+                if pairs.len() >= BATCH {
+                    break;
+                }
+            }
+            if pairs.is_empty() && seq.is_empty() {
+                if scanned_clean {
+                    break;
+                }
+                // certify (or refill) with one linear scan
+                scanned_clean = true;
+                for a in 0..self.sym.len() {
+                    push_candidate(self, a, &mut pairs, &mut seq);
+                }
+                if pairs.is_empty() && seq.is_empty() {
+                    break;
+                }
+            }
+            scanned_clean = false; // progress will be made: re-certify before stopping
+            pairs.sort_unstable();
+            pairs.dedup();
+            // ---- sequential bucket: Refs and the Peano chains ----
+            for &(a, b) in &seq {
+                if self.alive[a] && self.alive[b] && self.link[a][0] == (b, 0) {
+                    let _ = self.step_with(false);
+                }
+            }
+            if pairs.is_empty() {
+                continue;
+            }
+            // small batches: thread spawn costs more than the work
+            if pairs.len() < 128 || threads == 1 {
+                for &(a, b) in &pairs {
+                    if self.alive[a] && self.alive[b] && self.link[a][0] == (b, 0) {
+                        let _ = self.step_with(false);
+                    }
+                }
+                continue;
+            }
+            // ---- keep the arena tight: compaction pays for the linear scans ----
+            let dead = self.alive.iter().filter(|a| !**a).count();
+            if self.sym.len() > 65_536 && dead * 2 > self.sym.len() {
+                // candidate indices become stale across a compaction; re-queue them
+                for &(a, _) in pairs.iter() {
+                    self.work.push(a);
+                }
+                self.compact();
+                claims.clear();
+                continue;
+            }
+            // ---- claim non-conflicting footprints ----
+            let n0 = self.sym.len();
+            if claims.len() < n0 {
+                claims.resize_with(n0, || AtomicBool::new(false));
+            }
+            let mut batch: Vec<(usize, usize)> = Vec::new();
+            let mut claimed: Vec<usize> = Vec::new();
+            let mut deferred: Vec<(usize, usize)> = Vec::new();
+            'pairs: for &(a, b) in &pairs {
+                if !self.alive[a] || !self.alive[b] || self.link[a][0] != (b, 0) {
+                    continue;
+                }
+                let mut footprint = vec![a, b];
+                for &ag in &[a, b] {
+                    for slot in 1..3 {
+                        let (n, _) = self.link[ag][slot];
+                        footprint.push(n);
+                    }
+                }
+                footprint.sort_unstable();
+                footprint.dedup();
+                let mut got = 0usize;
+                for &f in &footprint {
+                    if claims[f].compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                        got += 1;
+                    } else {
+                        for &g in footprint.iter().take(got) {
+                            claims[g].store(false, Ordering::Release);
+                        }
+                        // conflicted pairs run inline after the batch (no requeue churn)
+                        deferred.push((a, b));
+                        continue 'pairs;
+                    }
+                }
+                claimed.extend_from_slice(&footprint);
+                batch.push((a, b));
+            }
+            if batch.is_empty() {
+                continue;
+            }
+            // ---- pre-grow arenas: a private id block per pair ----
+            let extra = batch.len() * PRIVATE;
+            self.sym.resize(n0 + extra, Sym::Eps);
+            self.alive.resize(n0 + extra, false);
+            for i in 0..extra {
+                let id = n0 + i;
+                self.link.push([(id, 0), (id, 1), (id, 2)]);
+            }
+            // ---- the parallel phase ----
+            let me = self as *mut Net as usize;
+            let chunk = batch.len().div_ceil(threads);
+            let mut merged: Vec<usize> = Vec::new();
+            std::thread::scope(|sc| {
+                let mut handles = Vec::new();
+                for (t, slab) in batch.chunks(chunk).enumerate() {
+                    let base = n0 + t * chunk * PRIVATE;
+                    handles.push(sc.spawn(move || {
+                        // SAFETY: every link/alive/sym index a rewrite touches is either
+                        // claimed for this pair (no other thread holds it) or inside this
+                        // thread's private id block; the arenas were pre-sized so no Vec
+                        // reallocation happens; new principal wirings are recorded in the
+                        // thread-local list, never the shared worklist.
+                        let net: &mut Net = unsafe { &mut *(me as *mut Net) };
+                        let mut fresh = base;
+                        let mut local: Vec<usize> = Vec::with_capacity(slab.len() * 2);
+                        for &(a, b) in slab {
+                            net.rewrite_claimed(a, b, &mut fresh, &mut local);
+                        }
+                        (slab.len(), local)
+                    }));
+                }
+                for h in handles {
+                    let (n, local) = h.join().unwrap();
+                    self.steps += n;
+                    merged.extend(local);
+                }
+            });
+            self.work.extend(merged);
+            for &c in &claimed {
+                claims[c].store(false, Ordering::Release);
+            }
+            for &(a, b) in &deferred {
+                if self.alive[a] && self.alive[b] && self.link[a][0] == (b, 0) {
+                    let _ = self.step_with(false);
+                }
+            }
+        }
+        self.steps - start
+    }
+
+    /// Compact the arena: drop dead agents, remap live indices (the parallel
+    /// engine's private id blocks leave gaps; without this the arena — and every
+    /// linear scan over it — grows with TOTAL work instead of LIVE size).
+    fn compact(&mut self) {
+        let n = self.sym.len();
+        let mut remap: Vec<usize> = vec![usize::MAX; n];
+        let mut live = 0usize;
+        for i in 0..n {
+            if self.alive[i] {
+                remap[i] = live;
+                live += 1;
+            }
+        }
+        if live == n {
+            return;
+        }
+        let mut sym = Vec::with_capacity(live);
+        let mut alive = Vec::with_capacity(live);
+        let mut link = Vec::with_capacity(live);
+        for i in 0..n {
+            if !self.alive[i] {
+                continue;
+            }
+            sym.push(self.sym[i]);
+            alive.push(true);
+            let mut l = self.link[i];
+            for slot in l.iter_mut() {
+                let (t, ts) = *slot;
+                // dangling links to dead agents collapse to self (free ends)
+                *slot = if t < n && remap[t] != usize::MAX { (remap[t], ts) } else { (remap[i], 0) };
+            }
+            link.push(l);
+        }
+        let mut work: Vec<usize> = self
+            .work
+            .iter()
+            .filter_map(|&w| if w < n && remap[w] != usize::MAX { Some(remap[w]) } else { None })
+            .collect();
+        work.sort_unstable();
+        work.dedup();
+        self.sym = sym;
+        self.alive = alive;
+        self.link = link;
+        self.work = work;
+    }
+
+    /// Which symbol pairs the parallel engine handles (the bounded, non-Peano rules).
+    fn par_rule(a: Sym, b: Sym) -> bool {
+        use Sym::*;
+        if matches!(a, Ref(_)) || matches!(b, Ref(_)) {
+            return false;
+        }
+        matches!(
+            (a, b),
+            (Eps, _) | (_, Eps)
+                | (Gamma, Gamma) | (Delta, Delta)
+                | (Gamma, Delta) | (Delta, Gamma)
+                | (Delta, Lit(_)) | (Lit(_), Delta)
+                | (NOp(_), Lit(_)) | (Lit(_), NOp(_))
+                | (NOp2(_, _), Lit(_)) | (Lit(_), NOp2(_, _))
+                | (Sel, Lit(_)) | (Lit(_), Sel)
+                | (Pred, Lit(_)) | (Lit(_), Pred)
+        )
+    }
+
+    // a wire that records principal endpoints into a LOCAL list (parallel-safe)
+    fn wire_local(&mut self, p: Port, q: Port, wl: &mut Vec<usize>) {
+        self.link[p.0][p.1] = q;
+        self.link[q.0][q.1] = p;
+        if p.1 == 0 {
+            wl.push(p.0);
+        }
+        if q.1 == 0 {
+            wl.push(q.0);
+        }
+    }
+    fn alloc_at(&mut self, fresh: &mut usize, sym: Sym) -> usize {
+        let id = *fresh;
+        *fresh += 1;
+        self.sym[id] = sym;
+        self.alive[id] = true;
+        id
+    }
+
+    /// One bounded rewrite of a claimed pair: thread-private allocation, local worklist.
+    fn rewrite_claimed(&mut self, a: usize, b: usize, fresh: &mut usize, wl: &mut Vec<usize>) {
+        use Sym::*;
+        match (self.sym[a], self.sym[b]) {
+            (Eps, Eps) | (Eps, Zero) | (Zero, Eps) | (Eps, Lit(_)) | (Lit(_), Eps) => {
+                self.kill(a);
+                self.kill(b);
+            }
+            (Gamma, Gamma) | (Delta, Delta) => {
+                let (al1, al2) = (self.link[a][1], self.link[a][2]);
+                let (bl1, bl2) = (self.link[b][1], self.link[b][2]);
+                self.wire_local(al1, bl1, wl);
+                self.wire_local(al2, bl2, wl);
+                self.kill(a);
+                self.kill(b);
+            }
+            (Gamma, Delta) => self.commute_claimed(a, b, fresh, wl),
+            (Delta, Gamma) => self.commute_claimed(b, a, fresh, wl),
+            (Eps, _) => self.erase_claimed(a, b, fresh, wl),
+            (_, Eps) => self.erase_claimed(b, a, fresh, wl),
+            (Delta, Lit(n)) => self.dup_lit_claimed(a, b, n, fresh, wl),
+            (Lit(n), Delta) => self.dup_lit_claimed(b, a, n, fresh, wl),
+            (NOp(k), Lit(n)) => self.nop_lit_claimed(a, b, k, n, fresh, wl),
+            (Lit(n), NOp(k)) => self.nop_lit_claimed(b, a, k, n, fresh, wl),
+            (NOp2(k, x), Lit(n)) => self.nop2_lit_claimed(a, b, k, x, n, fresh, wl),
+            (Lit(n), NOp2(k, x)) => self.nop2_lit_claimed(b, a, k, x, n, fresh, wl),
+            (Sel, Lit(c)) => self.sel_lit_claimed(a, b, c, fresh, wl),
+            (Lit(c), Sel) => self.sel_lit_claimed(b, a, c, fresh, wl),
+            (Pred, Lit(n)) => self.pred_lit_claimed(a, b, n, fresh, wl),
+            (Lit(n), Pred) => self.pred_lit_claimed(b, a, n, fresh, wl),
+            _ => {} // filtered out by par_rule; unreachable
+        }
+    }
+    fn commute_claimed(&mut self, g: usize, d: usize, fresh: &mut usize, wl: &mut Vec<usize>) {
+        let (g1, g2) = (self.link[g][1], self.link[g][2]);
+        let (d1, d2) = (self.link[d][1], self.link[d][2]);
+        let ng1 = self.alloc_at(fresh, Sym::Gamma);
+        let ng2 = self.alloc_at(fresh, Sym::Gamma);
+        let nd1 = self.alloc_at(fresh, Sym::Delta);
+        let nd2 = self.alloc_at(fresh, Sym::Delta);
+        self.wire_local((nd1, 0), g1, wl);
+        self.wire_local((nd2, 0), g2, wl);
+        self.wire_local((ng1, 0), d1, wl);
+        self.wire_local((ng2, 0), d2, wl);
+        self.wire_local((ng1, 1), (nd1, 1), wl);
+        self.wire_local((ng1, 2), (nd2, 1), wl);
+        self.wire_local((ng2, 1), (nd1, 2), wl);
+        self.wire_local((ng2, 2), (nd2, 2), wl);
+        self.kill(g);
+        self.kill(d);
+    }
+    fn erase_claimed(&mut self, e: usize, g: usize, fresh: &mut usize, wl: &mut Vec<usize>) {
+        match self.sym[g] {
+            Sym::Zero | Sym::Lit(_) => {}
+            Sym::Succ | Sym::Pred | Sym::Head | Sym::Tail | Sym::NOp2(_, _) => {
+                let t = self.link[g][1];
+                let ne = self.alloc_at(fresh, Sym::Eps);
+                self.wire_local((ne, 0), t, wl);
+            }
+            _ => {
+                let (t1, t2) = (self.link[g][1], self.link[g][2]);
+                let e1 = self.alloc_at(fresh, Sym::Eps);
+                let e2 = self.alloc_at(fresh, Sym::Eps);
+                self.wire_local((e1, 0), t1, wl);
+                self.wire_local((e2, 0), t2, wl);
+            }
+        }
+        self.kill(e);
+        self.kill(g);
+    }
+    fn dup_lit_claimed(&mut self, dup: usize, lit: usize, n: u64, fresh: &mut usize, wl: &mut Vec<usize>) {
+        let (l1, l2) = (self.link[dup][1], self.link[dup][2]);
+        let c1 = self.alloc_at(fresh, Sym::Lit(n));
+        let c2 = self.alloc_at(fresh, Sym::Lit(n));
+        self.wire_local((c1, 0), l1, wl);
+        self.wire_local((c2, 0), l2, wl);
+        self.kill(dup);
+        self.kill(lit);
+    }
+    fn nop_lit_claimed(&mut self, op: usize, lit: usize, k: NK, n: u64, fresh: &mut usize, wl: &mut Vec<usize>) {
+        let bsrc = self.link[op][1];
+        let r = self.link[op][2];
+        let o2 = self.alloc_at(fresh, Sym::NOp2(k, n));
+        self.wire_local((o2, 0), bsrc, wl);
+        self.wire_local((o2, 1), r, wl);
+        self.kill(op);
+        self.kill(lit);
+    }
+    fn nop2_lit_claimed(&mut self, op: usize, lit: usize, k: NK, x: u64, n: u64, fresh: &mut usize, wl: &mut Vec<usize>) {
+        let r = self.link[op][1];
+        let out = self.alloc_at(fresh, Sym::Lit(nk_apply(k, x, n)));
+        self.wire_local((out, 0), r, wl);
+        self.kill(op);
+        self.kill(lit);
+    }
+    fn sel_lit_claimed(&mut self, sel: usize, lit: usize, c: u64, fresh: &mut usize, wl: &mut Vec<usize>) {
+        let bundle = self.link[sel][1];
+        let r = self.link[sel][2];
+        let proj = self.alloc_at(fresh, if c == 0 { Sym::Head } else { Sym::Tail });
+        self.wire_local((proj, 0), bundle, wl);
+        self.wire_local((proj, 1), r, wl);
+        self.kill(sel);
+        self.kill(lit);
+    }
+    fn pred_lit_claimed(&mut self, pred: usize, lit: usize, n: u64, fresh: &mut usize, wl: &mut Vec<usize>) {
+        let r = self.link[pred][1];
+        let out = self.alloc_at(fresh, Sym::Lit(n.saturating_sub(1)));
+        self.wire_local((out, 0), r, wl);
+        self.kill(pred);
+        self.kill(lit);
     }
 
     /// Reduce to normal form, then force any recursive `Ref` left dangling on the lazy spine
@@ -1178,15 +1682,67 @@ fn lower(a: &crate::latte::Ast, env: &mut LowerEnv, fuel: u32) -> Result<Lowered
 ///   2. `run_general` — the general compiler: lazy boxed `if`, multi-binding loops, user
 ///      functions of any arity, dynamic `sub`/`==`/`div`/`mod` (γ-pairs as net data);
 ///   3. the simple `Expr` compiler — kept as a final fallback and as the audit oracle.
-pub fn run_str(src: &str) -> Result<(u128, usize), String> {
-    // A self-recursive function is evaluated by net-level REF unrolling (genuine fixpoints).
-    if let Some(res) = run_rec(src)? {
-        return Ok(res);
+/// Run on the parallel batch reducer with `threads` workers (Ref expansions
+/// interleave sequentially). Same result as `run_str` by uniform confluence.
+pub fn run_str_parallel(src: &str, threads: usize) -> Result<(u128, usize), String> {
+    let ast = crate::latte::parse(src)?;
+    let mut env = GEnv { defs: Vec::new(), funcs: Vec::new(), div_idx: None, mod_idx: None, native: true };
+    let mut scope = GScope { params: Vec::new(), lets: Vec::new(), loop_idx: None };
+    let main = glower(&ast, &mut env, &mut scope)?;
+    let mut net = Net::new();
+    net.native = true;
+    net.defs = env.defs;
+    let mut supply: Vec<Port> = Vec::new();
+    let rp = net.build(&main, &mut supply);
+    let out = net.free();
+    net.wire(rp, (out, 0));
+    let mut rounds = 0;
+    loop {
+        net.normalize_parallel(threads);
+        let before = net.steps;
+        net.normalize_forcing(); // forces dangling lazy Refs, exactly as run_general
+        rounds += 1;
+        if net.steps == before || rounds > 8 {
+            break;
+        }
     }
+    let v = decode_num(&net, out);
+    if v == u128::MAX {
+        return Err("net: did not reduce to a number within the step budget".into());
+    }
+    Ok((v, net.steps))
+}
+
+pub fn run_str(src: &str) -> Result<(u128, usize), String> {
+    // The general compiler with NATIVE NUMBERS leads: every arithmetic op is one
+    // interaction (the HVM2 idea), so this is both the most capable and the most
+    // efficient path. The Peano paths remain as fallbacks and pedagogy.
     match run_general(src) {
         Ok(res) => Ok(res),
         Err(gerr) => {
-            // the simple path can still serve shapes the general compiler refuses
+            // classic single-parameter net recursion (Peano, REF unrolling)
+            if let Some(res) = run_rec(src)? {
+                return Ok(res);
+            }
+            // the simple expression path can still serve shapes both refuse
+            let ast = crate::latte::parse(src)?;
+            match latte_to_expr(&ast) {
+                Ok(e) => Ok(eval_net(&e)),
+                Err(_) => Err(gerr),
+            }
+        }
+    }
+}
+
+/// The pure-Peano evaluation order (the pedagogical mode): unary numbers, lockstep
+/// arithmetic agents, generated recursive `div`/`mod`.
+pub fn run_str_peano(src: &str) -> Result<(u128, usize), String> {
+    if let Some(res) = run_rec(src)? {
+        return Ok(res);
+    }
+    match run_general_mode(src, false) {
+        Ok(res) => Ok(res),
+        Err(gerr) => {
             let ast = crate::latte::parse(src)?;
             match latte_to_expr(&ast) {
                 Ok(e) => Ok(eval_net(&e)),
@@ -1256,6 +1812,9 @@ fn compile(net: &mut Net, e: &Expr) -> Port {
 fn decode_num(net: &Net, out: usize) -> u128 {
     let mut count = 0u128;
     let (mut a, _) = net.link[out][0];
+    if let Sym::Lit(n) = net.sym[a] {
+        return n as u128;
+    }
     loop {
         match net.sym[a] {
             Sym::Succ => {
@@ -1301,6 +1860,8 @@ enum R {
     Rec(Box<R>),                 // recursive call of defs[0] (back-compat)
     Call(usize, Box<R>),         // call defs[i] with one (possibly packed) argument
     If(Box<R>, Box<R>, Box<R>),
+    Div(Box<R>, Box<R>),         // native mode only: one NOp(Div) agent
+    Mod(Box<R>, Box<R>),         // native mode only: one NOp(Mod) agent
 }
 
 /// Parameter copies the *top level* of `r` consumes. `if` does not descend into its branches
@@ -1309,9 +1870,8 @@ fn nparams(r: &R) -> usize {
     match r {
         R::Num(_) => 0,
         R::Param | R::ParamN(_, _) => 1,
-        R::Add(a, b) | R::Mul(a, b) | R::Lt(a, b) | R::Sub(a, b) | R::Eq(a, b) | R::Pair(a, b) => {
-            nparams(a) + nparams(b)
-        }
+        R::Add(a, b) | R::Mul(a, b) | R::Lt(a, b) | R::Sub(a, b) | R::Eq(a, b) | R::Pair(a, b)
+        | R::Div(a, b) | R::Mod(a, b) => nparams(a) + nparams(b),
         R::Dec(a) | R::SubK(a, _) | R::Rec(a) | R::Call(_, a) | R::Fst(a) | R::Snd(a) => nparams(a),
         R::If(c, _, _) => nparams(c) + 2,
     }
@@ -1456,6 +2016,7 @@ struct GEnv {
     funcs: Vec<(String, usize, usize)>, // (name, def index, arity)
     div_idx: Option<usize>,             // the generated division definition, shared
     mod_idx: Option<usize>,             // the generated modulo definition, shared
+    native: bool,                       // native ALU agents vs generated Peano recursions
 }
 
 struct GScope {
@@ -1472,6 +2033,14 @@ fn rfold(r: &R) -> Option<u128> {
         R::Add(a, b) => rfold(a)?.checked_add(rfold(b)?),
         R::Mul(a, b) => rfold(a)?.checked_mul(rfold(b)?),
         R::Sub(a, b) => Some(rfold(a)?.saturating_sub(rfold(b)?)),
+        R::Div(a, b) => {
+            let bv = rfold(b)?;
+            if bv == 0 { None } else { Some(rfold(a)? / bv) }
+        }
+        R::Mod(a, b) => {
+            let bv = rfold(b)?;
+            if bv == 0 { None } else { Some(rfold(a)? % bv) }
+        }
         R::Lt(a, b) => Some(if rfold(a)? < rfold(b)? { 0 } else { 1 }),
         R::Eq(a, b) => Some(if rfold(a)? == rfold(b)? { 0 } else { 1 }),
         R::Dec(a) => Some(rfold(a)?.saturating_sub(1)),
@@ -1658,6 +2227,14 @@ fn glower(a: &crate::latte::Ast, env: &mut GEnv, scope: &mut GScope) -> Result<R
                     if rfold(&b) == Some(0) {
                         return Err(format!("net: '{}' by zero", name));
                     }
+                    if env.native {
+                        // native mode: division is ONE interaction on the NOp agents
+                        return Ok(if name == "div" {
+                            R::Div(Box::new(x), Box::new(b))
+                        } else {
+                            R::Mod(Box::new(x), Box::new(b))
+                        });
+                    }
                     if name == "div" {
                         let d = ensure_div(env);
                         Ok(R::Call(d, Box::new(pack(vec![x, R::Num(0), b]))))
@@ -1695,11 +2272,19 @@ fn glower(a: &crate::latte::Ast, env: &mut GEnv, scope: &mut GScope) -> Result<R
 /// general lowerer and reduce it. Lazy `if`, multi-binding loops, user functions
 /// of any arity, and dynamic `sub`/`==`/`div`/`mod` all run as net interactions.
 pub fn run_general(src: &str) -> Result<(u128, usize), String> {
+    run_general_mode(src, true)
+}
+
+/// The general compiler with an explicit number representation: `native = true`
+/// uses Lit agents + the one-interaction ALU (the HVM2 idea); `false` uses pure
+/// Peano chains and generated recursive `div`/`mod` (the pedagogical mode).
+pub fn run_general_mode(src: &str, native: bool) -> Result<(u128, usize), String> {
     let ast = crate::latte::parse(src)?;
-    let mut env = GEnv { defs: Vec::new(), funcs: Vec::new(), div_idx: None, mod_idx: None };
+    let mut env = GEnv { defs: Vec::new(), funcs: Vec::new(), div_idx: None, mod_idx: None, native };
     let mut scope = GScope { params: Vec::new(), lets: Vec::new(), loop_idx: None };
     let main = glower(&ast, &mut env, &mut scope)?;
     let mut net = Net::new();
+    net.native = native;
     net.defs = env.defs;
     let mut supply: Vec<Port> = Vec::new();
     let rp = net.build(&main, &mut supply);
@@ -2189,6 +2774,62 @@ mod tests {
         }
         assert!(super::run_str("(reverse [1 [2 0]])").is_err());
         assert!(super::run_str("(len [1 0])").is_err());
+    }
+
+    #[test]
+    fn parallel_reduction_matches_sequential() {
+        // uniform confluence: the parallel batch reducer must reach the same normal
+        // form as the sequential engine, on nets with real concurrent active pairs.
+        for src in [
+            "let f = fn [a b] -> (add (mul a a) (mul b b)) in (f 31 17)",
+            "let fib = fn [n] -> if (lt n 2) then n else (add (fib (sub n 1)) (fib (sub n 2))) in (fib 14)",
+            "loop with [a = 0, b = 1, i = 16] : if (i == 0) then a else again(b, (add a b), (dec i)) end",
+            "let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)",
+        ] {
+            let seq = super::run_str(src).expect(src).0;
+            // build the same program and reduce it with the parallel engine
+            let ast = crate::latte::parse(src).unwrap();
+            let mut env = super::GEnv { defs: Vec::new(), funcs: Vec::new(), div_idx: None, mod_idx: None, native: true };
+            let mut scope = super::GScope { params: Vec::new(), lets: Vec::new(), loop_idx: None };
+            let main = super::glower(&ast, &mut env, &mut scope).unwrap();
+            let mut net = super::Net::new();
+            net.native = true;
+            net.defs = env.defs;
+            let mut supply = Vec::new();
+            let rp = net.build(&main, &mut supply);
+            let out = net.free();
+            net.wire(rp, (out, 0));
+            // interleave parallel batches with the forcing loop's Ref expansion
+            let mut budget = 0;
+            loop {
+                net.normalize_parallel(4);
+                let before = net.steps;
+                net.normalize_forcing();
+                budget += 1;
+                if net.steps == before || budget > 64 {
+                    break;
+                }
+            }
+            let v = super::decode_num(&net, out);
+            assert_eq!(v, seq, "parallel and sequential engines disagree on {}", src);
+        }
+    }
+
+    #[test]
+    fn native_numbers_collapse_step_counts() {
+        // the HVM2 idea: numbers as atomic agents, every arithmetic op ONE interaction.
+        // gcd(1071,462) is 72,758 interactions in Peano mode; native mode needs ~100.
+        let (v, steps) =
+            super::run_str("let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)").unwrap();
+        assert_eq!(v, 21);
+        assert!(steps < 1_000, "native gcd should be ~100 steps, got {}", steps);
+        // a multiplication that would cost ~10^10 Peano interactions is 2 steps
+        let (v2, steps2) = super::run_str("(mul 99999 99999)").unwrap();
+        assert_eq!(v2, 9_999_800_001);
+        assert!(steps2 <= 4, "native mul is O(1) interactions, got {}", steps2);
+        // and the Peano mode still works (the pedagogical path)
+        let (v3, _) = super::run_str_peano("(mul 12 11)").unwrap();
+        assert_eq!(v3, 132);
     }
 
     #[test]

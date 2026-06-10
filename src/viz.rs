@@ -103,6 +103,12 @@ fn rows(n: &N) -> Vec<Vec<u128>> {
 /// title — the kind of plot machine-learning work needs (loss curves, an equity
 /// curve against a benchmark, train-vs-test metrics). Series share one y-scale.
 pub fn render_lines(title: &str, labels: &[&str], series: &[Vec<f64>]) -> String {
+    render_lines_dated(title, labels, series, None)
+}
+
+/// Like `render_lines`, with optional per-point x-axis date labels: ~5 ticks are
+/// drawn along the axis (with light vertical gridlines) instead of "step 0 → n".
+pub fn render_lines_dated(title: &str, labels: &[&str], series: &[Vec<f64>], dates: Option<&[String]>) -> String {
     let cw = 640.0;
     let ch = 360.0;
     let (ml, mr, mt, mb) = (54.0, 130.0, 34.0, 30.0); // margins (right margin holds legend)
@@ -155,10 +161,29 @@ pub fn render_lines(title: &str, labels: &[&str], series: &[Vec<f64>]) -> String
         ));
     }
     body.push_str(&format!(
-        "<text x='{ml}' y='20' font-family='monospace' font-size='13' fill='#1a1a2e'>{title}</text>\
-<text x='{:.1}' y='{:.1}' font-family='monospace' font-size='10' fill='#555' text-anchor='middle'>step {} → {}</text>",
-        ml + pw / 2.0, ch - 10.0, 0, maxlen.saturating_sub(1)
+        "<text x='{ml}' y='20' font-family='monospace' font-size='13' fill='#1a1a2e'>{title}</text>"
     ));
+    match dates {
+        Some(ds) if !ds.is_empty() => {
+            // ~5 date ticks with light vertical gridlines
+            let nt = 5usize.min(ds.len());
+            for k in 0..nt {
+                let i = if nt == 1 { 0 } else { k * (ds.len() - 1) / (nt - 1) };
+                let x = xat(i, ds.len());
+                body.push_str(&format!(
+                    "<line x1='{x:.1}' y1='{mt}' x2='{x:.1}' y2='{:.1}' stroke='#eceadf'/>\
+<text x='{x:.1}' y='{:.1}' font-family='monospace' font-size='9' fill='#555' text-anchor='middle'>{}</text>",
+                    mt + ph, ch - 10.0, ds[i]
+                ));
+            }
+        }
+        _ => {
+            body.push_str(&format!(
+                "<text x='{:.1}' y='{:.1}' font-family='monospace' font-size='10' fill='#555' text-anchor='middle'>step {} → {}</text>",
+                ml + pw / 2.0, ch - 10.0, 0, maxlen.saturating_sub(1)
+            ));
+        }
+    }
     format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {cw} {ch}' width='{cw}' height='{ch}'>\
 <rect x='0' y='0' width='{cw}' height='{ch}' fill='#f4f1e8'/>{body}</svg>"
@@ -182,6 +207,10 @@ pub fn market_chart(days: usize, live: bool) -> String {
     let (s20, s50) = (sma(20), sma(50));
     let n = all.len();
     let lo = n.saturating_sub(days);
+    // real calendar dates for the x-axis: the series ends on span.1, one row per day
+    let dates: Option<Vec<String>> = crate::marketdata::date_ordinal(&span.1).map(|end| {
+        (lo..n).map(|i| crate::marketdata::ordinal_date(end - (n - 1 - i) as i64)).collect()
+    });
     let title = format!(
         "{} — last {} days to {}  ({})",
         crate::marketdata::MARKET_NAME,
@@ -189,11 +218,77 @@ pub fn market_chart(days: usize, live: bool) -> String {
         span.1,
         note
     );
-    render_lines(
+    render_lines_dated(
         &title,
         &["close", "SMA20", "SMA50"],
         &[all[lo..].to_vec(), s20[lo..].to_vec(), s50[lo..].to_vec()],
+        dates.as_deref(),
     )
+}
+
+/// Decode `render`'s rows-of-packed-RGB noun into a flat u32 field.
+fn trace_field(n: &crate::knot::N) -> (Vec<u32>, usize, usize) {
+    use crate::knot::Knot;
+    let mut field = Vec::new();
+    let (mut w, mut h) = (0usize, 0usize);
+    let mut rows = n.clone();
+    while let Knot::Cell(row, rest) = &*rows.clone() {
+        let mut rw = 0usize;
+        let mut cur = row.clone();
+        while let Knot::Cell(px, t) = &*cur.clone() {
+            let v = px.as_atom().and_then(|a| a.to_u128()).unwrap_or(0) as u32;
+            field.push(0xFF00_0000 | v);
+            rw += 1;
+            cur = t.clone();
+        }
+        w = w.max(rw);
+        h += 1;
+        rows = rest.clone();
+    }
+    (field, w, h)
+}
+
+/// Run the Latte ray tracer (lib/trace.lat) at `w`x`h` and return (SVG, engine, ms).
+/// Tries the Anvil native compiler first; falls back to the (jet-accelerated) interpreter.
+pub fn ray_trace(w: usize, h: usize) -> (String, &'static str, u128) {
+    let expr = format!("(render {} {})", w, h);
+    let libs: Vec<String> = crate::latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    let t0 = std::time::Instant::now();
+    let (noun, engine) = match crate::rustgen::run_native_noun_opts(&expr, &refs, false) {
+        Some(n) => (Some(n), "Anvil (compiled to native code)"),
+        None => (
+            crate::latte::run_with_libs(&expr, &refs).ok(),
+            "Loom interpreter + audited vector jets",
+        ),
+    };
+    let ms = t0.elapsed().as_millis();
+    match noun {
+        Some(n) => {
+            let (field, fw, fh) = trace_field(&n);
+            let cell = (520 / fw.max(1)).clamp(2, 8);
+            (crate::gpu::field_to_svg(&field, fw, fh, cell), engine, ms)
+        }
+        None => ("<svg xmlns='http://www.w3.org/2000/svg' width='320' height='40'><text x='6' y='22'>trace failed</text></svg>".into(), engine, ms),
+    }
+}
+
+/// `latte trace [--w N] [--h N]` — render the Latte ray tracer to SVG on stdout.
+pub fn cmd_trace(args: &[String]) {
+    let mut w = 96usize;
+    let mut h = 72usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--w" | "--width" if i + 1 < args.len() => { w = args[i + 1].parse().unwrap_or(w); i += 1; }
+            "--h" | "--height" if i + 1 < args.len() => { h = args[i + 1].parse().unwrap_or(h); i += 1; }
+            _ => {}
+        }
+        i += 1;
+    }
+    let (svg, engine, ms) = ray_trace(w.clamp(16, 480), h.clamp(12, 360));
+    println!("{}", svg);
+    eprintln!("\nray-traced {}x{} in {} ms — {} — scene, shading and camera all in lib/trace.lat", w, h, ms, engine);
 }
 
 pub fn cmd_chart(args: &[String]) {

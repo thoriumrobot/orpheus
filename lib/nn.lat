@@ -160,6 +160,9 @@ core nn
     case (head L) of
       %attn     -> let p = (tail L) in (attn (head p) (head (tail p)) (head (tail (tail p))) xs) ;
       %seqdense -> let p = (tail L) in (map (fn [x] -> (dense (head p) (head (tail p)) x)) xs) ;
+      %ssm      -> let p = (tail L) in
+                   (ssm_run (head p) (head (tail p)) (head (tail (tail p))) (head (tail (tail (tail p)))) xs) ;
+      %seqlnorm -> (map (fn [x] -> (rmsnorm x)) xs) ;
       %lnorm    -> (map (fn [x] -> (layernorm x)) xs) ;
       %seqres   -> let ys = (seq_fwd (tail L) xs) in
                    loop with [a = ys, b = xs, acc = 0] :
@@ -206,6 +209,149 @@ core nn
     [ [%lnorm 0]
     [ [%seqres [ [%seqdense [ W [ b 0 ] ]] 0 ]]
     [ [%lnorm 0] 0 ] ] ] ]
+
+  :: ==========================================================================
+  :: REVERSE-MODE AUTODIFF over the layer algebra. Every layer kind has a
+  :: vector-Jacobian product (VJP): `layer_bwd L x dy -> [dx grads]` takes the
+  :: layer, its INPUT x from the cached forward pass, and the loss gradient dy
+  :: at its output, and returns the gradient dx at its input plus the layer's
+  :: own parameter gradients. `stack_train` then trains ANY composition of
+  :: trainable layers — depth is data, exactly like the forward pass.
+  :: Exact derivatives for the fixed-point activations:
+  ::   ntanh x = x/(1+|x|)        -> d/dx = 1/(1+|x|)^2
+  ::   nsigmoid = 0.5 + 0.5 ntanh -> d/dx = 0.5/(1+|x|)^2
+  ::   relu                       -> 1 if x>0 else 0
+  ::   rmsnorm (x / rms(x))       -> straight-through: dy/rms (the rms term is
+  ::                                 treated as constant — the standard cheap
+  ::                                 approximation; documented, not hidden)
+  :: ==========================================================================
+  dtanh1 = fn [xi] -> let d = (nadd [0 1000] (nabs xi)) in (ndiv [0 1000] (nmul d d))
+  :: matrix transpose (rows <-> columns), for the dense VJP dx = W^T dy
+  transpose = fn [M] ->
+    if (M == 0) then 0
+    else if ((head M) == 0) then 0
+    else [ (map (fn [row] -> (head row)) M) (transpose (map (fn [row] -> (tail row)) M)) ]
+  rms2 = fn [v] -> (nmax [0 10] (nsqrt (nmean (map (fn [vi] -> (nmul vi vi)) v))))
+  rmsnorm = fn [v] -> let r = (rms2 v) in (map (fn [vi] -> (ndiv vi r)) v)
+
+  :: forward pass caching every layer INPUT: returns [acts y] where acts is the
+  :: list of inputs per layer (in order) and y is the final output
+  fwd_cache = fn [layers x] ->
+    loop with [ls = layers, cur = x, acc = 0] :
+      if (ls == 0) then [ (reverse acc) cur ]
+      else again((tail ls), (layer_fwd (head ls) cur), [ cur acc ])
+    end
+
+  :: the VJP of one layer: -> [ dx  grads ]  (grads = 0 for parameterless layers,
+  :: [dW [db 0]] for %dense)
+  :: every arm returns the two-element list [ dx [ grads 0 ] ]; grads is 0 for
+  :: parameterless layers and [ dW [ db 0 ] ] for %dense
+  layer_bwd = fn [L x dy] ->
+    case (head L) of
+      %dense -> let p = (tail L) in
+                let W = (head p) in
+                let dx = (matvec (transpose W) dy) in
+                [ dx [ [ (outer dy x) [ dy 0 ] ] 0 ] ] ;
+      %relu  -> [ (vmul dy (map (fn [xi] -> if (nlt [0 0] xi) then [0 1000] else [0 0]) x)) [ 0 0 ] ] ;
+      %tanh  -> [ (vmul dy (map (fn [xi] -> (dtanh1 xi)) x)) [ 0 0 ] ] ;
+      %sigmoid -> [ (vmul dy (map (fn [xi] -> (nmul [0 500] (dtanh1 xi))) x)) [ 0 0 ] ] ;
+      %rmsnorm -> let r = (rms2 x) in [ (map (fn [di] -> (ndiv di r)) dy) [ 0 0 ] ] ;
+      _      -> [ dy [ 0 0 ] ]
+    end
+
+  :: walk the stack backward from the output gradient, collecting [dx per-layer-grads]
+  stack_bwd = fn [layers acts dy] ->
+    loop with [ls = (reverse layers), xs = (reverse acts), g = dy, acc = 0] :
+      if (ls == 0) then acc
+      else
+        let r = (layer_bwd (head ls) (head xs) g) in
+        again((tail ls), (tail xs), (head r), [ (head (tail r)) acc ])
+    end
+
+  :: apply one SGD step to every trainable layer (only %dense carries parameters)
+  stack_step = fn [layers grads lr] ->
+    loop with [ls = layers, gs = grads, acc = 0] :
+      if (ls == 0) then (reverse acc)
+      else
+        let L = (head ls) in
+        let g = (head gs) in
+        let L2 = if ((head L) == %dense) then
+                   if (g == 0) then L
+                   else
+                     let p = (tail L) in
+                     let W = (head p) in let b = (head (tail p)) in
+                     let dW = (head g) in let db = (head (tail g)) in
+                     [ %dense [ (matsub W (matscale lr dW)) [ (vsub b (vscale lr db)) 0 ] ] ]
+                 else L in
+        again((tail ls), (tail gs), [ L2 acc ])
+    end
+  matscale = fn [s M] -> (map (fn [row] -> (vscale s row)) M)
+  matsub = fn [A B] ->
+    loop with [x = A, y = B, acc = 0] :
+      if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (vsub (head x) (head y)) acc ])
+    end
+
+  :: one training step on one (x, y) pair, MSE loss: dLoss/dout = out - y
+  stack_train_step = fn [layers x y lr] ->
+    let fc = (fwd_cache layers x) in        :: fc is the PAIR [acts out]
+    let grads = (stack_bwd layers (head fc) (vsub (tail fc) y)) in
+    (stack_step layers grads lr)
+  stack_epoch = fn [layers xs ys lr] ->
+    loop with [px = xs, py = ys, cl = layers] :
+      if (px == 0) then cl
+      else again((tail px), (tail py), (stack_train_step cl (head px) (head py) lr))
+    end
+  :: train ANY layer stack: deep MLPs, norm-sandwiched stacks — architecture is data
+  stack_train = fn [layers xs ys lr epochs] ->
+    loop with [cl = layers, k = 0] :
+      if (k == epochs) then cl else again((stack_epoch cl xs ys lr), +(k))
+    end
+  stack_loss = fn [layers xs ys] ->
+    loop with [px = xs, py = ys, acc = [0 0]] :
+      if (px == 0) then acc
+      else
+        let e = (vsub (net_fwd layers (head px)) (head py)) in
+        again((tail px), (tail py), (nadd acc (ndot e e)))
+    end
+
+  :: ==========================================================================
+  :: STATE-SPACE sequence layer (the post-transformer line: S4D / Mamba-style
+  :: DIAGONAL linear recurrence, which suits fixed point — no exp, no softmax):
+  ::   h_t = a (.) h_{t-1} + b (.) x_t        (per-channel gates a, b)
+  ::   y_t = c (.) h_t + d (.) x_t            (output mix c, skip d)
+  :: As a sequence layer: [%ssm [a [b [c [d 0]]]]]; `ssmblock seed d` builds a
+  :: prenorm block: rmsnorm -> ssm -> residual -> rmsnorm -> dense -> residual.
+  :: ==========================================================================
+  vmul = fn [u v] ->
+    loop with [x = u, y = v, acc = 0] :
+      if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (nmul (head x) (head y)) acc ])
+    end
+  ssm_run = fn [a b c d xs] ->
+    loop with [cur = xs, h = (map (fn [_] -> [0 0]) a), acc = 0] :
+      if (cur == 0) then (reverse acc)
+      else
+        let x = (head cur) in
+        let h2 = (vadd (vmul a h) (vmul b x)) in
+        again((tail cur), h2, [ (vadd (vmul c h2) (vmul d x)) acc ])
+    end
+
+  :: prenorm wrappers (the modern ordering: normalize INTO the sublayer)
+  randvecu = fn [seed n lo span] ->
+    loop with [i = 0, sd = (lcg seed), acc = 0] :
+      if (i == n) then (reverse acc)
+      else again(+(i), (lcg sd), [ [0 (add lo (mod sd span))] acc ])
+    end
+  ssmblock = fn [seed d] ->
+    let a = (randvecu seed d 600 350) in            :: decay gates in 0.600..0.949
+    let b = (randvecu (add seed 3) d 200 500) in
+    let c = (randvecu (add seed 5) d 300 500) in
+    let dd = (randvecu (add seed 9) d 400 400) in
+    let W = (randmat (add seed 11) d d 400) in
+    let bb = (map (fn [_] -> [0 0]) (range d)) in
+    [ [%seqlnorm 0]
+    [ [%seqres [ [%ssm [ a [ b [ c [ dd 0 ] ] ] ]] 0 ]]
+    [ [%seqlnorm 0]
+    [ [%seqres [ [%seqdense [ W [ bb 0 ] ]] 0 ]] 0 ] ] ] ]
 
   :: ---- demo: learn y = |x|, which needs a nonlinearity (two ReLU units) ----
   :: starts away from the solution; loss should fall sharply over the epochs.
