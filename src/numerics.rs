@@ -861,6 +861,7 @@ pub struct TradeAdvice {
     pub vol_regime: &'static str, // predicted next-day regime: high/low
     pub har_vol: Option<f64>, // HAR-RV next-day volatility forecast, daily %
     pub har_r2: f64,          // HAR-RV in-sample R^2
+    pub vol_comparison: Option<(f64, f64, f64)>, // out-of-sample R²: (HAR, EWMA, persistence)
     pub band90: f64,          // conformal 90% next-day |return| band, %
     pub dir_hitrate: f64,    // out-of-sample momentum hit rate (embargoed walk-forward)
     pub model_acc: f64,      // volatility-model test accuracy
@@ -1087,6 +1088,92 @@ pub fn turnover_per_100(strat_daily_active: &[bool]) -> f64 {
 /// HAR-RV (Corsi 2009): forecast next-day realized volatility from the daily,
 /// weekly (5d) and monthly (22d) average RVs by least squares — the standard,
 /// hard-to-beat volatility benchmark. Returns (forecast, [c, bd, bw, bm], r2).
+/// BASELINE COMPARISON for the volatility forecast (the methodological check
+/// a forecast owes its reader): out-of-sample one-step R² of HAR-RV against
+/// (a) the EWMA forecast (RiskMetrics λ=0.94) and (b) naive persistence
+/// (tomorrow's |r| = today's |r|), all on the SAME final-20% test window.
+/// Returns (har_r2_oos, ewma_r2_oos, persist_r2_oos).
+pub fn vol_forecast_comparison(absr: &[f64]) -> Option<(f64, f64, f64)> {
+    let n = absr.len();
+    if n < 160 {
+        return None;
+    }
+    let split = n - n / 5;
+    let avg = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+    // fit HAR on the train slice only
+    let mut xs: Vec<[f64; 4]> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for t in 23..split {
+        xs.push([1.0, absr[t - 1], avg(&absr[t - 5..t]), avg(&absr[t - 22..t])]);
+        ys.push(absr[t]);
+    }
+    let beta = ols4(&xs, &ys)?;
+    // walk the test window with all three forecasts
+    let mut ewma = {
+        // seed EWMA variance from the train slice
+        let mut v = absr[..split].iter().map(|r| r * r).sum::<f64>() / split as f64;
+        for r in &absr[..split] {
+            v = 0.94 * v + 0.06 * r * r;
+        }
+        v
+    };
+    let (mut sh, mut se, mut sp, mut st) = (0.0f64, 0.0, 0.0, 0.0);
+    let mean_test = avg(&absr[split..]);
+    for t in split..n {
+        let har = beta[0] + beta[1] * absr[t - 1] + beta[2] * avg(&absr[t - 5..t]) + beta[3] * avg(&absr[t - 22..t]);
+        let ew = ewma.sqrt();
+        let pers = absr[t - 1];
+        let y = absr[t];
+        sh += (y - har) * (y - har);
+        se += (y - ew) * (y - ew);
+        sp += (y - pers) * (y - pers);
+        st += (y - mean_test) * (y - mean_test);
+        ewma = 0.94 * ewma + 0.06 * y * y;
+    }
+    if st <= 0.0 {
+        return None;
+    }
+    Some((1.0 - sh / st, 1.0 - se / st, 1.0 - sp / st))
+}
+
+
+fn ols4(xs: &[[f64; 4]], ys: &[f64]) -> Option<[f64; 4]> {
+    let mut a = [[0.0f64; 5]; 4];
+    for (x, y) in xs.iter().zip(ys) {
+        for i in 0..4 {
+            for j in 0..4 {
+                a[i][j] += x[i] * x[j];
+            }
+            a[i][4] += x[i] * y;
+        }
+    }
+    for i in 0..4 {
+        let mut p = i;
+        for r in i + 1..4 {
+            if a[r][i].abs() > a[p][i].abs() {
+                p = r;
+            }
+        }
+        a.swap(i, p);
+        if a[i][i].abs() < 1e-12 {
+            return None;
+        }
+        let d = a[i][i];
+        for j in i..5 {
+            a[i][j] /= d;
+        }
+        for r in 0..4 {
+            if r != i {
+                let f = a[r][i];
+                for j in i..5 {
+                    a[r][j] -= f * a[i][j];
+                }
+            }
+        }
+    }
+    Some([a[0][4], a[1][4], a[2][4], a[3][4]])
+}
+
 pub fn har_rv(absr: &[f64]) -> Option<(f64, [f64; 4], f64)> {
     let n = absr.len();
     if n < 80 {
@@ -1255,6 +1342,7 @@ pub fn trade_advice_market(
     // HAR-RV (Corsi): the standard daily/weekly/monthly vol regression, fit on the
     // full history; its forecast drives the volatility targeting below
     let har = har_rv(&absr);
+    let vol_comparison = vol_forecast_comparison(&absr);
     let (har_vol, har_r2) = match har {
         Some((fc, _, r2)) => (Some(fc), r2),
         None => (None, 0.0),
@@ -1360,6 +1448,7 @@ pub fn trade_advice_market(
         vol_regime: if vol_regime == "high" { "high" } else { "low" },
         har_vol,
         har_r2,
+        vol_comparison,
         band90,
         dir_hitrate: dir_hitrate * 100.0,
         model_acc,
@@ -1458,6 +1547,11 @@ pub fn cmd_trade(args: &[String]) {
             println!("  realized vol/day  : {:.2}%   target {:.2}%   predicted regime: {}-vol", a.realized_vol, a.target_vol, a.vol_regime);
             if let Some(h) = a.har_vol {
                 println!("  HAR-RV forecast   : {:.2}%/day next-day vol  (daily/weekly/monthly regression, R²={:.2}) — drives the sizing", h, a.har_r2);
+                if let Some((hr, er, pr)) = a.vol_comparison {
+                    println!("    vs baselines (out-of-sample R², same test window): HAR {:+.3} · EWMA λ=0.94 {:+.3} · persistence {:+.3}{}",
+                        hr, er, pr,
+                        if hr > er && hr > pr { "  — HAR earns its place" } else { "  — a baseline matches HAR here; the forecast is held humbly" });
+                }
             }
             println!("  90% next-day band : ±{:.2}%  (split-conformal quantile of the trailing year — distribution-free)", a.band90);
             println!("  -- model reliability ----------------------");

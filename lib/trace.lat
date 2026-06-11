@@ -70,9 +70,9 @@ core trace
       if (nlt t [0 25]) then (miss 0) else t
     else (miss 0)
 
-  :: nearest surface: [ t idx ]  (idx 0..2 = sphere, 9 = the ground plane)
-  nearest = fn [ro rd] ->
-    loop with [ss = (spheres 0), i = 0, bt = (hit_plane ro rd), bi = 9] :
+  :: nearest surface in SCENE: [ t idx ]  (idx = sphere index, 9 = the plane)
+  nearest = fn [scene ro rd] ->
+    loop with [ss = scene, i = 0, bt = (hit_plane ro rd), bi = 9] :
       if (ss == 0) then [ bt bi ]
       else
         let sp = (head ss) in
@@ -81,10 +81,13 @@ core trace
         else again((tail ss), +(i), bt, bi)
     end
 
-  :: is the point p (offset off the surface) shadowed from the light?  1 = yes
-  shadowed = fn [p] ->
-    let l = (light 0) in
-    loop with [ss = (spheres 0)] :
+  :: the second light: a soft fill from the opposite side (a new feature —
+  :: surfaces in the key light's shadow are no longer pitch black)
+  fill = fn [_] -> (v3norm (v3 [0 900] [0 600] [0 400]))
+
+  :: is the point p (offset off the surface) shadowed from direction l?  1 = yes
+  shadowed = fn [scene p l] ->
+    loop with [ss = scene] :
       if (ss == 0) then 0
       else
         let sp = (head ss) in
@@ -94,11 +97,16 @@ core trace
 
   :: ---- shading --------------------------------------------------------------
   :: local illumination: ambient + lambert + shadow + specular highlight
-  lambert = fn [rd p n col] ->
+  lambert = fn [scene rd p n col] ->
     let l = (light 0) in
-    let sh = (shadowed (v3add p (v3scale [0 60] n))) in
+    let off = (v3add p (v3scale [0 60] n)) in
+    let sh = (shadowed scene off l) in
     let dif = (nmax [0 0] (v3dot n l)) in
-    let k = if (sh == 1) then [0 280] else (nadd [0 280] (nmul [0 720] dif)) in
+    :: the fill light contributes a weaker, shadow-tested lambert term
+    let f = (fill 0) in
+    let fsh = (shadowed scene off f) in
+    let fdif = (if (fsh == 1) then [0 0] else (nmul [0 240] (nmax [0 0] (v3dot n f)))) in
+    let k = (nadd (if (sh == 1) then [0 280] else (nadd [0 280] (nmul [0 720] dif))) fdif) in
     let base = (v3 (nmul k (vx col)) (nmul k (vy col)) (nmul k (vz col))) in
     if (sh == 1) then base
     else
@@ -109,8 +117,8 @@ core trace
       (v3 (nadd (vx base) w) (nadd (vy base) w) (nadd (vz base) w))
 
   :: surface query: 0 on a miss, else [ p [ n [ col [ shiny 0 ] ] ] ]
-  surf = fn [ro rd] ->
-    let h = (nearest ro rd) in
+  surf = fn [scene ro rd] ->
+    let h = (nearest scene ro rd) in
     let t = (head h) in
     if (nlt [0 900000000] t) then 0
     else
@@ -118,58 +126,66 @@ core trace
       let i = (tail h) in
       if (i == 9) then [ p [ (v3 [0 0] [0 1000] [0 0]) [ (checker p) [ 0 0 ] ] ] ]
       else
-        let sp = (nth (spheres 0) i) in
+        let sp = (nth scene i) in
         let n = (v3norm (v3sub p (head sp))) in
         [ p [ n [ (head (tail (tail sp))) [ (head (tail (tail (tail sp)))) 0 ] ] ] ]
 
   :: one-bounce-free shading (used for the reflected ray)
-  shade0 = fn [ro rd] ->
-    let s = (surf ro rd) in
+  shade0 = fn [scene ro rd] ->
+    let s = (surf scene ro rd) in
     if (s == 0) then (sky rd)
-    else (lambert rd (head s) (head (tail s)) (head (tail (tail s))))
+    else (lambert scene rd (head s) (head (tail s)) (head (tail (tail s))))
 
-  :: full shading: the mirror sphere mixes in one reflection bounce
-  shade = fn [ro rd] ->
-    let s = (surf ro rd) in
+  :: full shading. The 4th sphere field is REFLECTIVITY 0..1000 (a new
+  :: feature: graded mirrors, not just on/off; the legacy flag value 1 still
+  :: means a 380-mix mirror, so old scenes render unchanged).
+  shade = fn [scene ro rd] ->
+    let s = (surf scene ro rd) in
     if (s == 0) then (sky rd)
     else
       let p = (head s) in
       let n = (head (tail s)) in
       let col = (head (tail (tail s))) in
-      let shiny = (head (tail (tail (tail s)))) in
-      let base = (lambert rd p n col) in
-      if (shiny == 1) then
+      let refl = (head (tail (tail (tail s)))) in
+      let amt = (if (refl == 0) then 0 else (if (refl == 1) then 380 else refl)) in
+      let base = (lambert scene rd p n col) in
+      if (amt == 0) then base
+      else
         let r = (v3norm (reflect rd n)) in
-        let rc = (shade0 (v3add p (v3scale [0 60] n)) r) in
-        (v3 (nadd (nmul [0 620] (vx base)) (nmul [0 380] (vx rc)))
-            (nadd (nmul [0 620] (vy base)) (nmul [0 380] (vy rc)))
-            (nadd (nmul [0 620] (vz base)) (nmul [0 380] (vz rc))))
-      else base
+        let rc = (shade0 scene (v3add p (v3scale [0 60] n)) r) in
+        let ka = [0 amt] in let kb = [0 (sub 1000 amt)] in
+        (v3 (nadd (nmul kb (vx base)) (nmul ka (vx rc)))
+            (nadd (nmul kb (vy base)) (nmul ka (vy rc)))
+            (nadd (nmul kb (vz base)) (nmul ka (vz rc))))
 
   :: ---- camera and the image -------------------------------------------------
   :: pixel (i, j) of a w x h image: camera at (0, 1, -3.6) looking toward +z
-  pixel = fn [i j w h] ->
+  pixel = fn [scene i j w h] ->
     let fx = (nsub (ndiv (nint (add (mul 2 i) 1)) (nint w)) [0 1000]) in
     let fy = (nsub [0 1000] (ndiv (nint (add (mul 2 j) 1)) (nint h))) in
     let aspect = (ndiv (nint w) (nint h)) in
     let rd = (v3norm (v3 (nmul fx (nmul aspect [0 850]))
                          (nadd (nmul fy [0 850]) [1 120])
                          [0 1000])) in
-    (shade (v3 [0 0] [0 1000] [1 3600]) rd)
+    (shade scene (v3 [0 0] [0 1000] [1 3600]) rd)
 
   :: a signed 0..1 channel -> 0..255
   chan = fn [c] -> (div (mul (tail (nmax [0 0] (nmin [0 1000] c))) 255) 1000)
   pack = fn [c] -> (add (mul (chan (vx c)) 65536) (add (mul (chan (vy c)) 256) (chan (vz c))))
 
-  :: the whole image as a list of rows of packed RGB naturals
-  render = fn [w h] ->
+  :: the whole image for an ARBITRARY scene — the scene is Latte data, so any
+  :: tool (or any text in the GUI) can build one and render it
+  rendersc = fn [scene w h] ->
     loop with [j = 0, rows = 0] :
       if (j == h) then (reverse rows)
       else
         let row = loop with [i = 0, acc = 0] :
                     if (i == w) then (reverse acc)
-                    else again(+(i), [ (pack (pixel i j w h)) acc ])
+                    else again(+(i), [ (pack (pixel scene i j w h)) acc ])
                   end in
         again(+(j), [ row rows ])
     end
+
+  :: the default image (the built-in scene above)
+  render = fn [w h] -> (rendersc (spheres 0) w h)
 end

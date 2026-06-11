@@ -390,7 +390,15 @@ parallel** (one server thread per request), each filling its own viewer or its
 own spot in your text while you keep editing. Modules compile from frames into
 the running system (Compile), persist as **user packages** in `pkg/` (Store),
 and load at every startup; Format runs the compile-checked source formatter.
-The full tour: `docs/the-system.md`.
+The full tour: `docs/the-system.md`. The toolbox around it: **Draw**, a real
+vector-graphics editor whose stored drawings embed in texts (`drawing <name>`);
+a **debugger** (`latte debug`, or `debug <expr>` in any text) — the Loom call
+tracer rendering every arm call as an expandable tree with `break=ARM`
+breakpoints; the **conlang suite** (an attested sound-change library that
+assembles SCArs rulesets, and a phonology builder that generates and evolves
+vocabularies through it); **xiangqi** against a model whose piece values were
+learned by gradient descent in Latte; and a ray tracer whose scene is Latte
+data (`trace … scene=[ … ]`), with key + fill lights and graded reflections.
 
 ## The GUI — a WYSIWYG Facet editor
 

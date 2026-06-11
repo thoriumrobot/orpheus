@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Phonology Builder</title>
+<style>
+ body{font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;margin:0;background:#d6d2c4;color:#22222e;font-size:13px}
+ .wrap{max-width:1060px;margin:0 auto;padding:16px}
+ h1{font-size:17px;margin:6px 0 2px}
+ .sub{color:#6b6858;font-size:12px;margin:0 0 14px}
+ .panel{background:#faf8f1;border:1px solid #8e8a7a;border-radius:4px;box-shadow:0 1px 4px #0002;margin-bottom:14px}
+ .panel h2{font-size:12px;letter-spacing:.6px;margin:0;padding:7px 11px;background:linear-gradient(#cfcaba,#c4bfae);border-bottom:1px solid #8e8a7a;border-radius:4px 4px 0 0}
+ .row{display:flex;gap:10px;align-items:center;padding:9px 12px;flex-wrap:wrap}
+ label{color:#55524a;font-size:11px;letter-spacing:.3px}
+ input[type=text],input[type=number]{font:13px inherit;border:1px solid #8e8a7a;border-radius:3px;padding:6px 8px;background:#fff}
+ .wide{flex:1;min-width:260px}
+ button{font:13px inherit;border:1px solid #8e8a7a;border-radius:3px;background:#ece8dc;cursor:pointer;padding:6px 14px}
+ button:hover{background:#fff}
+ button.on{background:#33387e;color:#fff;border-color:#33387e}
+ button.go{background:#33387e;color:#fff;border-color:#33387e;padding:7px 18px}
+ .chgs{display:flex;flex-wrap:wrap;gap:6px;padding:9px 12px}
+ .chgs button{font-size:11px;padding:4px 9px}
+ .cols{display:flex;gap:14px;align-items:flex-start}
+ table{border-collapse:collapse;width:100%}
+ td,th{border:1px solid #d3cebc;padding:4px 10px;text-align:left}
+ th{background:#f1ecdd;font-size:11px;letter-spacing:.5px}
+ pre{margin:0;padding:10px;white-space:pre-wrap;font:12px/1.5 inherit;max-height:340px;overflow:auto}
+ .hint{color:#6b6858;font-size:11px;padding:2px 12px 10px}
+</style></head>
+<body>
+<div class="orpheus-nav" style="position:sticky;top:0;z-index:90;display:flex;gap:14px;align-items:center;padding:6px 14px;background:linear-gradient(#262633,#1c1c26);border-bottom:2px solid #33387e;font:12px ui-monospace,'SF Mono',Menlo,Consolas,monospace;box-shadow:0 1px 6px #0004">
+<a href="/" style="color:#cfd3ff;text-decoration:none;font-weight:700">&#8592; System</a>
+<span style="color:#55557a">&#183;</span>
+<a href="/docs" style="color:#c9c4e8;text-decoration:none">Docs</a>
+<a href="/draw" style="color:#c9c4e8;text-decoration:none">Draw</a>
+<a href="/trade" style="color:#c9c4e8;text-decoration:none">Trade</a>
+<a href="/chart" style="color:#c9c4e8;text-decoration:none">Charts</a>
+<a href="/fin" style="color:#c9c4e8;text-decoration:none">Finance</a>
+<a href="/plan" style="color:#c9c4e8;text-decoration:none">Plan</a>
+<a href="/derive" style="color:#c9c4e8;text-decoration:none">Derive</a>
+<a href="/phono" style="color:#c9c4e8;text-decoration:none">Phonology</a>
+<a href="/soundlib" style="color:#c9c4e8;text-decoration:none">Sound&nbsp;Changes</a>
+<a href="/chess" style="color:#c9c4e8;text-decoration:none">Chess</a>
+<a href="/xiangqi" style="color:#c9c4e8;text-decoration:none">Xiangqi</a>
+<a href="/gpu" style="color:#c9c4e8;text-decoration:none">GPU</a>
+<a href="/editor" style="color:#c9c4e8;text-decoration:none">Editor</a>
+</div>
+<div class="wrap">
+<h1>The Phonology Builder</h1>
+<p class="sub">Assemble a believable proto-language sound system, generate vocabulary that obeys it, then evolve the words
+through attested changes — the builder calls the word generator calls the change library calls SCArs, Oberon-style.</p>
+
+<div class="panel">
+  <h2>1 · THE INVENTORY</h2>
+  <div class="row" id="presets"><label>presets:</label></div>
+  <div class="row">
+    <label>consonants</label><input type="text" id="cons" class="wide" spellcheck="false" value="p t k b d g s m n r l w j h">
+    <label>vowels</label><input type="text" id="vows" spellcheck="false" style="width:150px" value="a e i o u">
+  </div>
+  <div class="row">
+    <label>syllables (C=consonant V=vowel, anything else literal)</label>
+    <input type="text" id="pats" class="wide" spellcheck="false" value="CVC CV CCVC VC CVCC">
+    <label>words</label><input type="number" id="n" value="14" min="1" max="60" style="width:64px">
+    <label>seed</label><input type="number" id="seed" value="42" style="width:80px">
+  </div>
+</div>
+
+<div class="panel">
+  <h2>2 · SOUND CHANGES, IN ORDER (optional — click to toggle)</h2>
+  <div class="chgs" id="chgs"></div>
+  <div class="hint">selected: <span id="sel">none — words will be shown unevolved</span></div>
+  <div class="row"><button class="go" onclick="run()">Generate &amp; evolve</button>
+  <span class="hint" style="padding:0">same seed = same words; in the System GUI, <b>phono preset=pie n=10 changes=grimm1</b> embeds this anywhere</span></div>
+</div>
+
+<div class="cols">
+  <div class="panel" style="flex:1"><h2>PROTO &rarr; DAUGHTER</h2><div id="rows" style="padding:8px"><div class="hint" style="padding:6px">generate to see vocabulary</div></div></div>
+  <div class="panel" style="flex:1"><h2>THE SCARS FILE USED</h2><pre id="sca">:: pick changes to see the assembled ruleset</pre></div>
+</div>
+</div>
+<script>
+"use strict";
+var SEL=[], LIB=[];
+var PRESETS={
+  polynesian:{cons:"p k m n l h w", vows:"a e i o u", pats:"CV V CV CVV"},
+  pie:{cons:"p t k b d g s m n r l w j h", vows:"a e i o u", pats:"CVC CV CCVC VC CVCC"},
+  semitic:{cons:"p t k b d g s z sh m n r l h q", vows:"a i u", pats:"CVC CV CVCC"},
+  sinitic:{cons:"p t k m n s l h ch sh w j", vows:"a e i o u", pats:"CV CVn CV"}
+};
+var pr=document.getElementById('presets');
+Object.keys(PRESETS).forEach(function(k){
+  var b=document.createElement('button'); b.textContent=k;
+  b.onclick=function(){
+    document.getElementById('cons').value=PRESETS[k].cons;
+    document.getElementById('vows').value=PRESETS[k].vows;
+    document.getElementById('pats').value=PRESETS[k].pats;
+  };
+  pr.appendChild(b);
+});
+fetch('/api/soundlib').then(function(r){return r.json();}).then(function(j){
+  LIB=j;
+  var el=document.getElementById('chgs');
+  j.forEach(function(c){
+    var b=document.createElement('button'); b.textContent=c.name; b.title=c.desc+' — '+c.attested;
+    b.onclick=function(){
+      var i=SEL.indexOf(c.id);
+      if(i>=0){ SEL.splice(i,1); b.classList.remove('on'); }
+      else { SEL.push(c.id); b.classList.add('on'); }
+      document.getElementById('sel').textContent = SEL.length ? SEL.join(' \u2192 ') : 'none — words will be shown unevolved';
+    };
+    el.appendChild(b);
+  });
+});
+function run(){
+  var body='consonants='+document.getElementById('cons').value.trim()+
+    '\nvowels='+document.getElementById('vows').value.trim()+
+    '\npatterns='+document.getElementById('pats').value.trim()+
+    '\nn='+document.getElementById('n').value+
+    '\nseed='+document.getElementById('seed').value+
+    '\nchanges='+SEL.join(' ');
+  fetch('/api/phono',{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){
+    if(j.error){ document.getElementById('sca').textContent='error: '+j.error; return; }
+    document.getElementById('sca').textContent=j.sca||':: no changes selected — proto words shown as-is';
+    var h='<table><tr><th>PROTO</th><th>DAUGHTER</th></tr>';
+    j.rows.forEach(function(r){
+      h+='<tr><td>'+r.proto+'</td><td><b>'+(r.evolved||r.proto)+'</b></td></tr>';
+    });
+    document.getElementById('rows').innerHTML=h+'</table>';
+  });
+}
+</script>
+</body></html>

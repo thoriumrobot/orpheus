@@ -88,3 +88,22 @@ and modules; the right holds the System.Log (the command trail — middle-click
 any line to re-run it) and the Modules index. `System.Sentiment <text>` scores
 text in place with the trained classifier; `Doc.Score <name>` scores a whole
 document into its evidence table.
+
+## The toolbox
+
+Beyond the core texts: **✎ Draw** (header) is a full vector graphics editor —
+shapes, pen, text, colors, move/resize, layering, undo; Store a drawing and
+embed it in any text with `drawing <name>` (one tool calling another).
+**Debug** opens the Loom call tracer: `debug (fib 6)` records every arm call
+with its arguments and result as an expandable tree (click to step in;
+`debug break=ARM …` is the breakpoint; `latte debug` is the CLI form).
+**Conlang** is the linguistics suite — the sound-change library (`soundlib
+grimm1 verner words=pater`), the phonology builder (`phono preset=pie n=12
+changes=grimm1,verner`), and their full pages at /soundlib and /phono; the
+builder calls the word generator calls the change library calls SCArs.
+**Xiangqi** (/xiangqi) plays Chinese chess against the trained model — piece
+values learned by gradient descent in lib/xiangqiml.lat, driving a native
+4-ply search verified against the Latte rules. And the ray tracer's scene is
+Latte data: `trace w=96 h=72 scene=[ … ]` renders any sphere list (the format
+is documented in Trace.Tool), or edit the `spheres` arm of lib/trace.lat and
+Compile.

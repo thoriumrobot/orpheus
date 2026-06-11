@@ -286,6 +286,27 @@ fn tar_fuel(subject0: &N, formula0: &N, fuel: &mut u64, tier: bool) -> Eval {
             // 11 HINT (tail body) — and the jet dispatch point.
             11 => {
                 let (h, g) = cell2(&tail, "11")?;
+                // THE DEBUGGER's hook: hints whose tag begins with "dbg:" mark
+                // arm calls when a trace is active (latte debug / /api/debug).
+                // Enter is recorded with the call's arguments (axis 6 of the
+                // subject = the args the compiler installed), the body runs,
+                // and Exit records the result — giving the full call tree.
+                if let Knot::Atom(tag) = &**h {
+                    if tracer_active() {
+                        let name = String::from_utf8_lossy(&tag.bytes_le()).into_owned();
+                        if let Some(arm) = name.strip_prefix("dbg:") {
+                            let args = crate::loom::slot(&crate::atom::Atom::from_u128(3), &subject)
+                                .unwrap_or_else(|_| num_n(0));
+                            tracer_enter(arm, &args);
+                            let r = tar_fuel(&subject, g, fuel, tier);
+                            match &r {
+                                Ok(v) => tracer_exit(Some(v)),
+                                Err(_) => tracer_exit(None),
+                            }
+                            return r;
+                        }
+                    }
+                }
                 // Static hint = a bare atom tag. If it names a registered jet and
                 // jets are enabled, run the native path instead of the formula.
                 if let Knot::Atom(tag) = &**h {
@@ -415,6 +436,67 @@ pub fn f_axis(axis: u128) -> N {
 pub fn f_quote(v: N) -> N {
     cell(crate::knot::num(1), v)
 }
+// ============================================================================
+// THE TRACER (the debugger's recorder). When active, every arm call compiled
+// with a `dbg:` hint records Enter(name, args) / Exit(result) events with
+// nesting depth — the GUI and CLI assemble these into the call tree. Capped
+// so a deep run cannot exhaust memory; the cap is reported when hit.
+// ============================================================================
+
+#[derive(Clone)]
+pub enum TraceEvent {
+    Enter(String, String), // arm name, rendered args
+    Exit(Option<String>),  // rendered result (None = the call crashed)
+}
+
+thread_local! {
+    static TRACER: std::cell::RefCell<Option<Vec<TraceEvent>>> = const { std::cell::RefCell::new(None) };
+}
+const TRACE_CAP: usize = 6000;
+
+fn num_n(v: u128) -> N {
+    crate::knot::num(v)
+}
+
+pub fn tracer_begin() {
+    TRACER.with(|t| *t.borrow_mut() = Some(Vec::new()));
+}
+pub fn tracer_take() -> Vec<TraceEvent> {
+    TRACER.with(|t| t.borrow_mut().take().unwrap_or_default())
+}
+fn tracer_active() -> bool {
+    TRACER.with(|t| t.borrow().is_some())
+}
+fn render_short(n: &N) -> String {
+    let s = crate::net::show_state(n);
+    if s.chars().count() > 90 {
+        let cut: String = s.chars().take(87).collect();
+        format!("{}…", cut)
+    } else {
+        s
+    }
+}
+fn tracer_enter(arm: &str, args: &N) {
+    let a = render_short(args);
+    TRACER.with(|t| {
+        if let Some(v) = t.borrow_mut().as_mut() {
+            if v.len() < TRACE_CAP {
+                v.push(TraceEvent::Enter(arm.to_string(), a));
+            }
+        }
+    });
+}
+fn tracer_exit(result: Option<&N>) {
+    let r = result.map(render_short);
+    TRACER.with(|t| {
+        if let Some(v) = t.borrow_mut().as_mut() {
+            if v.len() < TRACE_CAP + 4096 {
+                v.push(TraceEvent::Exit(r));
+            }
+        }
+    });
+}
+
 /// Wrap a formula with a static jet hint: `[11 <name-cord> body]`.
 pub fn f_jet(name: &str, body: N) -> N {
     cell(crate::knot::num(11), cell(crate::knot::cord(name), body))

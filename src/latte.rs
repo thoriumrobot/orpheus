@@ -664,6 +664,8 @@ pub const PLOT_LAT: &str = include_str!("../lib/plot.lat");
 pub const VEC_LAT: &str = include_str!("../lib/vec.lat");
 pub const CHESS_LAT: &str = include_str!("../lib/chess.lat");
 pub const CHESSML_LAT: &str = include_str!("../lib/chessml.lat");
+pub const XIANGQI_LAT: &str = include_str!("../lib/xiangqi.lat");
+pub const XIANGQIML_LAT: &str = include_str!("../lib/xiangqiml.lat");
 /// System commands written in Latte (the Oberon-style command set), via `import tool`.
 pub const TOOL_LAT: &str = include_str!("../lib/tool.lat");
 
@@ -690,6 +692,8 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "vec" => Some(VEC_LAT),
         "chess" => Some(CHESS_LAT),
         "chessml" => Some(CHESSML_LAT),
+        "xiangqi" => Some(XIANGQI_LAT),
+        "xiangqiml" => Some(XIANGQIML_LAT),
         "tool" => Some(TOOL_LAT),
         _ => None,
     }
@@ -765,7 +769,7 @@ pub fn runtime_lib_names() -> Vec<String> {
 /// scope without manual `import`s (later libraries shadow earlier ones on name clashes).
 pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml",
+        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
     ]
     .iter()
@@ -918,7 +922,7 @@ pub fn store_package(src: &str) -> Result<std::path::PathBuf, String> {
 pub fn builtin_lib_names() -> Vec<String> {
     let mut v: Vec<String> = [
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
-        "tool",
+        "xiangqi", "xiangqiml", "tool",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -974,7 +978,13 @@ fn compile_arms(arms: &[Arm]) -> Result<(N, Vec<(String, u128)>), String> {
             funcs: funcs.clone(),
             module_core: Some(1),
         };
-        arm_formulas.push(gen(body, &env)?);
+        let mut f = gen(body, &env)?;
+        // debug-compile mode: wrap every arm in a `dbg:<name>` hint so Loom's
+        // tracer can record the call tree (the basis of `latte debug`)
+        if debug_compile_on() {
+            f = crate::loom::f_jet(&format!("dbg:{}", _name), f);
+        }
+        arm_formulas.push(f);
     }
     let battery = build_battery(&arm_formulas);
     let core = cell(battery, num(0));
@@ -1036,6 +1046,82 @@ fn split_imports(src: &str) -> (Vec<String>, String) {
 }
 
 /// Evaluate a bare expression with the given built-in libraries linked in scope.
+// ---- THE DEBUGGER -----------------------------------------------------------
+thread_local! {
+    static DEBUG_COMPILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn debug_compile_on() -> bool {
+    DEBUG_COMPILE.with(|d| d.get())
+}
+
+/// One node of the recorded call tree.
+pub struct TraceNode {
+    pub name: String,
+    pub args: String,
+    pub result: Option<String>,
+    pub children: Vec<TraceNode>,
+}
+
+/// Run `expr` with every arm call traced (the debugger's engine): compiles the
+/// program with `dbg:` hints, reduces it on Loom with the tracer recording
+/// Enter/Exit events, and assembles the call TREE. `focus` (a breakpoint name)
+/// keeps only subtrees rooted at that arm. Returns (result, roots, truncated).
+pub fn debug_trace(
+    expr_src: &str,
+    libs: &[&str],
+    focus: Option<&str>,
+) -> Result<(N, Vec<TraceNode>, bool), String> {
+    DEBUG_COMPILE.with(|d| d.set(true));
+    crate::loom::tracer_begin();
+    let out = run_with_libs(expr_src, libs);
+    let events = crate::loom::tracer_take();
+    DEBUG_COMPILE.with(|d| d.set(false));
+    let result = out?;
+    let truncated = events.len() >= 6000;
+    // assemble the event stream into a tree
+    fn build(events: &[crate::loom::TraceEvent], i: &mut usize) -> Vec<TraceNode> {
+        let mut out = Vec::new();
+        while *i < events.len() {
+            match &events[*i] {
+                crate::loom::TraceEvent::Enter(name, args) => {
+                    *i += 1;
+                    let children = build(events, i);
+                    let result = if *i < events.len() {
+                        if let crate::loom::TraceEvent::Exit(r) = &events[*i] {
+                            *i += 1;
+                            r.clone()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    out.push(TraceNode { name: name.clone(), args: args.clone(), result, children });
+                }
+                crate::loom::TraceEvent::Exit(_) => return out,
+            }
+        }
+        out
+    }
+    let mut i = 0;
+    let mut roots = build(&events, &mut i);
+    if let Some(f) = focus {
+        fn collect(nodes: Vec<TraceNode>, f: &str, out: &mut Vec<TraceNode>) {
+            for n in nodes {
+                if n.name == f {
+                    out.push(n);
+                } else {
+                    collect(n.children, f, out);
+                }
+            }
+        }
+        let mut focused = Vec::new();
+        collect(roots, f, &mut focused);
+        roots = focused;
+    }
+    Ok((result, roots, truncated))
+}
+
 pub fn run_with_libs(expr_src: &str, libs: &[&str]) -> Result<N, String> {
     crate::jets::register_std_jets();
     let ast = parse(expr_src)?;
@@ -1604,5 +1690,22 @@ mod tests {
                    if (i == b) then acc else again(+(acc), +(i)) end";
         let s = cell(num(10), num(5));
         assert_eq!(run(src, s, &[("a", 2), ("b", 3)]), num(15));
+    }
+
+    #[test]
+    fn debugger_traces_nested_calls() {
+        let (result, roots, truncated) = debug_trace("(fib 5)", &["std", "tool"], None).unwrap();
+        assert_eq!(crate::net::show_state(&result), "5");
+        assert!(!truncated);
+        // __main wraps everything; fib appears beneath with its argument
+        fn find(nodes: &[TraceNode], name: &str) -> bool {
+            nodes.iter().any(|n| n.name == name || find(&n.children, name))
+        }
+        assert!(find(&roots, "fib"), "fib not traced");
+        // focusing keeps only the named arm's subtrees
+        let (_, focused, _) = debug_trace("(fib 5)", &["std", "tool"], Some("fib")).unwrap();
+        assert!(!focused.is_empty() && focused.iter().all(|n| n.name == "fib"));
+        // and a normal (untraced) run still works after the debug run
+        assert!(run_with_libs("(fib 5)", &["std", "tool"]).is_ok());
     }
 }

@@ -7,7 +7,7 @@
  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin:0; background:#0f1020; color:#e8e8f0; }
  header { padding:10px 16px; background:#16182e; border-bottom:1px solid #2a2d50; }
  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.3px; }
- .wrap { display:flex; gap:10px; padding:10px; height: calc(100vh - 112px); box-sizing:border-box; }
+ .wrap { display:flex; gap:10px; padding:10px; height: calc(100vh - 146px); box-sizing:border-box; }
  .pane { flex:1; min-width:0; display:flex; flex-direction:column; }
  .pane .lbl { font-size:11px; color:#8a8ab0; margin:0 2px 6px; text-transform:uppercase; letter-spacing:.6px; }
  textarea { flex:1; box-sizing:border-box; background:#0b0c1a; color:#cfe8ff; border:1px solid #2a2d50; border-radius:8px; padding:12px; font:13px/1.5 ui-monospace, monospace; resize:none; outline:none; }
@@ -26,6 +26,24 @@
  .fontbtn { background:#23264a; padding:4px 9px; }
 </style></head>
 <body>
+<div class="orpheus-nav" style="position:sticky;top:0;z-index:90;display:flex;gap:14px;align-items:center;padding:6px 14px;background:linear-gradient(#262633,#1c1c26);border-bottom:2px solid #33387e;font:12px ui-monospace,'SF Mono',Menlo,Consolas,monospace;box-shadow:0 1px 6px #0004">
+<a href="/" style="color:#cfd3ff;text-decoration:none;font-weight:700">&#8592; System</a>
+<span style="color:#55557a">&#183;</span>
+<a href="/docs" style="color:#c9c4e8;text-decoration:none">Docs</a>
+<a href="/draw" style="color:#c9c4e8;text-decoration:none">Draw</a>
+<a href="/trade" style="color:#c9c4e8;text-decoration:none">Trade</a>
+<a href="/chart" style="color:#c9c4e8;text-decoration:none">Charts</a>
+<a href="/fin" style="color:#c9c4e8;text-decoration:none">Finance</a>
+<a href="/plan" style="color:#c9c4e8;text-decoration:none">Plan</a>
+<a href="/derive" style="color:#c9c4e8;text-decoration:none">Derive</a>
+<a href="/phono" style="color:#c9c4e8;text-decoration:none">Phonology</a>
+<a href="/soundlib" style="color:#c9c4e8;text-decoration:none">Sound&nbsp;Changes</a>
+<a href="/chess" style="color:#c9c4e8;text-decoration:none">Chess</a>
+<a href="/xiangqi" style="color:#c9c4e8;text-decoration:none">Xiangqi</a>
+<a href="/gpu" style="color:#c9c4e8;text-decoration:none">GPU</a>
+<a href="/editor" style="color:#c9c4e8;text-decoration:none">Editor</a>
+</div>
+
 <header><h1>Latte · Facet WYSIWYG — edit on the left, see it rendered live on the right &nbsp; <span style="color:#8a8ab0;font-weight:400;font-size:12px">Ctrl/⌘+S save · Ctrl/⌘+F find · Esc close</span></h1></header>
 <div id="findbar">
   <input id="findq" placeholder="find…" spellcheck="false">

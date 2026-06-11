@@ -259,7 +259,18 @@ fn trace_field(n: &crate::knot::N) -> (Vec<u32>, usize, usize) {
 /// Run the Latte ray tracer (lib/trace.lat) at `w`x`h` and return (SVG, engine, ms).
 /// Tries the Anvil native compiler first; falls back to the (jet-accelerated) interpreter.
 pub fn ray_trace(w: usize, h: usize) -> (String, &'static str, u128) {
-    let expr = format!("(render {} {})", w, h);
+    ray_trace_scene(None, w, h)
+}
+
+/// Render an ARBITRARY scene: `scene` is a Latte expression evaluating to a
+/// sphere list `[ [center [radius [color [reflectivity 0]]]] … 0 ]` (centers
+/// and colors via `v3`, reflectivity 0..1000). The scene is data, so any tool
+/// — or any text in the GUI — can construct one and hand it to the tracer.
+pub fn ray_trace_scene(scene: Option<&str>, w: usize, h: usize) -> (String, &'static str, u128) {
+    let expr = match scene {
+        Some(sc) => format!("(rendersc {} {} {})", sc.trim(), w, h),
+        None => format!("(render {} {})", w, h),
+    };
     let libs: Vec<String> = crate::latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
     let t0 = std::time::Instant::now();
@@ -285,16 +296,23 @@ pub fn ray_trace(w: usize, h: usize) -> (String, &'static str, u128) {
 pub fn cmd_trace(args: &[String]) {
     let mut w = 96usize;
     let mut h = 72usize;
+    let mut scene: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--w" | "--width" if i + 1 < args.len() => { w = args[i + 1].parse().unwrap_or(w); i += 1; }
             "--h" | "--height" if i + 1 < args.len() => { h = args[i + 1].parse().unwrap_or(h); i += 1; }
+            "--scene" if i + 1 < args.len() => {
+                // a Latte scene expression, or a file containing one
+                let a = &args[i + 1];
+                scene = Some(std::fs::read_to_string(a).unwrap_or_else(|_| a.clone()));
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
     }
-    let (svg, engine, ms) = ray_trace(w.clamp(16, 480), h.clamp(12, 360));
+    let (svg, engine, ms) = ray_trace_scene(scene.as_deref(), w.clamp(16, 480), h.clamp(12, 360));
     println!("{}", svg);
     eprintln!("\nray-traced {}x{} in {} ms — {} — scene, shading and camera all in lib/trace.lat", w, h, ms, engine);
 }

@@ -444,6 +444,400 @@ pub fn engine_move(board_list: &[u128], side: u128, max_depth: u32) -> Option<(u
     best.map(|(f, t)| (f as u128, t as u128))
 }
 
+// ============================================================================
+// XIANGQI. The same architecture, server-local: rules in lib/xiangqi.lat on an
+// unbounded Machine; the opponent is the TRAINED MODEL of lib/xiangqiml.lat
+// (a linear evaluator whose piece values are learned by gradient descent in
+// Latte) searching 2 plies of alpha-beta. State lives in a process-wide slot.
+// ============================================================================
+
+fn xq_rules() -> Option<&'static Machine> {
+    static R: OnceLock<Option<Machine>> = OnceLock::new();
+    R.get_or_init(|| Machine::new(&["std", "xiangqi"]).ok()).as_ref()
+}
+
+struct XqAi {
+    ml: Machine,
+    weights: N,
+}
+fn xq_ai() -> Option<&'static XqAi> {
+    static A: OnceLock<Option<XqAi>> = OnceLock::new();
+    A.get_or_init(|| {
+        let ml = Machine::new(&["std", "xiangqi", "num", "xiangqiml"]).ok()?;
+        let weights = ml.call("xtrained", num(250)).ok()?;
+        Some(XqAi { ml, weights })
+    })
+    .as_ref()
+}
+
+fn xq_slot() -> &'static std::sync::Mutex<Option<N>> {
+    static S: OnceLock<std::sync::Mutex<Option<N>>> = OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(None))
+}
+fn xq_current() -> Option<N> {
+    let mut g = xq_slot().lock().unwrap();
+    if g.is_none() {
+        *g = xq_rules()?.call("xqinitial", num(0)).ok();
+    }
+    g.clone()
+}
+
+/// The learned piece values, for display: [soldier horse elephant chariot cannon advisor] ×1000.
+pub fn xq_learned_values() -> Vec<i128> {
+    let a = match xq_ai() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    // weights are signed nums [sign mag]
+    let mut out = Vec::new();
+    let mut cur = a.weights.clone();
+    while let crate::knot::Knot::Cell(h, t) = &*cur {
+        if let crate::knot::Knot::Cell(sg, mag) = &**h {
+            let sgn = sg.as_atom().and_then(|x| x.to_u128()).unwrap_or(0);
+            let m = mag.as_atom().and_then(|x| x.to_u128()).unwrap_or(0) as i128;
+            out.push(if sgn == 0 { m } else { -m });
+        }
+        cur = t.clone();
+    }
+    out
+}
+
+/// Handle a /api/xiangqi verb; returns the JSON state afterwards.
+pub fn xq_command(verb: &str, f: Option<u128>, t: Option<u128>) -> String {
+    match verb {
+        "new" => {
+            *xq_slot().lock().unwrap() = xq_rules().and_then(|r| r.call("xqinitial", num(0)).ok());
+        }
+        "move" => {
+            if let (Some(f), Some(t), Some(st), Some(r)) = (f, t, xq_current(), xq_rules()) {
+                // only apply moves the Latte rules call legal
+                let legal = r
+                    .call("xqlegal", st.clone())
+                    .map(|n| move_list(&n))
+                    .unwrap_or_default();
+                if legal.iter().any(|&(lf, lt)| lf == f && lt == t) {
+                    let (board, side) = xq_board_side(&st);
+                    let bn = vec_to_list(&board);
+                    let mv = cell(num(f), cell(num(t), num(0)));
+                    if let Ok(ns) = r.call("xqapply", cell(bn, cell(num(side), mv))) {
+                        *xq_slot().lock().unwrap() = Some(ns);
+                    }
+                }
+            }
+        }
+        "ai" => {
+            if let (Some(st), Some(r)) = (xq_current(), xq_rules()) {
+                if let Some((f, t2)) = xq_model_move(&st) {
+                    let (board, side) = xq_board_side(&st);
+                    let bn = vec_to_list(&board);
+                    let mvn = cell(num(f), cell(num(t2), num(0)));
+                    if let Ok(ns) = r.call("xqapply", cell(bn, cell(num(side), mvn))) {
+                        *xq_slot().lock().unwrap() = Some(ns);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    xq_json()
+}
+
+/// The trained model's move. The MODEL is the Latte-learned evaluator of
+/// lib/xiangqiml.lat (piece values fit by gradient descent on Loom, once per
+/// process); the SEARCH runs natively here at 4 plies, because a 90-square
+/// alpha-beta on the Loom interpreter exceeds any reasonable fuel budget and
+/// Anvil compiles per-expression (a fresh board literal would mean a fresh
+/// native build every move). Rules mirror lib/xiangqi.lat exactly, and the
+/// returned move is verified against the Latte `xqlegal` list — the two
+/// implementations police each other, as with chess.
+fn xq_model_move(state: &N) -> Option<(u128, u128)> {
+    let (board, side) = xq_board_side(state);
+    let legal = xq_rules()?
+        .call("xqlegal", state.clone())
+        .map(|n| move_list(&n))
+        .unwrap_or_default();
+    if legal.is_empty() {
+        return None;
+    }
+    let w = xq_learned_values(); // the TRAINED weights (×1000), from Latte
+    let weights: [i32; 6] = if w.len() == 6 {
+        [w[0] as i32, w[1] as i32, w[2] as i32, w[3] as i32, w[4] as i32, w[5] as i32]
+    } else {
+        [1000, 4000, 2000, 9000, 4500, 2000]
+    };
+    let b = xqb_of(&board);
+    if let Some((f, t)) = xq_search(&b, side as i8, 4, &weights) {
+        if legal.iter().any(|&(lf, lt)| lf == f as u128 && lt == t as u128) {
+            return Some((f as u128, t as u128));
+        }
+    }
+    // fall back to the first Latte-legal move (never returns an illegal one)
+    legal.first().copied()
+}
+
+// ---- the native xiangqi search (rules mirror lib/xiangqi.lat) ---------------
+type XqBoard = [i8; 90];
+fn xqb_of(list: &[u128]) -> XqBoard {
+    let mut b = [0i8; 90];
+    for (i, &p) in list.iter().take(90).enumerate() {
+        b[i] = p as i8;
+    }
+    b
+}
+fn xqcolor(p: i8) -> i8 {
+    if p == 0 { 0 } else if p < 8 { 1 } else { 2 }
+}
+fn xqkind(p: i8) -> i8 {
+    if p == 0 { 0 } else if p < 8 { p } else { p - 7 }
+}
+/// model evaluation from White's view: the LEARNED piece values (general = huge)
+fn xqeval(b: &XqBoard, w: &[i32; 6]) -> i32 {
+    let mut e = 0i32;
+    for &p in b.iter() {
+        if p == 0 {
+            continue;
+        }
+        let k = xqkind(p);
+        let v = if k == 7 { 1_000_000 } else { w[(k - 1) as usize] };
+        e += if xqcolor(p) == 1 { v } else { -v };
+    }
+    e
+}
+fn xq_onboard(r: i32, c: i32) -> bool {
+    (0..10).contains(&r) && (0..9).contains(&c)
+}
+fn xq_inpalace(side: i8, r: i32, c: i32) -> bool {
+    (3..=5).contains(&c) && if side == 1 { (7..=9).contains(&r) } else { (0..=2).contains(&r) }
+}
+fn xq_ownside(side: i8, r: i32) -> bool {
+    if side == 1 { r >= 5 } else { r <= 4 }
+}
+fn xq_moves(b: &XqBoard, side: i8) -> Vec<(usize, usize)> {
+    let mut caps: Vec<(i32, usize, usize)> = Vec::new();
+    let mut quiet: Vec<(usize, usize)> = Vec::new();
+    let at = |r: i32, c: i32| -> i8 { if xq_onboard(r, c) { b[(r * 9 + c) as usize] } else { -1 } };
+    let mut push = |from: usize, r: i32, c: i32| {
+        if !xq_onboard(r, c) {
+            return;
+        }
+        let to = (r * 9 + c) as usize;
+        let v = b[to];
+        if v != 0 && xqcolor(v) == side {
+            return;
+        }
+        if v != 0 {
+            caps.push((xqkind(v) as i32 * 10 - xqkind(b[from]) as i32, from, to));
+        } else {
+            quiet.push((from, to));
+        }
+    };
+    for from in 0..90usize {
+        let p = b[from];
+        if p == 0 || xqcolor(p) != side {
+            continue;
+        }
+        let (r, c) = ((from / 9) as i32, (from % 9) as i32);
+        match xqkind(p) {
+            1 => {
+                // soldier: forward; sideways after crossing the river
+                let dir: i32 = if side == 1 { -1 } else { 1 };
+                push(from, r + dir, c);
+                let crossed = if side == 1 { r <= 4 } else { r >= 5 };
+                if crossed {
+                    push(from, r, c - 1);
+                    push(from, r, c + 1);
+                }
+            }
+            2 => {
+                // horse with leg blocks
+                for (lr, lc, mr, mc) in [
+                    (-1i32, 0i32, -2i32, -1i32), (-1, 0, -2, 1), (1, 0, 2, -1), (1, 0, 2, 1),
+                    (0, -1, -1, -2), (0, -1, 1, -2), (0, 1, -1, 2), (0, 1, 1, 2),
+                ] {
+                    if at(r + lr, c + lc) == 0 {
+                        push(from, r + mr, c + mc);
+                    }
+                }
+            }
+            3 => {
+                // elephant: 2-diagonal, eye clear, own side of the river
+                for (dr, dc) in [(-2i32, -2i32), (-2, 2), (2, -2), (2, 2)] {
+                    if at(r + dr / 2, c + dc / 2) == 0 && xq_onboard(r + dr, c + dc) && xq_ownside(side, r + dr) {
+                        push(from, r + dr, c + dc);
+                    }
+                }
+            }
+            4 => {
+                // chariot
+                for (dr, dc) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (mut rr, mut cc) = (r + dr, c + dc);
+                    while xq_onboard(rr, cc) {
+                        push(from, rr, cc);
+                        if b[(rr * 9 + cc) as usize] != 0 {
+                            break;
+                        }
+                        rr += dr;
+                        cc += dc;
+                    }
+                }
+            }
+            5 => {
+                // cannon: slide while empty; capture over exactly one screen
+                for (dr, dc) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (mut rr, mut cc) = (r + dr, c + dc);
+                    let mut jumped = false;
+                    while xq_onboard(rr, cc) {
+                        let v = b[(rr * 9 + cc) as usize];
+                        if !jumped {
+                            if v == 0 {
+                                push(from, rr, cc);
+                            } else {
+                                jumped = true;
+                            }
+                        } else if v != 0 {
+                            if xqcolor(v) != side {
+                                push(from, rr, cc);
+                            }
+                            break;
+                        }
+                        rr += dr;
+                        cc += dc;
+                    }
+                }
+            }
+            6 => {
+                // advisor: 1 diagonal within the palace
+                for (dr, dc) in [(-1i32, -1i32), (-1, 1), (1, -1), (1, 1)] {
+                    if xq_inpalace(side, r + dr, c + dc) {
+                        push(from, r + dr, c + dc);
+                    }
+                }
+            }
+            7 => {
+                // general: 1 orthogonal within the palace
+                for (dr, dc) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    if xq_inpalace(side, r + dr, c + dc) {
+                        push(from, r + dr, c + dc);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    caps.sort_by(|a, b2| b2.0.cmp(&a.0));
+    let mut out: Vec<(usize, usize)> = caps.into_iter().map(|(_, f, t)| (f, t)).collect();
+    out.extend(quiet);
+    out
+}
+fn xq_make(b: &XqBoard, f: usize, t: usize) -> XqBoard {
+    let mut nb = *b;
+    nb[t] = nb[f];
+    nb[f] = 0;
+    nb
+}
+fn xq_general(b: &XqBoard, side: i8) -> Option<usize> {
+    let g = if side == 1 { 7 } else { 14 };
+    b.iter().position(|&p| p == g)
+}
+fn xq_facing(b: &XqBoard) -> bool {
+    if let (Some(wg), Some(bg)) = (xq_general(b, 1), xq_general(b, 2)) {
+        if wg % 9 == bg % 9 {
+            let c = wg % 9;
+            let (lo, hi) = (bg / 9, wg / 9);
+            return ((lo + 1)..hi).all(|r| b[r * 9 + c] == 0);
+        }
+    }
+    false
+}
+fn xq_ab(b: &XqBoard, side: i8, depth: u32, mut alpha: i32, beta: i32, w: &[i32; 6]) -> i32 {
+    // captured-general / flying-general terminals (pseudo-move search)
+    if xq_general(b, 1).is_none() {
+        return if side == 1 { -2_000_000 } else { 2_000_000 };
+    }
+    if xq_general(b, 2).is_none() {
+        return if side == 1 { 2_000_000 } else { -2_000_000 };
+    }
+    if depth == 0 {
+        let e = xqeval(b, w);
+        return if side == 1 { e } else { -e };
+    }
+    let mut any = false;
+    for (f, t) in xq_moves(b, side) {
+        let nb = xq_make(b, f, t);
+        if xq_facing(&nb) {
+            continue; // never create a flying-general position
+        }
+        any = true;
+        let v = -xq_ab(&nb, 3 - side, depth - 1, -beta, -alpha, w);
+        if v >= beta {
+            return beta;
+        }
+        if v > alpha {
+            alpha = v;
+        }
+    }
+    if !any {
+        return -1_500_000; // stuck loses in xiangqi
+    }
+    alpha
+}
+fn xq_search(b: &XqBoard, side: i8, depth: u32, w: &[i32; 6]) -> Option<(usize, usize)> {
+    let mut best = None;
+    let mut alpha = -3_000_000;
+    let beta = 3_000_000;
+    for (f, t) in xq_moves(b, side) {
+        let nb = xq_make(b, f, t);
+        if xq_facing(&nb) {
+            continue;
+        }
+        let v = -xq_ab(&nb, 3 - side, depth - 1, -beta, -alpha, w);
+        if v > alpha {
+            alpha = v;
+            best = Some((f, t));
+        }
+    }
+    best
+}
+
+fn xq_board_side(state: &N) -> (Vec<u128>, u128) {
+    let board = head(state).map(|b| list_u(&b)).unwrap_or_default();
+    let side = tail(state).and_then(|t| head(&t)).map(|s| u(&s)).unwrap_or(1);
+    (board, side)
+}
+
+fn vec_to_list(v: &[u128]) -> N {
+    let mut acc = num(0);
+    for x in v.iter().rev() {
+        acc = cell(num(*x), acc);
+    }
+    acc
+}
+
+pub fn xq_json() -> String {
+    let st = match xq_current() {
+        Some(s) => s,
+        None => return "{\"error\":\"xiangqi engine unavailable\"}".into(),
+    };
+    let (board, side) = xq_board_side(&st);
+    let r = xq_rules();
+    let status = r
+        .and_then(|r| r.call("xqstatus", st.clone()).ok())
+        .map(|n| u(&n))
+        .unwrap_or(0);
+    let legal: Vec<(u128, u128)> = r
+        .and_then(|r| r.call("xqlegal", st.clone()).ok())
+        .map(|n| move_list(&n))
+        .unwrap_or_default();
+    let vals = xq_learned_values();
+    let board_s = board.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let legal_s = legal.iter().map(|(f, t)| format!("[{},{}]", f, t)).collect::<Vec<_>>().join(",");
+    let vals_s = vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    format!(
+        "{{\"board\":[{}],\"side\":{},\"status\":{},\"legal\":[{}],\"learned\":[{}]}}",
+        board_s, side, status, legal_s, vals_s
+    )
+}
+
 // ---- noun helpers ----------------------------------------------------------
 fn head(n: &N) -> Option<N> {
     if let Knot::Cell(h, _) = &**n { Some(h.clone()) } else { None }
@@ -861,6 +1255,34 @@ mod tests {
                 .unwrap()
                 .call("apply", crate::knot::cell(crate::knot::num(f), crate::knot::cell(crate::knot::num(t), state.clone())))
                 .unwrap_or(state);
+        }
+    }
+
+    #[test]
+    fn xq_trained_model_plays_a_legal_opening_move() {
+        let st = super::xq_rules().expect("rules machine").call("xqinitial", crate::knot::num(0)).unwrap();
+        let (f, t) = super::xq_model_move(&st).expect("a model move (Anvil or Loom fallback)");
+        let legal = super::xq_rules().unwrap().call("xqlegal", st).map(|n| super::move_list(&n)).unwrap();
+        assert!(legal.iter().any(|&(lf, lt)| lf == f && lt == t), "model move {}->{} not legal", f, t);
+    }
+
+    #[test]
+    fn xq_self_play_stays_latte_legal() {
+        // the native searcher (driven by the Latte-trained weights) must always
+        // produce moves the Latte rules call legal, for both sides
+        let r = super::xq_rules().unwrap();
+        let mut st = r.call("xqinitial", crate::knot::num(0)).unwrap();
+        for _ply in 0..8 {
+            let legal = r.call("xqlegal", st.clone()).map(|n| super::move_list(&n)).unwrap();
+            if legal.is_empty() {
+                break;
+            }
+            let (f, t) = super::xq_model_move(&st).expect("model move");
+            assert!(legal.iter().any(|&(lf, lt)| lf == f && lt == t), "{}->{} not legal", f, t);
+            let (board, side) = super::xq_board_side(&st);
+            let bn = super::vec_to_list(&board);
+            let mv = crate::knot::cell(crate::knot::num(f), crate::knot::cell(crate::knot::num(t), crate::knot::num(0)));
+            st = r.call("xqapply", crate::knot::cell(bn, crate::knot::cell(crate::knot::num(side), mv))).unwrap();
         }
     }
 }

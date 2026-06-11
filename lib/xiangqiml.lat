@@ -1,0 +1,143 @@
+:: ===========================================================================
+:: xiangqiml.lat — a machine-learned xiangqi evaluator, trained in Latte.
+::
+:: The model mirrors chessml.lat: a linear evaluator of a position from
+:: White's (Red's) view, value(board) = w · feat(board), where feat is the
+:: per-piece-type material difference for [soldier horse elephant chariot
+:: cannon advisor], and w is LEARNED by batch gradient descent against
+:: teacher-labelled positions — so the model learns the classical xiangqi
+:: piece values (soldier 1, horse 4, elephant 2, chariot 9, cannon 4.5,
+:: advisor 2) from data. The learned evaluator drives a 2-ply alpha-beta
+:: search (xqchoose_ab): the trained model IS the opponent on /xiangqi.
+:: ===========================================================================
+import xiangqi
+import num
+core xiangqiml
+
+  xsi  = fn [n] -> (npos (mul n 1000))
+
+  xcnt = fn [board code] -> (foldl (fn [acc p] -> if (p == code) then +(acc) else acc) 0 board)
+  xdif = fn [board wc bc] -> (nsub (xsi (xcnt board wc)) (xsi (xcnt board bc)))
+
+  :: feature vector [dSoldier dHorse dElephant dChariot dCannon dAdvisor]
+  xfeat = fn [board] ->
+    [ (xdif board 1 8) [ (xdif board 2 9) [ (xdif board 3 10)
+    [ (xdif board 4 11) [ (xdif board 5 12) [ (xdif board 6 13) 0 ] ] ] ] ] ]
+
+  :: teacher = the classical material score (×1000; cannon = 4.5 -> 4500)
+  xteacher = fn [board] ->
+    (nadd (nmul (xsi 1) (xdif board 1 8))
+    (nadd (nmul (xsi 4) (xdif board 2 9))
+    (nadd (nmul (xsi 2) (xdif board 3 10))
+    (nadd (nmul (xsi 9) (xdif board 4 11))
+    (nadd (nmul [0 4500] (xdif board 5 12))
+          (nmul (xsi 2) (xdif board 6 13)))))))
+
+  xndotv = fn [w x] ->
+    loop with [a = w, b = x, acc = [0 0]] :
+      if (a == 0) then acc else again((tail a), (tail b), (nadd acc (nmul (head a) (head b))))
+    end
+
+  xevalv = fn [board w] -> (xndotv w (xfeat board))
+
+  xnvadd = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (nadd (head x) (head y)) acc ]) end
+  xnvscale = fn [s v] -> (map (fn [vi] -> (nmul s vi)) v)
+  xzeros = fn [k] -> loop with [i = k, acc = 0] : if (i == 0) then acc else again((dec i), [ [0 0] acc ]) end
+
+  xgradstepv = fn [w xs ys lr] ->
+    let n = (xsi (len xs)) in
+    let gv = loop with [px = xs, py = ys, acc = (xzeros (len w))] :
+               if (px == 0) then acc
+               else let e = (nsub (xndotv w (head px)) (head py)) in
+                 again((tail px), (tail py), (xnvadd acc (xnvscale e (head px))))
+             end in
+    loop with [cw = w, cg = gv, acc = 0] :
+      if (cw == 0) then (reverse acc)
+      else again((tail cw), (tail cg), [ (nsub (head cw) (nmul lr (ndiv (head cg) n))) acc ])
+    end
+
+  xlearnw = fn [w xs ys lr iters] ->
+    loop with [cw = w, k = 0] : if (k == iters) then cw else again((xgradstepv cw xs ys lr), +(k)) end
+
+  :: training positions: the opening, then variants with one piece removed
+  :: (squares: 27 Black soldier, 54 White soldier, 1 Black horse, 88 White
+  :: horse, 0 Black chariot, 81 White chariot, 19 Black cannon, 64 White
+  :: cannon, 2 Black elephant, 3 Black advisor)
+  xtrainboards = fn [_] ->
+    let b = (nth (xqinitial 0) 0) in
+    [ b
+    [ (xqsetnth b 27 0)
+    [ (xqsetnth b 54 0)
+    [ (xqsetnth b 1 0)
+    [ (xqsetnth b 88 0)
+    [ (xqsetnth b 0 0)
+    [ (xqsetnth b 81 0)
+    [ (xqsetnth b 19 0)
+    [ (xqsetnth b 64 0)
+    [ (xqsetnth b 2 0)
+    [ (xqsetnth b 3 0) 0 ] ] ] ] ] ] ] ] ] ] ]
+
+  :: train the evaluator: returns the LEARNED piece values (the weight vector)
+  xtrained = fn [iters] ->
+    let bs = (xtrainboards 0) in
+    let xs = (map (fn [bd] -> (xfeat bd)) bs) in
+    let ys = (map (fn [bd] -> (xteacher bd)) bs) in
+    (xlearnw [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] 0 ] ] ] ] ] ] xs ys [0 60] iters)
+
+  :: leaf value from White's view. The search runs over PSEUDO-legal moves (the
+  :: standard engine trick: filtering every node by full legality costs a whole
+  :: attack scan per move), so a captured general is the terminal condition.
+  xleafval = fn [state w] ->
+    let board = (nth state 0) in
+    if ((xqfindgeneral board 1) == 90) then (nnegate (xsi 1000))
+    else if ((xqfindgeneral board 2) == 90) then (xsi 1000)
+    else (xevalv board w)
+
+  xgensgone = fn [board] ->
+    if ((xqfindgeneral board 1) == 90) then 0
+    else if ((xqfindgeneral board 2) == 90) then 0 else 1
+
+  :: alpha-beta minimax (White maximises, Black minimises), value White's view
+  xminimax = fn [state depth w a b] ->
+    if (depth == 0) then (xleafval state w)
+    else if ((xgensgone (nth state 0)) == 0) then (xleafval state w)
+    else
+      let ms = (xqpseudo (nth state 0) (nth state 1)) in
+      if (ms == 0) then (xleafval state w)
+      else
+        let board = (nth state 0) in let side = (nth state 1) in
+        if (side == 1)
+          then loop with [c = ms, alpha = a, val = (nnegate (xsi 100000))] :
+                 if (c == 0) then val
+                 else (if (nlt b alpha) then val
+                   else
+                     let v = (xminimax (xqapply board side (head c)) (dec depth) w alpha b) in
+                     let nv = (if (nlt val v) then v else val) in
+                     again((tail c), (if (nlt alpha nv) then nv else alpha), nv))
+               end
+          else loop with [c = ms, beta = b, val = (xsi 100000)] :
+                 if (c == 0) then val
+                 else (if (nlt beta a) then val
+                   else
+                     let v = (xminimax (xqapply board side (head c)) (dec depth) w a beta) in
+                     let nv = (if (nlt v val) then v else val) in
+                     again((tail c), (if (nlt nv beta) then nv else beta), nv))
+               end
+
+  :: the trained model's move at `depth` plies (the /xiangqi opponent)
+  xqchoose_ab = fn [state w depth] ->
+    let board = (nth state 0) in let side = (nth state 1) in
+    let ms = (xqlegal state) in
+    if (ms == 0) then 0
+    else
+      let lo = (nnegate (xsi 100000)) in let hi = (xsi 100000) in
+      loop with [c = (tail ms), best = (head ms),
+                 bestv = (xminimax (xqapply board side (head ms)) (dec depth) w lo hi)] :
+        if (c == 0) then best
+        else
+          let m = (head c) in
+          let v = (xminimax (xqapply board side m) (dec depth) w lo hi) in
+          if (if (side == 1) then (nlt bestv v) else (nlt v bestv))
+            then again((tail c), m, v) else again((tail c), best, bestv)
+      end
+end

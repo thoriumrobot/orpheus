@@ -32,6 +32,7 @@ mod marketdata;
 mod viz;
 mod gfx;
 mod gpu;
+mod conlang;
 mod sentiment;
 mod game;
 mod rustgen;
@@ -272,6 +273,63 @@ fn main() {
         "trade" | "advisor" => numerics::cmd_trade(&args[1..]),
         "fetch" => numerics::cmd_fetch(&args[1..]),
         "ta" | "indicators" => numerics::cmd_ta(&args[1..]),
+        "debug" => {
+            // `latte debug [--break ARM] "<expr>"` — run with the tracer and
+            // print the call tree (every arm call: args -> result, nested)
+            let mut focus: Option<String> = None;
+            let mut expr = String::new();
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--break" | "--focus" if i + 1 < args.len() => {
+                        focus = Some(args[i + 1].clone());
+                        i += 1;
+                    }
+                    other => {
+                        if !expr.is_empty() {
+                            expr.push(' ');
+                        }
+                        expr.push_str(other);
+                    }
+                }
+                i += 1;
+            }
+            if expr.is_empty() {
+                eprintln!("usage: latte debug [--break ARM] \"<expr>\"");
+                return;
+            }
+            let libs: Vec<String> = latte::all_libs();
+            let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+            match latte::debug_trace(&expr, &refs, focus.as_deref()) {
+                Ok((result, roots, truncated)) => {
+                    println!("debug — the Loom call tracer (every arm call, nested)\n");
+                    fn pr(n: &latte::TraceNode, depth: usize) {
+                        let pad = "  ".repeat(depth);
+                        println!(
+                            "{}{} {}  ->  {}",
+                            pad,
+                            n.name,
+                            n.args,
+                            n.result.as_deref().unwrap_or("<crash>")
+                        );
+                        for c in &n.children {
+                            pr(c, depth + 1);
+                        }
+                    }
+                    for r in &roots {
+                        pr(r, 0);
+                    }
+                    if roots.is_empty() {
+                        println!("  (no traced calls{})", focus.as_deref().map(|f| format!(" matching --break {}", f)).unwrap_or_default());
+                    }
+                    if truncated {
+                        println!("\n  … trace capped at 6000 calls (narrow it with --break ARM)");
+                    }
+                    println!("\nresult: {}", net::show_state(&result));
+                }
+                Err(e) => eprintln!("debug: {}", e),
+            }
+        }
         "fmt" | "format" => {
             // `latte fmt <file> [--write]` — format a Latte source (stdout, or in place)
             let write = args.iter().any(|a| a == "--write" || a == "-w");

@@ -571,6 +571,17 @@ and never proposes a Latte-illegal move. The Latte-trained linear evaluator
 (`lib/chessml.lat`) remains available as the "play the learned model" mode —
 the documented ML experiment, not the strongest opponent.
 
+## Forecast baselines: HAR earns its place or the report says so
+
+A volatility forecast owes its reader a baseline. The advisor now reports the
+out-of-sample one-step R² of the HAR-RV regression against the RiskMetrics
+EWMA (λ=0.94) and naive persistence, all on the same final-20% test window —
+e.g. "HAR −0.015 · EWMA −0.151 · persistence −0.691". Two honest things are
+visible at once: HAR beats both baselines (it earns its place in the sizing),
+and the absolute out-of-sample R² of one-step daily |return| forecasting is
+near zero (nobody should pretend otherwise). When a baseline matches HAR, the
+line says "the forecast is held humbly" instead.
+
 ## Honest validation: embargo, costs, HAR-RV, conformal bands
 
 Four methodology upgrades keep the advisor's claims defensible:

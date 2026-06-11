@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Sound-Change Library</title>
+<style>
+ body{font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;margin:0;background:#d6d2c4;color:#22222e;font-size:13px}
+ .wrap{max-width:1060px;margin:0 auto;padding:16px}
+ h1{font-size:17px;margin:6px 0 2px}
+ .sub{color:#6b6858;font-size:12px;margin:0 0 14px}
+ .cols{display:flex;gap:14px;align-items:flex-start}
+ .panel{background:#faf8f1;border:1px solid #8e8a7a;border-radius:4px;box-shadow:0 1px 4px #0002;flex:1;min-width:0}
+ .panel h2{font-size:12px;letter-spacing:.6px;margin:0;padding:7px 11px;background:linear-gradient(#cfcaba,#c4bfae);border-bottom:1px solid #8e8a7a;border-radius:4px 4px 0 0}
+ .list{max-height:430px;overflow:auto;padding:6px}
+ .chg{padding:6px 8px;border-bottom:1px solid #eee9da;cursor:pointer;border-radius:3px}
+ .chg:hover{background:#f1eedd}
+ .chg b{color:#33387e}
+ .chg .att{color:#7a7666;font-size:11px}
+ .chg .desc{font-size:12px;color:#44423a;margin-top:1px}
+ .sel .chg{cursor:default}
+ .sel .ord{display:inline-block;width:20px;color:#8a8676}
+ .sel .rm{float:right;color:#8d1f1f;cursor:pointer;padding:0 6px}
+ .sel .rm:hover{font-weight:700}
+ .sel .up{float:right;color:#33387e;cursor:pointer;padding:0 6px}
+ .row{display:flex;gap:8px;align-items:center;padding:10px 12px;flex-wrap:wrap}
+ input[type=text]{font:13px inherit;border:1px solid #8e8a7a;border-radius:3px;padding:6px 8px;flex:1;min-width:240px;background:#fff}
+ button{font:13px inherit;border:1px solid #8e8a7a;border-radius:3px;background:#ece8dc;cursor:pointer;padding:6px 14px}
+ button:hover{background:#fff}
+ button.go{background:#33387e;color:#fff;border-color:#33387e}
+ .out{display:flex;gap:14px;margin-top:14px;align-items:flex-start}
+ table{border-collapse:collapse;width:100%}
+ td,th{border:1px solid #d3cebc;padding:4px 10px;text-align:left;font-size:13px}
+ th{background:#f1ecdd;font-size:11px;letter-spacing:.5px}
+ pre{margin:0;padding:10px;white-space:pre-wrap;font:12px/1.5 inherit;max-height:380px;overflow:auto}
+ .hint{color:#6b6858;font-size:11px;padding:0 12px 10px}
+</style></head>
+<body>
+<div class="orpheus-nav" style="position:sticky;top:0;z-index:90;display:flex;gap:14px;align-items:center;padding:6px 14px;background:linear-gradient(#262633,#1c1c26);border-bottom:2px solid #33387e;font:12px ui-monospace,'SF Mono',Menlo,Consolas,monospace;box-shadow:0 1px 6px #0004">
+<a href="/" style="color:#cfd3ff;text-decoration:none;font-weight:700">&#8592; System</a>
+<span style="color:#55557a">&#183;</span>
+<a href="/docs" style="color:#c9c4e8;text-decoration:none">Docs</a>
+<a href="/draw" style="color:#c9c4e8;text-decoration:none">Draw</a>
+<a href="/trade" style="color:#c9c4e8;text-decoration:none">Trade</a>
+<a href="/chart" style="color:#c9c4e8;text-decoration:none">Charts</a>
+<a href="/fin" style="color:#c9c4e8;text-decoration:none">Finance</a>
+<a href="/plan" style="color:#c9c4e8;text-decoration:none">Plan</a>
+<a href="/derive" style="color:#c9c4e8;text-decoration:none">Derive</a>
+<a href="/phono" style="color:#c9c4e8;text-decoration:none">Phonology</a>
+<a href="/soundlib" style="color:#c9c4e8;text-decoration:none">Sound&nbsp;Changes</a>
+<a href="/chess" style="color:#c9c4e8;text-decoration:none">Chess</a>
+<a href="/xiangqi" style="color:#c9c4e8;text-decoration:none">Xiangqi</a>
+<a href="/gpu" style="color:#c9c4e8;text-decoration:none">GPU</a>
+<a href="/editor" style="color:#c9c4e8;text-decoration:none">Editor</a>
+</div>
+<div class="wrap">
+<h1>The Sound-Change Library</h1>
+<p class="sub">Twenty attested changes from real language history. Click to add them <b>in order</b> (order matters — chain shifts depend on it);
+the tool assembles a SCArs ruleset and runs your sample words through the engine: one tool calling another.</p>
+<div class="cols">
+  <div class="panel">
+    <h2>ATTESTED CHANGES — click to apply</h2>
+    <div class="list" id="avail"></div>
+  </div>
+  <div class="panel sel">
+    <h2>APPLIED, IN ORDER</h2>
+    <div class="list" id="chosen"><div class="hint" style="padding:10px">nothing yet — click changes on the left</div></div>
+    <div class="row">
+      <input type="text" id="words" value="pater bhrater lupo skola" spellcheck="false" title="sample words">
+      <button class="go" onclick="run()">Run through SCArs</button>
+      <button onclick="downloadSca()">Download .sca</button>
+    </div>
+    <div class="hint">sample words above; try <i>pater</i> with Grimm + Verner, or <i>skola</i> with prothesis.
+    In the System GUI: <b>soundlib grimm1 verner words=pater</b> embeds this table in any text.</div>
+  </div>
+</div>
+<div class="out">
+  <div class="panel" style="flex:1"><h2>BEFORE &rarr; AFTER</h2><div id="rows" style="padding:8px"><div class="hint" style="padding:6px">run to see results</div></div></div>
+  <div class="panel" style="flex:1"><h2>THE ASSEMBLED SCARS FILE</h2><pre id="sca">:: select changes and Run</pre></div>
+</div>
+</div>
+<script>
+"use strict";
+var LIB=[], CHOSEN=[];
+fetch('/api/soundlib').then(function(r){return r.json();}).then(function(j){
+  LIB=j;
+  var av=document.getElementById('avail');
+  j.forEach(function(c){
+    var d=document.createElement('div'); d.className='chg';
+    d.innerHTML='<b>'+c.name+'</b> <span class="att">— '+c.attested+'</span><div class="desc">'+c.desc+'</div>';
+    d.onclick=function(){ CHOSEN.push(c.id); renderChosen(); };
+    av.appendChild(d);
+  });
+});
+function renderChosen(){
+  var el=document.getElementById('chosen'); el.innerHTML='';
+  if(!CHOSEN.length){ el.innerHTML='<div class="hint" style="padding:10px">nothing yet — click changes on the left</div>'; return; }
+  CHOSEN.forEach(function(id,i){
+    var c=LIB.find(function(x){return x.id===id;});
+    var d=document.createElement('div'); d.className='chg';
+    d.innerHTML='<span class="ord">'+(i+1)+'.</span><b>'+c.name+'</b>'+
+      '<span class="rm" title="remove">&times;</span>'+
+      (i>0?'<span class="up" title="move earlier">&uarr;</span>':'');
+    d.querySelector('.rm').onclick=function(){ CHOSEN.splice(i,1); renderChosen(); };
+    var up=d.querySelector('.up');
+    if(up) up.onclick=function(){ var t=CHOSEN[i-1]; CHOSEN[i-1]=CHOSEN[i]; CHOSEN[i]=t; renderChosen(); };
+    el.appendChild(d);
+  });
+}
+function run(){
+  var body='changes='+CHOSEN.join(' ')+'\nwords='+document.getElementById('words').value.trim();
+  fetch('/api/soundlib',{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){
+    if(j.error){ document.getElementById('sca').textContent='error: '+j.error; return; }
+    document.getElementById('sca').textContent=j.sca||'(no changes selected)';
+    var h='<table><tr><th>PROTO</th><th>EVOLVED</th></tr>';
+    j.rows.forEach(function(r){ h+='<tr><td>'+r.from+'</td><td><b>'+r.to+'</b></td></tr>'; });
+    document.getElementById('rows').innerHTML=h+'</table>';
+  });
+}
+function downloadSca(){
+  var t=document.getElementById('sca').textContent;
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([t],{type:'text/plain'}));
+  a.download='assembled.sca'; a.click();
+}
+</script>
+</body></html>

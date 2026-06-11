@@ -213,6 +213,17 @@ latte serve                           # the Oberon-style GUI (texts with embedde
                                       # objects, parallel tools — docs/the-system.md)
 latte fmt <file.lat> [--write]        # the conservative, compile-checked formatter
 latte pkg                             # list system libraries and user packages
+latte debug [--break ARM] "<expr>"    # the Loom call tracer: every arm call as a tree
+latte trace [--scene FILE|EXPR] [--w N] [--h N]   # ray-trace any Latte scene
+
+# the conlang suite (also /soundlib and /phono in the GUI)
+#   the sound-change library assembles attested changes into a SCArs file and
+#   runs it; the phonology builder generates words and evolves them through it
+curl -s -X POST localhost:8088/api/soundlib -d 'changes=grimm1 verner
+words=pater bhrater'
+curl -s -X POST localhost:8088/api/phono -d 'preset=pie
+n=12
+changes=grimm1 apocope'
 ```
 
 In the GUI: `/` is the System — **texts with embedded objects** (run a `chart`/`trace`/`trade`

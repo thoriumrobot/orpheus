@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Xiangqi</title>
+<style>
+ body{font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;margin:0;background:#d6d2c4;color:#22222e;font-size:13px}
+ .wrap{max-width:980px;margin:0 auto;padding:16px;display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+ h1{font-size:17px;margin:6px 0 10px}
+ .boardbox{background:#e8c98f;border:2px solid #6b5532;border-radius:5px;padding:14px;box-shadow:0 2px 10px #0003;position:relative}
+ #board{display:grid;grid-template-columns:repeat(9,52px);grid-template-rows:repeat(10,52px);gap:0;position:relative}
+ .sq{width:52px;height:52px;display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer}
+ .sq::before{content:'';position:absolute;inset:0;background:
+   linear-gradient(#6b5532,#6b5532) center/100% 1.5px no-repeat,
+   linear-gradient(#6b5532,#6b5532) center/1.5px 100% no-repeat}
+ .sq.river::before{background:linear-gradient(#6b5532,#6b5532) center/1.5px 0 no-repeat, linear-gradient(#6b5532,#6b5532) center/100% 1.5px no-repeat}
+ .pc{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:21px;font-weight:700;
+     box-shadow:0 2px 4px #0005, inset 0 0 0 2.5px currentColor, inset 0 0 0 5px #f4e6c8;background:#f4e6c8;z-index:2;user-select:none}
+ .pc.w{color:#a8341f}
+ .pc.b{color:#1c1c30}
+ .sq.sel .pc{box-shadow:0 0 0 3px #33387e, 0 2px 4px #0005, inset 0 0 0 2.5px currentColor, inset 0 0 0 5px #f4e6c8}
+ .dot{width:13px;height:13px;border-radius:50%;background:#33387e88;z-index:1}
+ .rivertext{position:absolute;left:0;right:0;text-align:center;color:#6b5532;font-size:15px;letter-spacing:14px;pointer-events:none;z-index:1}
+ .side{flex:1;min-width:260px}
+ .panel{background:#faf8f1;border:1px solid #8e8a7a;border-radius:4px;box-shadow:0 1px 4px #0002;margin-bottom:12px}
+ .panel h2{font-size:11px;letter-spacing:.6px;margin:0;padding:6px 11px;background:linear-gradient(#cfcaba,#c4bfae);border-bottom:1px solid #8e8a7a}
+ .panel .bd{padding:10px 12px}
+ button{font:13px inherit;border:1px solid #8e8a7a;border-radius:3px;background:#ece8dc;cursor:pointer;padding:6px 13px;margin-right:6px}
+ button:hover{background:#fff}
+ #log{height:170px;overflow:auto;white-space:pre-wrap;font-size:12px}
+ table{border-collapse:collapse;width:100%}
+ td{border:1px solid #d3cebc;padding:3px 8px;font-size:12px}
+ td:first-child{background:#f1ecdd}
+ #status{font-weight:700;color:#33387e}
+</style></head>
+<body>
+<div class="orpheus-nav" style="position:sticky;top:0;z-index:90;display:flex;gap:14px;align-items:center;padding:6px 14px;background:linear-gradient(#262633,#1c1c26);border-bottom:2px solid #33387e;font:12px ui-monospace,'SF Mono',Menlo,Consolas,monospace;box-shadow:0 1px 6px #0004">
+<a href="/" style="color:#cfd3ff;text-decoration:none;font-weight:700">&#8592; System</a>
+<span style="color:#55557a">&#183;</span>
+<a href="/docs" style="color:#c9c4e8;text-decoration:none">Docs</a>
+<a href="/draw" style="color:#c9c4e8;text-decoration:none">Draw</a>
+<a href="/trade" style="color:#c9c4e8;text-decoration:none">Trade</a>
+<a href="/chart" style="color:#c9c4e8;text-decoration:none">Charts</a>
+<a href="/fin" style="color:#c9c4e8;text-decoration:none">Finance</a>
+<a href="/plan" style="color:#c9c4e8;text-decoration:none">Plan</a>
+<a href="/derive" style="color:#c9c4e8;text-decoration:none">Derive</a>
+<a href="/phono" style="color:#c9c4e8;text-decoration:none">Phonology</a>
+<a href="/soundlib" style="color:#c9c4e8;text-decoration:none">Sound&nbsp;Changes</a>
+<a href="/chess" style="color:#c9c4e8;text-decoration:none">Chess</a>
+<a href="/xiangqi" style="color:#c9c4e8;text-decoration:none">Xiangqi</a>
+<a href="/gpu" style="color:#c9c4e8;text-decoration:none">GPU</a>
+<a href="/editor" style="color:#c9c4e8;text-decoration:none">Editor</a>
+</div>
+<div class="wrap">
+  <div>
+    <h1>Xiangqi — vs the trained model</h1>
+    <div class="boardbox">
+      <div id="board"></div>
+      <div class="rivertext" id="riv">楚 河 　 漢 界</div>
+    </div>
+  </div>
+  <div class="side">
+    <div class="panel"><h2>GAME</h2><div class="bd">
+      <div id="status">Red (you) to move</div>
+      <div style="margin-top:9px">
+        <button onclick="newGame()">New game</button>
+        <button onclick="aiMove()">Model moves</button>
+      </div>
+      <p style="font-size:11px;color:#6b6858;margin:9px 0 0">You play Red (bottom). Click a piece, then a highlighted point.
+      Black replies with the <b>trained model</b>: a linear evaluator whose piece values were learned by
+      gradient descent in Latte (lib/xiangqiml.lat), driving a 4-ply search. Full rules: palace, river,
+      horse legs, cannon screens, flying generals.</p>
+    </div></div>
+    <div class="panel"><h2>THE LEARNED PIECE VALUES</h2><div class="bd"><table id="vals"></table>
+      <p style="font-size:11px;color:#6b6858;margin:8px 0 0">fit from labelled positions — compare the classical values 1 · 4 · 2 · 9 · 4.5 · 2</p>
+    </div></div>
+    <div class="panel"><h2>MOVES</h2><div class="bd"><div id="log"></div></div></div>
+  </div>
+</div>
+<script>
+"use strict";
+var st=null, sel=-1;
+var GLYPH={1:'兵',2:'馬',3:'相',4:'車',5:'炮',6:'仕',7:'帥',8:'卒',9:'馬',10:'象',11:'車',12:'砲',13:'士',14:'將'};
+function api(body){
+  return fetch('/api/xiangqi',{method:'POST',headers:{'Content-Type':'text/plain'},body:body})
+    .then(function(r){return r.json();});
+}
+function sqName(i){ return String.fromCharCode(97+(i%9)) + (10-Math.floor(i/9)); }
+function logln(s){ var l=document.getElementById('log'); l.textContent+=s+'\n'; l.scrollTop=l.scrollHeight; }
+function legalMove(f,t){ return st.legal.some(function(m){return m[0]===f&&m[1]===t;}); }
+function legalFrom(i){ return st.legal.some(function(m){return m[0]===i;}); }
+function render(){
+  var b=document.getElementById('board'); b.innerHTML='';
+  for(var i=0;i<90;i++){
+    var d=document.createElement('div');
+    d.className='sq'+(Math.floor(i/9)===4||Math.floor(i/9)===5?'':'');
+    if(i===sel) d.classList.add('sel');
+    var p=st.board[i];
+    if(p){
+      var pc=document.createElement('div');
+      pc.className='pc '+(p<8?'w':'b');
+      pc.textContent=GLYPH[p];
+      d.appendChild(pc);
+    } else if(sel>=0 && legalMove(sel,i)){
+      var dot=document.createElement('div'); dot.className='dot'; d.appendChild(dot);
+    }
+    if(sel>=0 && st.board[i] && legalMove(sel,i)) d.classList.add('sel');
+    (function(i){ d.onclick=function(){ click(i); }; })(i);
+    b.appendChild(d);
+  }
+  // the river band: blank the vertical lines visually via the text overlay
+  var rivY = document.querySelector('.boardbox').offsetTop;
+  document.getElementById('riv').style.top = (14 + 4.5*52 + 18) + 'px';
+  var stat=document.getElementById('status');
+  if(st.status===1){
+    stat.textContent = (st.side===1?'Red':'Black')+' has no move — '+(st.side===1?'the model wins':'you win')+'!';
+  } else {
+    stat.textContent = st.side===1 ? 'Red (you) to move' : 'Black (the model) is thinking…';
+  }
+  var vals=document.getElementById('vals');
+  if(st.learned && st.learned.length===6){
+    var names=['soldier','horse','elephant','chariot','cannon','advisor'];
+    var h='';
+    for(var k=0;k<6;k++) h+='<tr><td>'+names[k]+'</td><td>'+(st.learned[k]/1000).toFixed(2)+'</td></tr>';
+    vals.innerHTML=h;
+  }
+}
+function click(i){
+  if(!st || st.status!==0 || st.side!==1) return;
+  if(sel>=0 && legalMove(sel,i)){
+    var f=sel; sel=-1;
+    api('move '+f+' '+i).then(function(j){
+      st=j; render();
+      logln('you: '+sqName(f)+' \u2192 '+sqName(i));
+      if(st.status===0 && st.side===2) aiMove();
+    });
+    return;
+  }
+  sel = (st.board[i] && st.board[i]<8 && legalFrom(i)) ? i : -1;
+  render();
+}
+function aiMove(){
+  var before=st?st.board.slice():null;
+  api('ai').then(function(j){
+    st=j;
+    if(before){
+      for(var f=0;f<90;f++) if(before[f] && !st.board[f]){
+        for(var t=0;t<90;t++) if(st.board[t]!==before[t] && st.board[t]===before[f])
+          logln('model: '+sqName(f)+' \u2192 '+sqName(t));
+      }
+    }
+    render();
+  });
+}
+function newGame(){ sel=-1; api('new').then(function(j){ st=j; document.getElementById('log').textContent=''; render(); }); }
+newGame();
+</script>
+</body></html>

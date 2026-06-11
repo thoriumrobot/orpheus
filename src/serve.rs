@@ -466,6 +466,220 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             }
             None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
         },
+        ("POST", "/api/debug") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut focus: Option<String> = None;
+            let mut expr_lines: Vec<&str> = Vec::new();
+            for line in body.lines() {
+                if let Some(v) = line.strip_prefix("break=") {
+                    focus = Some(v.trim().to_string());
+                } else {
+                    expr_lines.push(line);
+                }
+            }
+            let expr = expr_lines.join("\n");
+            let libs: Vec<String> = crate::latte::all_libs();
+            let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+            fn node_json(n: &crate::latte::TraceNode) -> String {
+                let kids: Vec<String> = n.children.iter().map(node_json).collect();
+                format!(
+                    "{{\"name\":\"{}\",\"args\":\"{}\",\"result\":\"{}\",\"children\":[{}]}}",
+                    json_escape(&n.name),
+                    json_escape(&n.args),
+                    json_escape(n.result.as_deref().unwrap_or("<crash>")),
+                    kids.join(",")
+                )
+            }
+            let out = match crate::latte::debug_trace(&expr, &refs, focus.as_deref()) {
+                Ok((result, roots, truncated)) => {
+                    let tree: Vec<String> = roots.iter().map(node_json).collect();
+                    format!(
+                        "{{\"result\":\"{}\",\"truncated\":{},\"tree\":[{}]}}",
+                        json_escape(&crate::net::show_state(&result)),
+                        truncated,
+                        tree.join(",")
+                    )
+                }
+                Err(e) => format!("{{\"error\":\"{}\"}}", json_escape(&e)),
+            };
+            simple(200, "application/json; charset=utf-8", out.into_bytes())
+        }
+        // xiangqi: verbs new / move f t / ai / state -> the JSON game state.
+        // The opponent is the TRAINED MODEL (lib/xiangqiml.lat) at 2-ply.
+        ("POST", "/api/xiangqi") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut it = body.split_whitespace();
+            let verb = it.next().unwrap_or("state");
+            let f = it.next().and_then(|s| s.parse::<u128>().ok());
+            let t = it.next().and_then(|s| s.parse::<u128>().ok());
+            simple(200, "application/json; charset=utf-8", crate::game::xq_command(verb, f, t).into_bytes())
+        }
+        // ---- THE CONLANG SUITE -------------------------------------------------
+        // GET /api/soundlib -> the attested-change library (JSON). POST with
+        // `changes=` (ordered ids) and `words=` lines -> the assembled SCArs
+        // file + before/after rows: the library tool CALLING the SCArs engine.
+        ("GET", "/api/soundlib") => {
+            let mut j = String::from("[");
+            for (i, (id, name, attested, desc, rules)) in crate::conlang::SOUND_CHANGES.iter().enumerate() {
+                if i > 0 {
+                    j.push(',');
+                }
+                j.push_str(&format!(
+                    "{{\"id\":\"{}\",\"name\":\"{}\",\"attested\":\"{}\",\"desc\":\"{}\",\"rules\":\"{}\"}}",
+                    json_escape(id), json_escape(name), json_escape(attested), json_escape(desc), json_escape(rules)
+                ));
+            }
+            j.push(']');
+            simple(200, "application/json; charset=utf-8", j.into_bytes())
+        }
+        ("POST", "/api/soundlib") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut changes: Vec<String> = Vec::new();
+            let mut words: Vec<String> = Vec::new();
+            for line in body.lines() {
+                if let Some(v) = line.strip_prefix("changes=") {
+                    changes = v.split_whitespace().map(String::from).collect();
+                } else if let Some(v) = line.strip_prefix("words=") {
+                    words = v.split_whitespace().map(String::from).collect();
+                }
+            }
+            if words.is_empty() {
+                words = ["pater", "bhrater", "lupo", "skola"].iter().map(|s| s.to_string()).collect();
+            }
+            let ids: Vec<&str> = changes.iter().map(|s| s.as_str()).collect();
+            match crate::conlang::apply_changes(&ids, &words) {
+                Ok((sca, rows)) => {
+                    let mut j = format!("{{\"sca\":\"{}\",\"rows\":[", json_escape(&sca));
+                    for (i, (w, e)) in rows.iter().enumerate() {
+                        if i > 0 {
+                            j.push(',');
+                        }
+                        j.push_str(&format!("{{\"from\":\"{}\",\"to\":\"{}\"}}", json_escape(w), json_escape(e)));
+                    }
+                    j.push_str("]}");
+                    simple(200, "application/json; charset=utf-8", j.into_bytes())
+                }
+                Err(e) => simple(200, "application/json; charset=utf-8", format!("{{\"error\":\"{}\"}}", json_escape(&e)).into_bytes()),
+            }
+        }
+        // POST /api/phono: the phonology builder — preset= or consonants=/vowels=/
+        // patterns=, n=, seed=, changes= (optional) -> generated words, evolved
+        // through the change library through SCArs (the modular chain).
+        ("POST", "/api/phono") => {
+            let body = String::from_utf8_lossy(&req.body);
+            let mut preset = String::new();
+            let (mut cons, mut vows, mut pats) = (String::new(), String::new(), String::new());
+            let mut n = 14usize;
+            let mut seed = 42u64;
+            let mut changes: Vec<String> = Vec::new();
+            for line in body.lines() {
+                let mut it = line.splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("preset"), Some(v)) => preset = v.trim().to_string(),
+                    (Some("consonants"), Some(v)) => cons = v.trim().to_string(),
+                    (Some("vowels"), Some(v)) => vows = v.trim().to_string(),
+                    (Some("patterns"), Some(v)) => pats = v.trim().to_string(),
+                    (Some("n"), Some(v)) => n = v.trim().parse().unwrap_or(n),
+                    (Some("seed"), Some(v)) => seed = v.trim().parse().unwrap_or(seed),
+                    (Some("changes"), Some(v)) => changes = v.split_whitespace().map(String::from).collect(),
+                    _ => {}
+                }
+            }
+            let ph = if !cons.is_empty() && !vows.is_empty() {
+                crate::conlang::Phonology {
+                    consonants: cons.split_whitespace().map(String::from).collect(),
+                    vowels: vows.split_whitespace().map(String::from).collect(),
+                    patterns: if pats.is_empty() {
+                        vec!["CV".into(), "CVC".into()]
+                    } else {
+                        pats.split_whitespace().map(String::from).collect()
+                    },
+                }
+            } else {
+                let pres = crate::conlang::presets();
+                let chosen = pres
+                    .into_iter()
+                    .find(|(id, _, _)| *id == preset)
+                    .map(|(_, _, p)| p)
+                    .unwrap_or_else(|| crate::conlang::presets().remove(1).2);
+                chosen
+            };
+            let ids: Vec<&str> = changes.iter().map(|s| s.as_str()).collect();
+            match crate::conlang::phonology_pipeline(&ph, n, seed, &ids) {
+                Ok((rows, sca)) => {
+                    let mut j = format!("{{\"sca\":\"{}\",\"rows\":[", json_escape(&sca));
+                    for (i, (w, e)) in rows.iter().enumerate() {
+                        if i > 0 {
+                            j.push(',');
+                        }
+                        j.push_str(&format!("{{\"proto\":\"{}\",\"evolved\":\"{}\"}}", json_escape(w), json_escape(e)));
+                    }
+                    j.push_str("]}");
+                    simple(200, "application/json; charset=utf-8", j.into_bytes())
+                }
+                Err(e) => simple(200, "application/json; charset=utf-8", format!("{{\"error\":\"{}\"}}", json_escape(&e)).into_bytes()),
+            }
+        }
+        // ---- DRAWINGS: the graphics tool's documents (drawings/<name>.svg) ----
+        ("GET", "/api/drawings") => {
+            let mut names: Vec<String> = Vec::new();
+            if let Some(dir) = drawings_dir(root) {
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    for e in rd.flatten() {
+                        if let Some(n) = e.file_name().to_str() {
+                            if let Some(stem) = n.strip_suffix(".svg") {
+                                names.push(stem.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            names.sort();
+            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
+        }
+        ("GET", "/api/drawing") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let p = drawings_dir(root).map(|d| d.join(format!("{}.svg", name)));
+                match p.and_then(|p| std::fs::read_to_string(p).ok()) {
+                    Some(t) => simple(200, "image/svg+xml; charset=utf-8", t.into_bytes()),
+                    None => simple(404, "text/plain; charset=utf-8", b"no such drawing".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        ("POST", "/api/drawing") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                // only accept what looks like an SVG document
+                if !body.trim_start().starts_with("<svg") {
+                    return simple(400, "text/plain; charset=utf-8", b"not an svg".to_vec());
+                }
+                match drawings_dir(root) {
+                    Some(dir) => {
+                        let _ = std::fs::create_dir_all(&dir);
+                        match std::fs::write(dir.join(format!("{}.svg", name)), body.as_bytes()) {
+                            Ok(_) => simple(200, "text/plain; charset=utf-8", b"saved".to_vec()),
+                            Err(e) => simple(500, "text/plain; charset=utf-8", format!("save failed: {}", e).into_bytes()),
+                        }
+                    }
+                    None => simple(500, "text/plain; charset=utf-8", b"no drawings dir".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        // quit the system: respond, then exit the process (Oberon's System.Quit)
+        ("POST", "/api/quit") => {
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                eprintln!("System.Quit — Orpheus stopped.");
+                std::process::exit(0);
+            });
+            simple(
+                200,
+                "text/html; charset=utf-8",
+                "<!doctype html><html><body style='font-family:ui-monospace,Menlo,monospace;background:#d6d2c4;color:#22222e;display:flex;align-items:center;justify-content:center;height:100vh'><div style='text-align:center'><h2 style='margin:0 0 8px'>Orpheus stopped.</h2><p style='color:#6b6858'>System.Quit — restart with <code>latte serve</code>.</p></div></body></html>".as_bytes().to_vec(),
+            )
+        }
         // format a Latte source (conservative, compile-checked); body in, body out
         ("POST", "/api/fmt") => {
             let body = String::from_utf8_lossy(&req.body);
@@ -858,15 +1072,17 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let body = String::from_utf8_lossy(&req.body);
             let mut w = 96usize;
             let mut h = 72usize;
+            let mut scene: Option<String> = None;
             for line in body.lines() {
                 let mut it = line.splitn(2, '=');
                 match (it.next().map(str::trim), it.next()) {
                     (Some("w"), Some(v)) => w = v.trim().parse().unwrap_or(w).clamp(16, 320),
                     (Some("h"), Some(v)) => h = v.trim().parse().unwrap_or(h).clamp(12, 240),
+                    (Some("scene"), Some(v)) => scene = Some(v.trim().to_string()),
                     _ => {}
                 }
             }
-            let (mut svg, engine, ms) = crate::viz::ray_trace(w, h);
+            let (mut svg, engine, ms) = crate::viz::ray_trace_scene(scene.as_deref(), w, h);
             // caption the render with its engine and time, inside the SVG itself
             if let Some(pos) = svg.rfind("</svg>") {
                 let cap = format!(
@@ -1240,6 +1456,14 @@ fn lib_dir(root: &str) -> Option<std::path::PathBuf> {
 /// The documentation directory (`docs/`), a sibling of the library directory.
 /// The user-text directory: <root>/../text (a sibling of lib/site), i.e. the
 /// distribution's text/ folder — documents with embedded objects live here.
+fn drawings_dir(root: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(root).parent().and_then(|p| p.parent()).map(|p| p.join("drawings"));
+    match p {
+        Some(d) if !d.as_os_str().is_empty() => Some(d),
+        _ => Some(std::path::PathBuf::from("drawings")),
+    }
+}
+
 fn text_dir(root: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(root).parent().and_then(|p| p.parent()).map(|p| p.join("text"));
     match p {
@@ -1563,7 +1787,7 @@ fn cord_list_to_string(n: &crate::knot::N) -> String {
 }
 
 fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "")
 }
 
 fn html_escape(s: &str) -> String {

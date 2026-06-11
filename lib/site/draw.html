@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orpheus · Draw</title>
+<style>
+ body{font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;margin:0;background:#d6d2c4;color:#22222e;font-size:13px}
+ .bar{display:flex;gap:8px;align-items:center;padding:8px 14px;background:#efece1;border-bottom:1px solid #8e8a7a;flex-wrap:wrap}
+ .bar .grp{display:flex;gap:4px;align-items:center;padding-right:10px;border-right:1px solid #c4bfae}
+ .bar button{font:12px inherit;border:1px solid #8e8a7a;border-radius:3px;background:#ece8dc;cursor:pointer;padding:5px 10px}
+ .bar button:hover{background:#fff}
+ .bar button.on{background:#33387e;color:#fff;border-color:#33387e}
+ .bar label{color:#55524a;font-size:11px}
+ .bar input[type=color]{width:30px;height:24px;border:1px solid #8e8a7a;border-radius:3px;padding:0;background:#fff;cursor:pointer}
+ .bar input[type=range]{width:80px}
+ .bar input[type=text]{font:12px inherit;border:1px solid #8e8a7a;border-radius:3px;padding:4px 7px;width:110px;background:#fff}
+ .bar select{font:12px inherit;border:1px solid #8e8a7a;border-radius:3px;padding:4px;background:#fff}
+ #stage{display:flex;justify-content:center;padding:16px}
+ #canvas{background:#fff;border:1px solid #8e8a7a;border-radius:3px;box-shadow:0 2px 10px #0002;cursor:crosshair}
+ #canvas.selecting{cursor:default}
+ .sel-outline{fill:none;stroke:#33387e;stroke-dasharray:5 4;stroke-width:1.2;pointer-events:none}
+ .handle{fill:#33387e;stroke:#fff;stroke-width:1;cursor:nwse-resize}
+ #status{color:#6b6858;font-size:11px;padding:0 16px 12px;text-align:center}
+</style></head>
+<body>
+<div class="orpheus-nav" style="position:sticky;top:0;z-index:90;display:flex;gap:14px;align-items:center;padding:6px 14px;background:linear-gradient(#262633,#1c1c26);border-bottom:2px solid #33387e;font:12px ui-monospace,'SF Mono',Menlo,Consolas,monospace;box-shadow:0 1px 6px #0004">
+<a href="/" style="color:#cfd3ff;text-decoration:none;font-weight:700">&#8592; System</a>
+<span style="color:#55557a">&#183;</span>
+<a href="/docs" style="color:#c9c4e8;text-decoration:none">Docs</a>
+<a href="/draw" style="color:#c9c4e8;text-decoration:none">Draw</a>
+<a href="/trade" style="color:#c9c4e8;text-decoration:none">Trade</a>
+<a href="/chart" style="color:#c9c4e8;text-decoration:none">Charts</a>
+<a href="/fin" style="color:#c9c4e8;text-decoration:none">Finance</a>
+<a href="/plan" style="color:#c9c4e8;text-decoration:none">Plan</a>
+<a href="/derive" style="color:#c9c4e8;text-decoration:none">Derive</a>
+<a href="/phono" style="color:#c9c4e8;text-decoration:none">Phonology</a>
+<a href="/soundlib" style="color:#c9c4e8;text-decoration:none">Sound&nbsp;Changes</a>
+<a href="/chess" style="color:#c9c4e8;text-decoration:none">Chess</a>
+<a href="/xiangqi" style="color:#c9c4e8;text-decoration:none">Xiangqi</a>
+<a href="/gpu" style="color:#c9c4e8;text-decoration:none">GPU</a>
+<a href="/editor" style="color:#c9c4e8;text-decoration:none">Editor</a>
+</div>
+<div class="bar">
+  <div class="grp">
+    <button id="t-select" onclick="setTool('select')">Select</button>
+    <button id="t-rect" onclick="setTool('rect')">Rect</button>
+    <button id="t-ellipse" onclick="setTool('ellipse')">Ellipse</button>
+    <button id="t-line" onclick="setTool('line')">Line</button>
+    <button id="t-pen" onclick="setTool('pen')">Pen</button>
+    <button id="t-text" onclick="setTool('text')">Text</button>
+  </div>
+  <div class="grp">
+    <label>fill</label><input type="color" id="fill" value="#b9bce0">
+    <label>stroke</label><input type="color" id="stroke" value="#22222e">
+    <label>width</label><input type="range" id="width" min="0" max="14" value="2">
+    <label>opacity</label><input type="range" id="opacity" min="10" max="100" value="100">
+  </div>
+  <div class="grp">
+    <button onclick="zorder(1)" title="bring forward">Front</button>
+    <button onclick="zorder(-1)" title="send backward">Back</button>
+    <button onclick="dupSel()" title="duplicate selection">Dup</button>
+    <button onclick="delSel()" title="delete selection (or press Delete)">Delete</button>
+    <button onclick="undo()" title="Ctrl/⌘+Z">Undo</button>
+    <button onclick="clearAll()">New</button>
+  </div>
+  <div class="grp">
+    <input type="text" id="name" placeholder="drawing name" value="untitled">
+    <button onclick="save()">Store</button>
+    <select id="loadsel"><option value="">— open —</option></select>
+    <button onclick="exportSvg()">Export SVG</button>
+  </div>
+</div>
+<div id="stage">
+  <svg id="canvas" width="860" height="560" xmlns="http://www.w3.org/2000/svg"></svg>
+</div>
+<div id="status">Drag to draw · Select tool: click to select, drag to move, corner handle resizes, double-click text to edit ·
+Stored drawings embed in System texts with the <b>drawing &lt;name&gt;</b> command — a tool calling a tool.</div>
+<script>
+"use strict";
+var svg=document.getElementById('canvas'), tool='rect', drawing=null, selected=null, history=[];
+var fillI=document.getElementById('fill'), strokeI=document.getElementById('stroke'),
+    widthI=document.getElementById('width'), opI=document.getElementById('opacity');
+function setTool(t){
+  tool=t;
+  ['select','rect','ellipse','line','pen','text'].forEach(function(x){
+    document.getElementById('t-'+x).classList.toggle('on', x===t);
+  });
+  svg.classList.toggle('selecting', t==='select');
+  if(t!=='select') select(null);
+}
+setTool('rect');
+function pt(e){ var r=svg.getBoundingClientRect(); return {x:e.clientX-r.left, y:e.clientY-r.top}; }
+function attrs(el, a){ for(var k in a) el.setAttribute(k,a[k]); return el; }
+function mk(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+function styled(el){
+  attrs(el,{fill: tool==='line'||tool==='pen' ? 'none' : fillI.value,
+            stroke: strokeI.value, 'stroke-width': widthI.value,
+            opacity: (opI.value/100), 'stroke-linecap':'round', 'stroke-linejoin':'round'});
+  return el;
+}
+function snapshot(){ history.push(svg.innerHTML); if(history.length>80) history.shift(); }
+function undo(){ if(history.length){ select(null); svg.innerHTML=history.pop(); rebind(); } }
+function rebind(){ Array.prototype.forEach.call(svg.children, function(c){ if(!c.classList.contains('sel-outline') && !c.classList.contains('handle')) bindShape(c); }); }
+
+/* ---- creation ---- */
+var start=null;
+svg.addEventListener('mousedown', function(e){
+  if(e.button!==0) return;
+  var p=pt(e);
+  if(tool==='select'){ return; } // handled per-shape
+  snapshot();
+  start=p;
+  if(tool==='rect'){ drawing=styled(attrs(mk('rect'),{x:p.x,y:p.y,width:1,height:1,rx:2})); }
+  else if(tool==='ellipse'){ drawing=styled(attrs(mk('ellipse'),{cx:p.x,cy:p.y,rx:1,ry:1})); }
+  else if(tool==='line'){ drawing=styled(attrs(mk('line'),{x1:p.x,y1:p.y,x2:p.x,y2:p.y})); }
+  else if(tool==='pen'){ drawing=styled(attrs(mk('polyline'),{points:p.x+','+p.y})); }
+  else if(tool==='text'){
+    var t=prompt('Text:'); if(!t){ history.pop(); return; }
+    var n=styled(attrs(mk('text'),{x:p.x,y:p.y,'font-size':18,'font-family':'ui-monospace,Menlo,monospace'}));
+    n.setAttribute('fill', fillI.value); n.textContent=t;
+    svg.appendChild(n); bindShape(n); drawing=null;
+    return;
+  }
+  if(drawing) svg.appendChild(drawing);
+});
+window.addEventListener('mousemove', function(e){
+  if(!drawing||!start) return;
+  var p=pt(e);
+  if(drawing.tagName==='rect'){
+    attrs(drawing,{x:Math.min(start.x,p.x), y:Math.min(start.y,p.y),
+                   width:Math.max(1,Math.abs(p.x-start.x)), height:Math.max(1,Math.abs(p.y-start.y))});
+  } else if(drawing.tagName==='ellipse'){
+    attrs(drawing,{cx:(start.x+p.x)/2, cy:(start.y+p.y)/2,
+                   rx:Math.max(1,Math.abs(p.x-start.x)/2), ry:Math.max(1,Math.abs(p.y-start.y)/2)});
+  } else if(drawing.tagName==='line'){
+    attrs(drawing,{x2:p.x,y2:p.y});
+  } else if(drawing.tagName==='polyline'){
+    drawing.setAttribute('points', drawing.getAttribute('points')+' '+p.x+','+p.y);
+  }
+});
+window.addEventListener('mouseup', function(){
+  if(drawing){ bindShape(drawing); drawing=null; }
+  start=null; moveCtx=null; resizeCtx=null;
+});
+
+/* ---- selection / move / resize ---- */
+var moveCtx=null, resizeCtx=null, outline=null, handle=null;
+function bindShape(el){
+  el.addEventListener('mousedown', function(e){
+    if(tool!=='select') return;
+    e.stopPropagation();
+    select(el);
+    snapshot();
+    var p=pt(e);
+    moveCtx={el:el, x:p.x, y:p.y};
+  });
+  el.addEventListener('dblclick', function(){
+    if(el.tagName==='text'){ var t=prompt('Text:', el.textContent); if(t!=null){ snapshot(); el.textContent=t; } }
+  });
+}
+function bbox(el){ return el.getBBox(); }
+function select(el){
+  selected=el;
+  if(outline){ outline.remove(); outline=null; }
+  if(handle){ handle.remove(); handle=null; }
+  if(!el) return;
+  var b=bbox(el);
+  outline=attrs(mk('rect'),{x:b.x-3,y:b.y-3,width:b.width+6,height:b.height+6,class:'sel-outline'});
+  handle=attrs(mk('circle'),{cx:b.x+b.width+3, cy:b.y+b.height+3, r:5, class:'handle'});
+  svg.appendChild(outline); svg.appendChild(handle);
+  handle.addEventListener('mousedown', function(e){
+    e.stopPropagation();
+    snapshot();
+    var b2=bbox(el);
+    resizeCtx={el:el, bx:b2.x, by:b2.y, bw:b2.width, bh:b2.height, p:pt(e)};
+  });
+  // reflect the selection's style into the pickers
+  var f=el.getAttribute('fill'); if(f&&f!=='none') fillI.value=rgb2hex(f);
+  var st=el.getAttribute('stroke'); if(st) strokeI.value=rgb2hex(st);
+}
+function rgb2hex(c){
+  if(c.charAt(0)==='#') return c;
+  var m=c.match(/\d+/g); if(!m) return '#000000';
+  return '#'+m.slice(0,3).map(function(v){return ('0'+(+v).toString(16)).slice(-2);}).join('');
+}
+window.addEventListener('mousemove', function(e){
+  var p=pt(e);
+  if(moveCtx){
+    translate(moveCtx.el, p.x-moveCtx.x, p.y-moveCtx.y);
+    moveCtx.x=p.x; moveCtx.y=p.y;
+    select(moveCtx.el);
+  } else if(resizeCtx){
+    var sx=Math.max(0.1,(resizeCtx.bw + p.x-resizeCtx.p.x)/resizeCtx.bw);
+    var sy=Math.max(0.1,(resizeCtx.bh + p.y-resizeCtx.p.y)/resizeCtx.bh);
+    scaleShape(resizeCtx.el, resizeCtx.bx, resizeCtx.by, sx, sy);
+    resizeCtx.p=p; resizeCtx.bw*=sx; resizeCtx.bh*=sy;
+    select(resizeCtx.el);
+  }
+});
+svg.addEventListener('mousedown', function(e){ if(tool==='select' && e.target===svg) select(null); });
+function num(el,a){ return parseFloat(el.getAttribute(a))||0; }
+function translate(el,dx,dy){
+  switch(el.tagName){
+    case 'rect': attrs(el,{x:num(el,'x')+dx, y:num(el,'y')+dy}); break;
+    case 'ellipse': attrs(el,{cx:num(el,'cx')+dx, cy:num(el,'cy')+dy}); break;
+    case 'line': attrs(el,{x1:num(el,'x1')+dx,y1:num(el,'y1')+dy,x2:num(el,'x2')+dx,y2:num(el,'y2')+dy}); break;
+    case 'text': attrs(el,{x:num(el,'x')+dx, y:num(el,'y')+dy}); break;
+    case 'polyline':
+      el.setAttribute('points', el.getAttribute('points').trim().split(/\s+/).map(function(pr){
+        var xy=pr.split(','); return (+xy[0]+dx)+','+(+xy[1]+dy);
+      }).join(' '));
+      break;
+  }
+}
+function scaleShape(el, ox, oy, sx, sy){
+  switch(el.tagName){
+    case 'rect': attrs(el,{x:ox+(num(el,'x')-ox)*sx, y:oy+(num(el,'y')-oy)*sy, width:num(el,'width')*sx, height:num(el,'height')*sy}); break;
+    case 'ellipse': attrs(el,{cx:ox+(num(el,'cx')-ox)*sx, cy:oy+(num(el,'cy')-oy)*sy, rx:num(el,'rx')*sx, ry:num(el,'ry')*sy}); break;
+    case 'line': attrs(el,{x1:ox+(num(el,'x1')-ox)*sx, y1:oy+(num(el,'y1')-oy)*sy, x2:ox+(num(el,'x2')-ox)*sx, y2:oy+(num(el,'y2')-oy)*sy}); break;
+    case 'text': attrs(el,{x:ox+(num(el,'x')-ox)*sx, y:oy+(num(el,'y')-oy)*sy, 'font-size':Math.max(6,(parseFloat(el.getAttribute('font-size'))||18)*sy)}); break;
+    case 'polyline':
+      el.setAttribute('points', el.getAttribute('points').trim().split(/\s+/).map(function(pr){
+        var xy=pr.split(','); return (ox+(+xy[0]-ox)*sx)+','+(oy+(+xy[1]-oy)*sy);
+      }).join(' '));
+      break;
+  }
+}
+/* live restyle of the selection */
+[fillI,strokeI,widthI,opI].forEach(function(inp){
+  inp.addEventListener('input', function(){
+    if(!selected) return;
+    if(selected.getAttribute('fill')!=='none'||inp!==fillI) {
+      if(inp===fillI) selected.setAttribute('fill', fillI.value);
+    }
+    if(inp===strokeI) selected.setAttribute('stroke', strokeI.value);
+    if(inp===widthI) selected.setAttribute('stroke-width', widthI.value);
+    if(inp===opI) selected.setAttribute('opacity', opI.value/100);
+  });
+});
+function delSel(){ if(selected){ snapshot(); selected.remove(); select(null); } }
+function dupSel(){
+  if(!selected) return;
+  snapshot();
+  var c=selected.cloneNode(true);
+  svg.appendChild(c); bindShape(c);
+  translate(c, 14, 14);
+  select(c);
+}
+function zorder(dir){
+  if(!selected) return;
+  snapshot();
+  if(dir>0) svg.appendChild(selected);
+  else svg.insertBefore(selected, svg.firstChild);
+  select(selected);
+}
+window.addEventListener('keydown', function(e){
+  if((e.key==='Delete'||e.key==='Backspace') && selected && document.activeElement.tagName!=='INPUT'){ e.preventDefault(); delSel(); }
+  if((e.ctrlKey||e.metaKey) && e.key==='z'){ e.preventDefault(); undo(); }
+});
+function clearAll(){ snapshot(); select(null); svg.innerHTML=''; }
+
+/* ---- persistence ---- */
+function serialize(){
+  select(null);
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="860" height="560" viewBox="0 0 860 560">'+svg.innerHTML+'</svg>';
+}
+function save(){
+  var name=document.getElementById('name').value.trim()||'untitled';
+  fetch('/api/drawing?name='+encodeURIComponent(name),{method:'POST',body:serialize()})
+    .then(function(r){return r.text();})
+    .then(function(t){ document.getElementById('status').textContent = t==='saved'
+      ? 'stored drawings/'+name+'.svg — embed it in any System text with:  drawing '+name
+      : t; refreshList(); });
+}
+function refreshList(){
+  fetch('/api/drawings').then(function(r){return r.text();}).then(function(t){
+    var sel=document.getElementById('loadsel');
+    sel.innerHTML='<option value="">— open —</option>';
+    t.split('\n').filter(Boolean).forEach(function(n){
+      var o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
+    });
+  });
+}
+document.getElementById('loadsel').addEventListener('change', function(){
+  var n=this.value; if(!n) return;
+  fetch('/api/drawing?name='+encodeURIComponent(n)).then(function(r){return r.text();}).then(function(t){
+    var m=t.match(/<svg[^>]*>([\s\S]*)<\/svg>/);
+    if(m){ select(null); svg.innerHTML=m[1]; rebind(); document.getElementById('name').value=n; }
+  });
+});
+function exportSvg(){
+  var blob=new Blob([serialize()],{type:'image/svg+xml'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(document.getElementById('name').value.trim()||'drawing')+'.svg';
+  a.click();
+}
+refreshList();
+</script>
+</body></html>

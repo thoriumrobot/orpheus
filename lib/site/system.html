@@ -34,6 +34,10 @@
          border:1px solid var(--rule);border-radius:3px;flex:1 1 0;overflow:hidden;
          box-shadow:0 1px 3px #00000022}
  .viewer.grown{flex:8 1 0}
+ .viewer.maxed{flex:1000 1 0}
+ .track.hasmax > .viewer:not(.maxed){flex:0 0 27px;min-height:27px;overflow:hidden}
+ .track.hasmax > .viewer:not(.maxed) .body,.track.hasmax > .viewer:not(.maxed) .foot{display:none}
+ .track.hasmax > .vsep{display:none}
  .menu{display:flex;align-items:center;background:linear-gradient(var(--title),#c4bfae);
        border-bottom:1px solid var(--rule);padding:3px 7px;font-size:12px;cursor:default;
        user-select:none;flex-wrap:wrap;min-height:24px}
@@ -54,6 +58,11 @@
  .richtext{flex:1;overflow:auto;padding:7px 10px;background:var(--paper);line-height:var(--lh);
            outline:none;white-space:pre-wrap;word-break:break-word}
  .richtext div{min-height:var(--lh)}
+ .richtext .h1{font-size:17px;font-weight:700;color:#1c1c30;margin:6px 0 2px}
+ .richtext .h2{font-size:14px;font-weight:700;color:#33387e;margin:5px 0 1px}
+ .richtext b{color:#1c1c30}
+ .richtext code{background:#efecdd;border:1px solid #ddd8c4;border-radius:3px;padding:0 4px;font-size:12px}
+ .richtext .cmdline{color:var(--cmd)}
  .richtext .obj{margin:7px 0 9px 14px;padding:6px;border:1px solid #cdc7b4;border-radius:3px;
                 background:var(--obj);display:block;max-width:calc(100% - 28px);overflow:auto;
                 box-shadow:0 1px 2px #00000014;user-select:none;white-space:normal}
@@ -92,17 +101,22 @@
 <header>
   <span><b>ORPHEUS</b> — the system is its texts: <b>middle-click</b> any command line to run it (or caret + Ctrl/⌘+Enter); objects embed where you run them; drag the bars to resize.</span>
   <span class="links">
+    <a href="/draw" title="the graphics editor — drawings embed in texts" style="font-weight:700;color:#ffe9a8">✎ Draw</a>
     <a href="#" onclick="openTool('Trade');return false" title="trading tool text">Trade</a><a class="pg" href="/trade" title="full page">↗</a>
     <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart">↗</a>
     <a href="#" onclick="openTool('Fin');return false" title="financial-ML tool text">Finance</a><a class="pg" href="/fin">↗</a>
     <a href="#" onclick="openTool('Plan');return false" title="economic-planning tool text">Plan</a><a class="pg" href="/plan">↗</a>
     <a href="#" onclick="openTool('Trace');return false" title="ray-tracer tool text">Trace</a>
     <a href="#" onclick="openTool('Derive');return false" title="Ligurian derivation tool text">Derive</a><a class="pg" href="/derive">↗</a>
+    <a href="#" onclick="openTool('Debug');return false" title="the Loom call-tracer debugger">Debug</a>
+    <a href="#" onclick="openTool('Conlang');return false" title="the conlanging suite: phonology builder + sound-change library">Conlang</a><a class="pg" href="/phono">↗</a>
     <a href="#" onclick="openTool('Gpu');return false" title="GPU tool text">GPU</a><a class="pg" href="/gpu">↗</a>
     <a href="#" onclick="openDocsTool();return false" title="documentation index">Docs</a><a class="pg" href="/docs">↗</a>
     <a href="/grammar" title="the Ligurian grammar (page)">Grammar</a>
     <a href="/chess" title="the chess board (page)">Chess</a>
+    <a href="/xiangqi" title="xiangqi vs the trained model (page)">Xiangqi</a>
     <a href="/editor" title="the WYSIWYG page editor">Editor</a>
+    <a href="#" onclick="exec('System.Quit');return false" title="stop Orpheus" style="color:#e0a0a0">Quit</a>
   </span>
 </header>
 
@@ -281,9 +295,10 @@ function lineNodeAt(rt, n){
   return (n===rt) ? null : n;
 }
 function runTextLine(v, node){
+  if(node.classList && (node.classList.contains('h1')||node.classList.contains('h2'))) return; // headings are prose
   var cmd = node.classList && node.classList.contains('obj')
     ? (node.dataset.cmd||'')
-    : (node.textContent||'').trim();
+    : (node.textContent||'').replace(/\u200b/g,'').trim();
   cmd = cmd.replace(/^[\u25B8! ] ?/,'');
   if(!cmd || cmd.charAt(0)==='#' || cmd.slice(0,2)==='::') return;
   mark(v);
@@ -305,6 +320,50 @@ function insertObjAt(v, afterNode, cmd, html){
   }
   afterNode.after(d);
 }
+/* ---- markdown rendering: texts show RENDERED text by default --------------- */
+/* a line of md -> a DOM line: # / ## headings, **bold**, *italic*, `code`. The
+   raw syntax is reachable through Edit.Syntax (a linked source view). */
+function parseInline(text, into){
+  var re=/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g, last=0, m;
+  while((m=re.exec(text))){
+    if(m.index>last) into.appendChild(document.createTextNode(text.slice(last,m.index)));
+    var t=m[0];
+    if(t.charAt(0)==='`'){ var c=el('code',null,t.slice(1,-1)); into.appendChild(c); }
+    else if(t.slice(0,2)==='**'){ into.appendChild(el('b',null,t.slice(2,-2))); }
+    else { into.appendChild(el('i',null,t.slice(1,-1))); }
+    last=m.index+t.length;
+  }
+  if(last<text.length) into.appendChild(document.createTextNode(text.slice(last)));
+}
+function renderLine(text){
+  var d;
+  if(/^##\s+/.test(text)){ d=el('div','h2'); parseInline(text.replace(/^##\s+/,''), d); }
+  else if(/^#\s+/.test(text)){ d=el('div','h1'); parseInline(text.replace(/^#\s+/,''), d); }
+  else if(text===''){ d=el('div',null,'\u200b'); }
+  else { d=el('div'); parseInline(text, d); if(looksLikeCommand(text)) d.classList.add('cmdline'); }
+  return d;
+}
+function looksLikeCommand(t){
+  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|hello\.|libs)/.test(t.trim());
+}
+/* serialize ONE rendered line back to markdown */
+function lineToMarkdown(node){
+  var prefix = node.classList&&node.classList.contains('h1') ? '# '
+             : node.classList&&node.classList.contains('h2') ? '## ' : '';
+  var out='';
+  (function walk(n){
+    n.childNodes.forEach(function(c){
+      if(c.nodeType===3){ out+=c.textContent; return; }
+      var tag=(c.tagName||'').toLowerCase();
+      if(tag==='b'||tag==='strong'){ out+='**'; walk(c); out+='**'; }
+      else if(tag==='i'||tag==='em'){ out+='*'; walk(c); out+='*'; }
+      else if(tag==='code'){ out+='`'; walk(c); out+='`'; }
+      else walk(c);
+    });
+  })(node);
+  return prefix + out.replace(/\u200b/g,'');
+}
+
 /* serialize a text frame to markdown: objects become ```tool <cmd>``` fences */
 function textToMarkdown(v){
   var out=[];
@@ -314,7 +373,7 @@ function textToMarkdown(v){
       out.push('```tool '+(n.dataset.cmd||'')+'\n```');
       return;
     }
-    out.push(n.textContent||'');
+    out.push(lineToMarkdown(n));
   });
   return out.join('\n')+'\n';
 }
@@ -339,9 +398,33 @@ function setTextContent(v, md){
       void line;
       continue;
     }
-    v.rich.appendChild(el('div',null,lines[i]===''?'\u200b':lines[i]));
+    v.rich.appendChild(renderLine(lines[i]));
     i++;
   }
+}
+
+/* selection helpers for the formatting commands */
+function wrapSelection(tag){
+  var sel=window.getSelection();
+  if(!sel||sel.rangeCount===0||sel.isCollapsed) { logOut('select some text first', true); return; }
+  var r=sel.getRangeAt(0);
+  var node=el(tag);
+  try { r.surroundContents(node); } catch(e){ logOut('selection spans elements — select within one run', true); }
+}
+function toggleHeading(cls){
+  var sel=window.getSelection();
+  if(!sel||!sel.anchorNode){ logOut('put the caret on a line first', true); return; }
+  // find the line node inside whichever TEXT viewer holds the selection
+  var n=sel.anchorNode;
+  while(n && !(n.classList&&n.classList.contains('richtext'))) n=n.parentNode;
+  if(!n){ logOut('Edit.Head works inside a text frame', true); return; }
+  var line=sel.anchorNode;
+  if(line.nodeType===3) line=line.parentNode;
+  while(line && line.parentNode!==n) line=line.parentNode;
+  if(!line) return;
+  var had=line.classList.contains(cls);
+  line.classList.remove('h1','h2');
+  if(!had) line.classList.add(cls);
 }
 
 /* ---- the rich Log / tool-output streams ----------------------------------- */
@@ -505,8 +588,15 @@ function runObjectCommand(line, done){
   switch(head){
     case 'gfx': case 'draw':
       post('/api/gfx', rest, svgOr(done)); return true;
-    case 'trace': case 'render':
-      post('/api/trace', rest.split(/\s+/).filter(Boolean).join('\n'), svgOr(done)); return true;
+    case 'trace': case 'render': {
+      // scene=<latte expr> may contain spaces: keep everything after scene= on one line
+      var sm = rest.match(/^(.*?)\bscene=([\s\S]+)$/);
+      var body = sm
+        ? sm[1].split(/\s+/).filter(Boolean).join('\n') + (sm[1].trim()?'\n':'') + 'scene=' + sm[2].trim()
+        : rest.split(/\s+/).filter(Boolean).join('\n');
+      post('/api/trace', body, svgOr(done));
+      return true;
+    }
     case 'chart': case 'plot':
       if(/^market\b/.test(rest)){
         post('/api/marketchart', rest.replace(/^market\s*/,'').split(/\s+/).filter(Boolean).join('\n'), svgOr(done));
@@ -522,6 +612,73 @@ function runObjectCommand(line, done){
       post('/api/fin', rest, function(h){ done(h,false); }); return true;
     case 'gpu':
       post('/api/gpu', rest, function(h){ done(h,false); }); return true;
+    case 'debug': case 'trace': {
+      // debug [break=ARM] <expr> — run on Loom with the call tracer; the tree
+      // renders as nested expandables (click a call to step into it)
+      var body=rest;
+      var bm=rest.match(/^break=(\S+)\s+([\s\S]*)$/);
+      if(bm) body='break='+bm[1]+'\n'+bm[2];
+      post('/api/debug', body, function(out){
+        try{
+          var j=JSON.parse(out);
+          if(j.error){ done(j.error,true,true); return; }
+          function nodeHtml(n){
+            var inner=(n.children||[]).map(nodeHtml).join('');
+            var head='<code>'+esc(n.name)+'</code> '+esc(n.args)+' <span style="color:#8a8676">\u2192</span> <b>'+esc(n.result)+'</b>';
+            if(!inner) return '<div style="margin:1px 0 1px 16px">'+head+'</div>';
+            return '<details style="margin:1px 0 1px 16px"><summary style="cursor:pointer">'+head+
+              ' <span class="note">('+n.children.length+' calls)</span></summary>'+inner+'</details>';
+          }
+          var h='<h3>the call tree — click a call to step into it</h3>'+
+            (j.tree||[]).map(nodeHtml).join('')+
+            (j.truncated?'<div class="note" style="margin-top:5px">trace capped at 6000 calls — narrow with  debug break=ARM \u2026</div>':'')+
+            '<div class="note" style="margin-top:5px">result: <b>'+esc(j.result)+'</b> \u00b7 jet-accelerated arms run natively (their inner calls don\'t appear) \u00b7 CLI: latte debug</div>';
+          done(h,false);
+        } catch(e){ done(out,true,true); }
+      });
+      return true;
+    }
+    case 'phono': {
+      // phono preset=pie n=10 seed=3 changes=grimm1,verner  (or space-sep after changes=)
+      var body = rest.split(/\s+/).filter(Boolean).map(function(t){ return t.replace(/^changes=(.*)$/, function(_,v){ return 'changes='+v.replace(/,/g,' '); }); }).join('\n');
+      post('/api/phono', body||'preset=pie\nn=12', function(out){
+        try{
+          var j=JSON.parse(out);
+          if(j.error){ done(j.error,true,true); return; }
+          var h='<table class="m"><tr><td><b>PROTO</b></td><td><b>DAUGHTER</b></td></tr>';
+          j.rows.forEach(function(r){ h+='<tr><td>'+esc(r.proto)+'</td><td><b>'+esc(r.evolved||r.proto)+'</b></td></tr>'; });
+          done(h+'</table>',false);
+        } catch(e){ done(out,true,true); }
+      });
+      return true;
+    }
+    case 'soundlib': case 'soundchanges': {
+      // soundlib grimm1 verner words=pater bhrater
+      var toks=rest.split(/\s+/).filter(Boolean), ids=[], ws=[];
+      var inWords=false;
+      toks.forEach(function(t){
+        if(t.indexOf('words=')===0){ inWords=true; var w0=t.slice(6); if(w0) ws.push(w0); }
+        else if(inWords) ws.push(t);
+        else ids.push(t);
+      });
+      post('/api/soundlib', 'changes='+ids.join(' ')+'\nwords='+ws.join(' '), function(out){
+        try{
+          var j=JSON.parse(out);
+          if(j.error){ done(j.error,true,true); return; }
+          var h='<table class="m"><tr><td><b>PROTO</b></td><td><b>EVOLVED</b></td></tr>';
+          j.rows.forEach(function(r){ h+='<tr><td>'+esc(r.from)+'</td><td><b>'+esc(r.to)+'</b></td></tr>'; });
+          h+='</table><div class="note" style="margin-top:5px">order: '+esc(ids.join(' \u2192 '))+' — full front end at /soundlib</div>';
+          done(h,false);
+        } catch(e){ done(out,true,true); }
+      });
+      return true;
+    }
+    case 'drawing': case 'draw.open':
+      fetch('/api/drawing?name='+encodeURIComponent(rest))
+        .then(function(r){ if(!r.ok) throw new Error('no drawing \''+rest+'\' — make one at /draw and Store it'); return r.text(); })
+        .then(function(svg){ done(svg,false); })
+        .catch(function(e){ done(String(e),true,true); });
+      return true;
     case 'plan':
       post('/api/plan', rest||'demo3', function(out){
         done('<pre style="margin:0;font:12px/1.5 inherit;white-space:pre-wrap">'+esc(out)+'</pre>', false);
@@ -574,11 +731,45 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.Texts'){ logEcho(line); listTexts(); return; }
   if(headTok==='Edit.StoreText'){ logEcho(line); storeText(targetViewer(rest, fromViewer)); return; }
   if(headTok==='System.Tool'){ logEcho(line); openTool(rest||'Trade'); return; }
+  if(headTok==='System.Quit'){
+    logEcho(line);
+    if(!confirm('Quit Orpheus? The server stops; restart with `latte serve`.')) return;
+    fetch('/api/quit',{method:'POST'}).then(function(r){return r.text();}).then(function(h){
+      document.open(); document.write(h); document.close();
+    });
+    return;
+  }
   if(headTok==='System.Chess'||headTok==='Game.Chess'){ logEcho(line); window.location='/chess'; return; }
   if(headTok==='System.Docs'||headTok==='System.Help'){ logEcho(line); openDocsTool(); return; }
   if(headTok==='System.Edit'||headTok==='Edit.Doc'){ logEcho(line); if(rest) openDoc(rest); else logOut('System.Edit: name a doc, e.g.  System.Edit latte-language', true); return; }
   if(headTok==='Edit.Save'){ logEcho(line); saveDoc(targetViewer(rest, fromViewer)); return; }
   if(headTok==='Edit.Format'){ logEcho(line); formatFrame(targetViewer(rest, fromViewer)); return; }
+  // ---- selection formatting in RENDERED texts: highlight, then run the command
+  if(headTok==='Edit.Bold'){ logEcho(line); document.execCommand('bold'); return; }
+  if(headTok==='Edit.Italic'){ logEcho(line); document.execCommand('italic'); return; }
+  if(headTok==='Edit.Code'){ logEcho(line); wrapSelection('code'); return; }
+  if(headTok==='Edit.Head'||headTok==='Edit.Heading'){ logEcho(line); toggleHeading('h1'); return; }
+  if(headTok==='Edit.Sub'||headTok==='Edit.Subhead'){ logEcho(line); toggleHeading('h2'); return; }
+  // ---- the SYNTAX VIEW: the raw markdown behind a rendered text -------------
+  if(headTok==='Edit.Syntax'){
+    logEcho(line);
+    var tv=targetViewer(rest, fromViewer);
+    if(!tv||tv.kind!=='text'){ logOut('Edit.Syntax: mark a text frame first', true); return; }
+    var sv=makeViewer({name:tv.name+'.md', track:'user', kind:'frame', content:textToMarkdown(tv),
+      menu:[{cmd:'Edit.Render *',label:'Apply'},{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Close *',label:'Close'}],
+      foot:'the SYNTAX VIEW of '+tv.name+' — raw markdown; Apply re-renders it into the text frame'});
+    sv.syntaxFor=tv;
+    mark(sv);
+    return;
+  }
+  if(headTok==='Edit.Render'){
+    logEcho(line);
+    var rv=targetViewer(rest, fromViewer);
+    if(!rv||!rv.syntaxFor||!rv.textarea){ logOut('Edit.Render: mark a syntax view (opened by Edit.Syntax)', true); return; }
+    setTextContent(rv.syntaxFor, rv.textarea.value);
+    logOut('re-rendered into '+rv.syntaxFor.name);
+    return;
+  }
   if(headTok==='System.Sentiment'||headTok==='News.Score'){
     logEcho(line);
     if(!rest){ logOut('System.Sentiment: type some headline text after the command', true); return; }
@@ -623,7 +814,9 @@ function exec(line, fromViewer, ctx){
   var OUT = {gfx:'Gfx.Out',draw:'Gfx.Out',trace:'Trace.Out',render:'Trace.Out',
              chart:'Chart.Out',plot:'Chart.Out',ta:'TA.Out',indicators:'TA.Out',
              trade:'Trade.Out',advise:'Trade.Out',fin:'Fin.Out',gpu:'Gpu.Out',
-             derive:'Derive.Out',plan:'Plan.Out'};
+             derive:'Derive.Out',plan:'Plan.Out',drawing:'Draw.Out',
+             phono:'Phono.Out',soundlib:'Sound.Out',soundchanges:'Sound.Out',
+             debug:'Debug.Out',trace2:'Debug.Out'};
   if(OUT[headTok]){
     if(sink){
       logEcho(line);
@@ -695,7 +888,22 @@ function closeViewer(v){
   if(marked===v) marked=null;
   if(tr) relayout(tr);
 }
-function growViewer(v){ if(!v) return; v.grown=!v.grown; v.box.classList.toggle('grown', v.grown); v.box.style.flexGrow=''; }
+function growViewer(v){
+  if(!v) return;
+  // three states: normal -> grown -> MAXIMIZED (siblings collapse to their
+  // title bars; Grow a third time — or Grow another viewer — restores)
+  v.growState = ((v.growState||0)+1) % 3;
+  var tr = v.box.parentElement;
+  // leaving max state (ours or a sibling's): clear track-level max
+  viewers.forEach(function(x){
+    if(x!==v && x.growState===2 && x.box.parentElement===tr){ x.growState=0; x.box.classList.remove('grown','maxed'); }
+  });
+  tr.classList.remove('hasmax');
+  v.box.classList.remove('grown','maxed');
+  v.box.style.flexGrow='';
+  if(v.growState===1){ v.box.classList.add('grown'); }
+  else if(v.growState===2){ v.box.classList.add('grown','maxed'); tr.classList.add('hasmax'); }
+}
 function copyViewer(v){
   if(!v) return;
   if(v.textarea){ mark(makeViewer({name:v.name, track:'user', kind:'frame', content:v.textarea.value, menu:sourceMenu})); return; }
@@ -714,6 +922,32 @@ function newModuleViewer(name){
   mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
     foot:'a new module — Compile, then Store writes pkg/'+name+'.lat (a user package, loaded at every startup)'}));
 }
+/* the opening table of contents: documentation + tools, one click each */
+function buildContents(){
+  var v = makeViewer({name:'Contents', track:'sys', kind:'mods', menu:[{cmd:'System.Docs',label:'All docs'}],
+    foot:'click a document to open it as an editable frame; click a tool to open its tool text'});
+  fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
+    var names=t.split('\n').filter(Boolean);
+    var md=v.mods; md.innerHTML='';
+    md.appendChild(el('div','hd','DOCUMENTATION'));
+    names.forEach(function(n){
+      var d=el('div','m', n.replace(/-/g,' '));
+      d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openDoc(n); } };
+      md.appendChild(d);
+    });
+    md.appendChild(el('div','hd','TOOLS'));
+    Object.keys(TOOLS).forEach(function(n){
+      var d=el('div','m', n+'.Tool');
+      d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openTool(n); } };
+      md.appendChild(d);
+    });
+    var dx=el('div','m','Draw  (the graphics editor page)');
+    dx.onmousedown=function(e){ if(e.button===0||e.button===1) window.location='/draw'; };
+    md.appendChild(dx);
+  });
+  return v;
+}
+
 function refreshModules(){
   Promise.all([
     fetch('/api/sources').then(function(r){return r.text();}),
@@ -744,6 +978,8 @@ var sourceMenu=[
   {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var textMenu=[
   {cmd:'Edit.StoreText *',label:'Store'},
+  {cmd:'Edit.Bold',label:'Bold'},{cmd:'Edit.Italic',label:'Italic'},{cmd:'Edit.Head',label:'Head'},
+  {cmd:'Edit.Syntax *',label:'Syntax'},
   {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var toolMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Close *',label:'Close'}];
 var outMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
@@ -810,17 +1046,49 @@ var TOOLS = {
 '# the manual (incl. the calculation-debate criticisms):\n'+
 'System.Edit planning\n',
  Trace:
-'# Trace.Tool — the ray tracer written in Latte (Anvil-compiled).\n'+
+'# Trace.Tool — the ray tracer written in Latte (Anvil-compiled): checkered\n'+
+'# ground, sky, key + fill lights, shadows, speculars, graded reflections.\n'+
 'trace\n'+
 'trace w=160 h=120\n'+
-'trace w=64 h=48\n'+
-'# the scene lives in lib/trace.lat — open, edit, Compile, re-run:\n'+
+'#\n'+
+'# THE SCENE IS LATTE DATA: a list of [center [radius [color [refl 0]]]]\n'+
+'# (v3 makes vectors; signed nums are [sign mag]\u00d71000; refl 0..1000):\n'+
+'trace w=96 h=72 scene=[ [ (v3 [0 0] [0 800] [0 500]) [ [0 800] [ (v3 [0 950] [0 300] [0 300]) [ 700 0 ] ] ] ] [ [ (v3 [1 900] [0 500] [1 300]) [ [0 500] [ (v3 [0 300] [0 500] [0 950]) [ 0 0 ] ] ] ] 0 ] ]\n'+
+'#\n'+
+'# or edit the built-in scene (the spheres arm), Compile, and re-run:\n'+
 'System.Open trace\n',
  Derive:
 '# Derive.Tool — Ligurian, live: PIE -> Solar -> Heart by SCArs.\n'+
 'derive pie dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt srew h₂stér sāwel weseti\n'+
 'derive solar liga nivo mazda saules bazdā serdā\n'+
 'derive gen n=12 seed=42\n'+
+'sca liga nivo mazda\n',
+ Debug:
+'# Debug.Tool — the Loom call tracer: every arm call with its arguments and\n'+
+'# result, as an expandable tree. Click a call in the output to STEP into it;\n'+
+'# break=ARM keeps only subtrees rooted at that arm (the breakpoint).\n'+
+'debug (fib 6)\n'+
+'debug break=dec (fib 5)\n'+
+'debug (primes 20)\n'+
+'debug break=nadd (harmony_alloc [400 [1200 [400 0]]] 1000 40)\n'+
+'# note: jetted arms (fast %name) run natively — the tracer shows the call,\n'+
+'# not their inner reductions. CLI form:  latte debug --break ARM "<expr>"\n',
+ Conlang:
+'# Conlang.Tool — the conlanging suite. Four modular tools in one chain:\n'+
+'# phonology builder \u2192 word generator \u2192 sound-change library \u2192 SCArs.\n'+
+'#\n'+
+'## The sound-change library (20 attested changes, with provenance)\n'+
+'soundlib grimm1 verner words=pater bhrater\n'+
+'soundlib lenition apocope finaldevoice words=lupo skola amigod\n'+
+'#\n'+
+'## The phonology builder (presets: polynesian pie semitic sinitic)\n'+
+'phono preset=polynesian n=10 seed=7\n'+
+'phono preset=pie n=12 seed=42 changes=grimm1,verner,apocope\n'+
+'phono consonants=p t k s m n l vowels=a i u patterns=CVC,CV n=8 seed=3\n'+
+'#\n'+
+'# Full front ends: /soundlib (ordered selection, the .sca file, download)\n'+
+'# and /phono (inventory design). The Ligurian pipeline lives in Derive.Tool.\n'+
+'derive pie dʰeh₁s mr̥to ǵʰel\n'+
 'sca liga nivo mazda\n',
  Gpu:
 '# Gpu.Tool — the data-parallel device demo (matmul + Mandelbrot).\n'+
@@ -851,52 +1119,21 @@ function openDocsTool(){
 /* ---- the default desktop ------------------------------------------------- */
 var SYSTEM_TOOL =
 '# System.Tool — this is a TEXT: characters plus embedded objects. Middle-click\n'+
-'# any command line to run it (or caret + Ctrl/⌘+Enter). Object-producing\n'+
-'# commands (charts, drawings, renders, reports) embed their output RIGHT\n'+
-'# HERE in the text, under the line you ran — and System.NewText gives you as\n'+
-'# many texts as you like. Store saves a text with its objects to text/*.md.\n'+
-'#\n'+
-'# Try these — the objects appear inline below each line:\n'+
+'# any command line to run it (caret + Ctrl/⌘+Enter also works). Object-producing\n'+
+'# commands embed their output RIGHT HERE, under the line you ran:\n'+
 'chart market days=120\n'+
-'gfx Tool.rings 6\n'+
 'trace w=96 h=72\n'+
-'ta\n'+
 '#\n'+
-'# The header links open TOOL TEXTS (Trade, Charts, Finance, Plan, Trace,\n'+
-'# Derive, GPU, Docs) — each a text like this one. Tools run IN PARALLEL:\n'+
-'# middle-click several lines in a row; each fills in as its server thread\n'+
-'# finishes, while you keep editing anywhere else.\n'+
+'# The CONTENTS viewer (right) is the table of contents: every document and\n'+
+'# tool, one click. Tool texts hold each tool\'s worked examples; the manual\n'+
+'# pages carry runnable command examples in their relevant sections — open\n'+
+'# docs/the-system.md for the full tour of texts, objects, Store and load:\n'+
+'System.Edit the-system\n'+
 '#\n'+
-'# Texts and documents:\n'+
-'System.NewText notes\n'+
-'System.Texts\n'+
-'System.OpenText notes\n'+
-'System.Edit latte-language\n'+
-'#\n'+
-'# Commands are Latte arms (lib/tool.lat); the language is live:\n'+
-'Tool.fib 30\n'+
-'Tool.primes 60\n'+
-'eval (mul (add 3 4) 5)\n'+
-'net let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)\n'+
-'#\n'+
-'# Graphical front ends are Latte data (lib/ui.lat):\n'+
-'ui Tool.calc\n'+
-'#\n'+
-'# Packages: a package IS a compiled Latte source. Mark hello.Mod below, hit\n'+
-'# Compile in its menu (it becomes part of the running system at once), then:\n'+
+'# Texts: System.NewText notes · System.Texts · Edit.StoreText (menu: Store)\n'+
+'# Packages: edit hello.Mod below, Compile (menu), then:\n'+
 'hello.fib 20\n'+
-'# Store writes user modules to pkg/<name>.lat — loaded at every startup.\n'+
-'System.New mymod\n'+
-'System.Open tool\n'+
-'#\n'+
-'# Score text and documents with the trained classifier:\n'+
-'System.Sentiment selloff deepens as tech stocks falter\n'+
-'Doc.Score visualization-and-ml\n'+
-'#\n'+
-'# Sound change, planning, the rest:\n'+
-'sca liga nivo mazda\n'+
-'plan 40 0 1000\n'+
-'libs\n';
+'# Quit is in the header (or run System.Quit).\n';
 
 var HELLO_MOD =
 'import std\n'+
@@ -914,6 +1151,7 @@ window.addEventListener('load', function(){
   st.textname='system-tool';
   var h=makeViewer({name:'hello.Mod', track:'user', kind:'frame', content:HELLO_MOD, menu:sourceMenu,
     foot:'module `hello` — Compile loads it into the running system; Store writes pkg/hello.lat'});
+  buildContents();
   makeViewer({name:'System.Log', track:'sys', kind:'log', menu:logMenu,
     foot:'the command trail — middle-click a line to run it again'});
   makeViewer({name:'Modules', track:'sys', kind:'mods', menu:modsMenu});
