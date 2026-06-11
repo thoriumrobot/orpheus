@@ -89,11 +89,37 @@ any line to re-run it) and the Modules index. `System.Sentiment <text>` scores
 text in place with the trained classifier; `Doc.Score <name>` scores a whole
 document into its evidence table.
 
+## Creating a tool — wholly inside the GUI
+
+A tool is a TEXT plus, when it needs new verbs, a PACKAGE. The whole loop runs
+in the System; nothing requires a shell:
+
+1. `System.New mytool` opens a module frame. Write arms in Latte (`Format` in
+   the menu keeps it tidy; `debug (myarm 3)` traces it when it misbehaves).
+2. **Compile** (menu): the module joins the running system immediately.
+   **Store**: it persists to `pkg/mytool.lat` and loads at every startup.
+3. `System.NewText mytool` opens a text. Write command lines — `mytool.myarm
+   42`, `chart …`, `drawing logo`, anything — with prose between them.
+   Middle-click a line: **every command's output embeds in the text**,
+   including your own package's arms (a `<pre>` object for textual results,
+   live SVG for charts and drawings).
+4. **Store** (menu): the text persists to `text/mytool-tool.md` with its
+   objects serialized as ```` ```tool ```` fences.
+
+Stored texts survive restarts — `System.OpenText mytool` brings the tool back
+with every object rehydrated — and **stored tool texts override the built-in
+ones**: edit Trade.Tool to your taste, Store it, and your version is what the
+Trade header link opens next session (delete `text/trade-tool.md` to restore
+the default). System.Tool itself works the same way.
+
 ## The toolbox
 
-Beyond the core texts: **✎ Draw** (header) is a full vector graphics editor —
-shapes, pen, text, colors, move/resize, layering, undo; Store a drawing and
-embed it in any text with `drawing <name>` (one tool calling another).
+Beyond the core texts: **✎ Draw** (header) is a full vector graphics editor
+built for covers and posters as much as diagrams: canvas presets (A4 poster,
+book cover, square, banner), background color, shapes, stars, pen, text with
+font/size/weight control, snap-to-grid, center/middle alignment, move/resize,
+layering, duplicate, undo; Store a drawing and embed it in any text with
+`drawing <name>` (one tool calling another).
 **Debug** opens the Loom call tracer: `debug (fib 6)` records every arm call
 with its arguments and result as an expandable tree (click to step in;
 `debug break=ARM …` is the breakpoint; `latte debug` is the CLI form).

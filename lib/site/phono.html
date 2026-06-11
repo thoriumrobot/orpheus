@@ -70,7 +70,15 @@ through attested changes — the builder calls the word generator calls the chan
   <div class="chgs" id="chgs"></div>
   <div class="hint">selected: <span id="sel">none — words will be shown unevolved</span></div>
   <div class="row"><button class="go" onclick="run()">Generate &amp; evolve</button>
-  <span class="hint" style="padding:0">same seed = same words; in the System GUI, <b>phono preset=pie n=10 changes=grimm1</b> embeds this anywhere</span></div>
+  <input type="text" id="phname" placeholder="phonology name" style="max-width:150px">
+  <button onclick="storePhon()">Store .phon</button>
+  <select id="phload"><option value="">— open stored —</option></select>
+  <span class="hint" style="padding:0">same seed = same words; GUI command: <b>phono preset=pie n=10 changes=grimm1</b></span></div>
+</div>
+
+<div class="panel">
+  <h2>BELIEVABILITY — typological checks (UPSID / WALS)</h2>
+  <div class="bd" id="report" style="padding:10px 12px;font-size:12px"><span style="color:#6b6858">generate to check this phonology against the cross-linguistic record</span></div>
 </div>
 
 <div class="cols">
@@ -80,7 +88,39 @@ through attested changes — the builder calls the word generator calls the chan
 </div>
 <script>
 "use strict";
-var SEL=[], LIB=[];
+var SEL=[], LIB=[], lastPhon='';
+function storePhon(){
+  var name=document.getElementById('phname').value.trim()||'proto';
+  if(!lastPhon){ run(); setTimeout(storePhon, 400); return; }
+  fetch('/api/phonfile?name='+encodeURIComponent(name),{method:'POST',body:lastPhon})
+    .then(function(r){return r.text();}).then(function(msg){ document.querySelector('.sub').textContent=msg+' — any tool reading phonology/*.phon picks it up.'; refreshPhonList(); });
+}
+function refreshPhonList(){
+  fetch('/api/phonfiles').then(function(r){return r.text();}).then(function(t){
+    var sel=document.getElementById('phload');
+    sel.innerHTML='<option value="">— open stored —</option>';
+    t.split('\n').filter(Boolean).forEach(function(n){
+      var o=document.createElement('option'); o.value=n; o.textContent=n+'.phon'; sel.appendChild(o);
+    });
+  });
+}
+window.addEventListener('load', function(){
+  refreshPhonList();
+  document.getElementById('phload').addEventListener('change', function(){
+    var n=this.value; if(!n) return;
+    fetch('/api/phonfile?name='+encodeURIComponent(n)).then(function(r){return r.text();}).then(function(t){
+      t.split('\n').forEach(function(line){
+        var m=line.match(/^(consonants|vowels|patterns)\s*=\s*(.+)$/);
+        if(!m) return;
+        if(m[1]==='consonants') document.getElementById('cons').value=m[2].trim();
+        if(m[1]==='vowels') document.getElementById('vows').value=m[2].trim();
+        if(m[1]==='patterns') document.getElementById('pats').value=m[2].trim();
+      });
+      document.getElementById('phname').value=n;
+      run();
+    });
+  });
+});
 var PRESETS={
   polynesian:{cons:"p k m n l h w", vows:"a e i o u", pats:"CV V CV CVV"},
   pie:{cons:"p t k b d g s m n r l w j h", vows:"a e i o u", pats:"CVC CV CCVC VC CVCC"},
@@ -120,6 +160,13 @@ function run(){
     '\nchanges='+SEL.join(' ');
   fetch('/api/phono',{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){
     if(j.error){ document.getElementById('sca').textContent='error: '+j.error; return; }
+    lastPhon=j.phon||'';
+    if(j.report){
+      var col={ok:'#1a6e2a',note:'#8a6d1a',warn:'#8d1f1f'};
+      document.getElementById('report').innerHTML=j.report.map(function(r){
+        return '<div style="margin:3px 0"><b style="color:'+col[r.level]+'">'+r.level.toUpperCase()+'</b> — '+r.msg+'</div>';
+      }).join('');
+    }
     document.getElementById('sca').textContent=j.sca||':: no changes selected — proto words shown as-is';
     var h='<table><tr><th>PROTO</th><th>DAUGHTER</th></tr>';
     j.rows.forEach(function(r){

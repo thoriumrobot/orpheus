@@ -78,7 +78,7 @@ pub fn ai_move(state: &N, ml: bool) -> Option<N> {
     // each other; on any disagreement we fall back to the Latte chooser.
     let (board, side) = board_side(state);
     let legal = legal_moves(state);
-    if let Some((f, t)) = engine_move(&board, side, 5) {
+    if let Some((f, t)) = engine_move(&board, side, 6) {
         if legal.iter().any(|&(lf, lt)| lf == f && lt == t) {
             return Some(cell(num(f), cell(num(t), num(0))));
         }
@@ -351,6 +351,12 @@ fn gen_moves(b: &Board, side: i8) -> Vec<(usize, usize)> {
 /// Quiescence: stand pat, then captures only (prevents horizon blunders).
 fn qsearch(b: &Board, side: i8, mut alpha: i32, beta: i32, nodes: &mut u64) -> i32 {
     *nodes += 1;
+    if king_sq_opt(b, side).is_none() {
+        return -29000;
+    }
+    if king_sq_opt(b, if side == 1 { 2 } else { 1 }).is_none() {
+        return 29000;
+    }
     let stand = if side == 1 { eval(b) } else { -eval(b) };
     if stand >= beta {
         return beta;
@@ -363,9 +369,6 @@ fn qsearch(b: &Board, side: i8, mut alpha: i32, beta: i32, nodes: &mut u64) -> i
             break; // captures are ordered first
         }
         let nb = make(b, f, t);
-        if in_check(&nb, side) {
-            continue;
-        }
         let score = -qsearch(&nb, 3 - side, -beta, -alpha, nodes);
         if score >= beta {
             return beta;
@@ -378,6 +381,18 @@ fn qsearch(b: &Board, side: i8, mut alpha: i32, beta: i32, nodes: &mut u64) -> i
 }
 
 fn alphabeta(b: &Board, side: i8, depth: u32, mut alpha: i32, beta: i32, nodes: &mut u64) -> i32 {
+    // the optimization proven on xiangqi, transferred: search PSEUDO-legal
+    // moves and make KING CAPTURE the terminal, instead of paying a full
+    // attacked() scan per move for legality. A move that leaves the king en
+    // prise is refuted one ply later by the capture, so values agree — and
+    // the per-node cost drops by the whole legality filter. (The root still
+    // filters strictly, and the chosen move is verified against Latte.)
+    if king_sq_opt(b, side).is_none() {
+        return -29000 - depth as i32; // our king is gone: lost
+    }
+    if king_sq_opt(b, if side == 1 { 2 } else { 1 }).is_none() {
+        return 29000 + depth as i32;
+    }
     if depth == 0 {
         return qsearch(b, side, alpha, beta, nodes);
     }
@@ -385,9 +400,6 @@ fn alphabeta(b: &Board, side: i8, depth: u32, mut alpha: i32, beta: i32, nodes: 
     let mut any = false;
     for (f, t) in gen_moves(b, side) {
         let nb = make(b, f, t);
-        if in_check(&nb, side) {
-            continue; // own king left in check: illegal
-        }
         any = true;
         let score = -alphabeta(&nb, 3 - side, depth - 1, -beta, -alpha, nodes);
         if score >= beta {
@@ -398,10 +410,16 @@ fn alphabeta(b: &Board, side: i8, depth: u32, mut alpha: i32, beta: i32, nodes: 
         }
     }
     if !any {
-        // mate or stalemate
+        // no pseudo moves at all (bare king boxed by own pieces): treat as
+        // mate/stalemate by the strict test
         return if in_check(b, side) { -30000 + (5 - depth as i32) } else { 0 };
     }
     alpha
+}
+
+fn king_sq_opt(b: &Board, side: i8) -> Option<usize> {
+    let kp = if side == 1 { 6 } else { 12 };
+    b.iter().position(|&p| p == kp)
 }
 
 /// The engine's move for `side`: iterative deepening to `max_depth`, stopping

@@ -47,7 +47,34 @@
     <button id="t-ellipse" onclick="setTool('ellipse')">Ellipse</button>
     <button id="t-line" onclick="setTool('line')">Line</button>
     <button id="t-pen" onclick="setTool('pen')">Pen</button>
+    <button id="t-star" onclick="setTool('star')">Star</button>
     <button id="t-text" onclick="setTool('text')">Text</button>
+  </div>
+  <div class="grp">
+    <label>canvas</label>
+    <select id="sizesel" onchange="setSize(this.value)">
+      <option value="860x560">editor 860×560</option>
+      <option value="595x842">A4 poster 595×842</option>
+      <option value="600x900">book cover 600×900</option>
+      <option value="800x800">square 800×800</option>
+      <option value="1200x400">banner 1200×400</option>
+    </select>
+    <label>bg</label><input type="color" id="bg" value="#ffffff" onchange="setBg(this.value)">
+    <label><input type="checkbox" id="snap"> snap</label>
+  </div>
+  <div class="grp">
+    <label>font</label>
+    <select id="font">
+      <option>ui-monospace,Menlo,monospace</option>
+      <option>Georgia,serif</option>
+      <option>Helvetica,Arial,sans-serif</option>
+      <option>'Times New Roman',serif</option>
+      <option>Futura,'Trebuchet MS',sans-serif</option>
+    </select>
+    <label>size</label><input type="range" id="fsize" min="10" max="120" value="18">
+    <button onclick="toggleBold()" title="bold the selected text">B</button>
+    <button onclick="alignSel('h')" title="center horizontally on canvas">⇔ center</button>
+    <button onclick="alignSel('v')" title="center vertically on canvas">⇕ middle</button>
   </div>
   <div class="grp">
     <label>fill</label><input type="color" id="fill" value="#b9bce0">
@@ -82,14 +109,56 @@ var fillI=document.getElementById('fill'), strokeI=document.getElementById('stro
     widthI=document.getElementById('width'), opI=document.getElementById('opacity');
 function setTool(t){
   tool=t;
-  ['select','rect','ellipse','line','pen','text'].forEach(function(x){
+  ['select','rect','ellipse','line','pen','star','text'].forEach(function(x){
     document.getElementById('t-'+x).classList.toggle('on', x===t);
   });
   svg.classList.toggle('selecting', t==='select');
   if(t!=='select') select(null);
 }
 setTool('rect');
-function pt(e){ var r=svg.getBoundingClientRect(); return {x:e.clientX-r.left, y:e.clientY-r.top}; }
+function pt(e){
+  var r=svg.getBoundingClientRect();
+  var p={x:e.clientX-r.left, y:e.clientY-r.top};
+  if(document.getElementById('snap').checked){ p.x=Math.round(p.x/20)*20; p.y=Math.round(p.y/20)*20; }
+  return p;
+}
+function setSize(v){
+  var m=v.split('x'); svg.setAttribute('width',m[0]); svg.setAttribute('height',m[1]);
+  if(bgRect()){ bgRect().setAttribute('width',m[0]); bgRect().setAttribute('height',m[1]); }
+}
+function bgRect(){ var f=svg.firstChild; return (f && f.id==='bgrect') ? f : null; }
+function setBg(c){
+  var r=bgRect();
+  if(!r){
+    r=mk('rect'); r.id='bgrect';
+    attrs(r,{x:0,y:0,width:svg.getAttribute('width'),height:svg.getAttribute('height'),stroke:'none'});
+    svg.insertBefore(r, svg.firstChild);
+  }
+  r.setAttribute('fill', c);
+}
+function starPoints(cx,cy,R){
+  var pts=[], r=R*0.42;
+  for(var k=0;k<10;k++){
+    var a=-Math.PI/2 + k*Math.PI/5, rad=(k%2===0)?R:r;
+    pts.push((cx+rad*Math.cos(a)).toFixed(1)+','+(cy+rad*Math.sin(a)).toFixed(1));
+  }
+  return pts.join(' ');
+}
+function toggleBold(){
+  if(selected && selected.tagName==='text'){
+    snapshot();
+    selected.setAttribute('font-weight', selected.getAttribute('font-weight')==='bold'?'normal':'bold');
+  }
+}
+function alignSel(axis){
+  if(!selected) return;
+  snapshot();
+  var W=+svg.getAttribute('width'), H=+svg.getAttribute('height');
+  var b=bbox(selected);
+  if(axis==='h') translate(selected, (W-b.width)/2 - b.x, 0);
+  else translate(selected, 0, (H-b.height)/2 - b.y);
+  select(selected);
+}
 function attrs(el, a){ for(var k in a) el.setAttribute(k,a[k]); return el; }
 function mk(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
 function styled(el){
@@ -100,7 +169,7 @@ function styled(el){
 }
 function snapshot(){ history.push(svg.innerHTML); if(history.length>80) history.shift(); }
 function undo(){ if(history.length){ select(null); svg.innerHTML=history.pop(); rebind(); } }
-function rebind(){ Array.prototype.forEach.call(svg.children, function(c){ if(!c.classList.contains('sel-outline') && !c.classList.contains('handle')) bindShape(c); }); }
+function rebind(){ Array.prototype.forEach.call(svg.children, function(c){ if(c.id!=='bgrect' && !c.classList.contains('sel-outline') && !c.classList.contains('handle')) bindShape(c); }); }
 
 /* ---- creation ---- */
 var start=null;
@@ -114,9 +183,15 @@ svg.addEventListener('mousedown', function(e){
   else if(tool==='ellipse'){ drawing=styled(attrs(mk('ellipse'),{cx:p.x,cy:p.y,rx:1,ry:1})); }
   else if(tool==='line'){ drawing=styled(attrs(mk('line'),{x1:p.x,y1:p.y,x2:p.x,y2:p.y})); }
   else if(tool==='pen'){ drawing=styled(attrs(mk('polyline'),{points:p.x+','+p.y})); }
+  else if(tool==='star'){
+    drawing=styled(attrs(mk('polygon'),{points:starPoints(p.x,p.y,2)}));
+    drawing.dataset.cx=p.x; drawing.dataset.cy=p.y;
+  }
   else if(tool==='text'){
     var t=prompt('Text:'); if(!t){ history.pop(); return; }
-    var n=styled(attrs(mk('text'),{x:p.x,y:p.y,'font-size':18,'font-family':'ui-monospace,Menlo,monospace'}));
+    var n=styled(attrs(mk('text'),{x:p.x,y:p.y,
+      'font-size':document.getElementById('fsize').value,
+      'font-family':document.getElementById('font').value}));
     n.setAttribute('fill', fillI.value); n.textContent=t;
     svg.appendChild(n); bindShape(n); drawing=null;
     return;
@@ -136,6 +211,10 @@ window.addEventListener('mousemove', function(e){
     attrs(drawing,{x2:p.x,y2:p.y});
   } else if(drawing.tagName==='polyline'){
     drawing.setAttribute('points', drawing.getAttribute('points')+' '+p.x+','+p.y);
+  } else if(drawing.tagName==='polygon'){
+    var cx=+drawing.dataset.cx, cy=+drawing.dataset.cy;
+    var R=Math.max(4, Math.hypot(p.x-cx, p.y-cy));
+    drawing.setAttribute('points', starPoints(cx,cy,R));
   }
 });
 window.addEventListener('mouseup', function(){
@@ -205,7 +284,7 @@ function translate(el,dx,dy){
     case 'ellipse': attrs(el,{cx:num(el,'cx')+dx, cy:num(el,'cy')+dy}); break;
     case 'line': attrs(el,{x1:num(el,'x1')+dx,y1:num(el,'y1')+dy,x2:num(el,'x2')+dx,y2:num(el,'y2')+dy}); break;
     case 'text': attrs(el,{x:num(el,'x')+dx, y:num(el,'y')+dy}); break;
-    case 'polyline':
+    case 'polyline': case 'polygon':
       el.setAttribute('points', el.getAttribute('points').trim().split(/\s+/).map(function(pr){
         var xy=pr.split(','); return (+xy[0]+dx)+','+(+xy[1]+dy);
       }).join(' '));
@@ -218,7 +297,7 @@ function scaleShape(el, ox, oy, sx, sy){
     case 'ellipse': attrs(el,{cx:ox+(num(el,'cx')-ox)*sx, cy:oy+(num(el,'cy')-oy)*sy, rx:num(el,'rx')*sx, ry:num(el,'ry')*sy}); break;
     case 'line': attrs(el,{x1:ox+(num(el,'x1')-ox)*sx, y1:oy+(num(el,'y1')-oy)*sy, x2:ox+(num(el,'x2')-ox)*sx, y2:oy+(num(el,'y2')-oy)*sy}); break;
     case 'text': attrs(el,{x:ox+(num(el,'x')-ox)*sx, y:oy+(num(el,'y')-oy)*sy, 'font-size':Math.max(6,(parseFloat(el.getAttribute('font-size'))||18)*sy)}); break;
-    case 'polyline':
+    case 'polyline': case 'polygon':
       el.setAttribute('points', el.getAttribute('points').trim().split(/\s+/).map(function(pr){
         var xy=pr.split(','); return (ox+(+xy[0]-ox)*sx)+','+(oy+(+xy[1]-oy)*sy);
       }).join(' '));
@@ -226,6 +305,12 @@ function scaleShape(el, ox, oy, sx, sy){
   }
 }
 /* live restyle of the selection */
+document.getElementById('fsize').addEventListener('input', function(){
+  if(selected && selected.tagName==='text'){ selected.setAttribute('font-size', this.value); select(selected); }
+});
+document.getElementById('font').addEventListener('change', function(){
+  if(selected && selected.tagName==='text'){ snapshot(); selected.setAttribute('font-family', this.value); }
+});
 [fillI,strokeI,widthI,opI].forEach(function(inp){
   inp.addEventListener('input', function(){
     if(!selected) return;
@@ -262,7 +347,8 @@ function clearAll(){ snapshot(); select(null); svg.innerHTML=''; }
 /* ---- persistence ---- */
 function serialize(){
   select(null);
-  return '<svg xmlns="http://www.w3.org/2000/svg" width="860" height="560" viewBox="0 0 860 560">'+svg.innerHTML+'</svg>';
+  var W=svg.getAttribute('width'), H=svg.getAttribute('height');
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'">'+svg.innerHTML+'</svg>';
 }
 function save(){
   var name=document.getElementById('name').value.trim()||'untitled';

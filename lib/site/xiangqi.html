@@ -9,18 +9,15 @@
  h1{font-size:17px;margin:6px 0 10px}
  .boardbox{background:#e8c98f;border:2px solid #6b5532;border-radius:5px;padding:14px;box-shadow:0 2px 10px #0003;position:relative}
  #board{display:grid;grid-template-columns:repeat(9,52px);grid-template-rows:repeat(10,52px);gap:0;position:relative}
- .sq{width:52px;height:52px;display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer}
- .sq::before{content:'';position:absolute;inset:0;background:
-   linear-gradient(#6b5532,#6b5532) center/100% 1.5px no-repeat,
-   linear-gradient(#6b5532,#6b5532) center/1.5px 100% no-repeat}
- .sq.river::before{background:linear-gradient(#6b5532,#6b5532) center/1.5px 0 no-repeat, linear-gradient(#6b5532,#6b5532) center/100% 1.5px no-repeat}
+ .sq{width:52px;height:52px;display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;z-index:1}
+ #lines{position:absolute;left:14px;top:14px;pointer-events:none;z-index:0}
  .pc{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:21px;font-weight:700;
      box-shadow:0 2px 4px #0005, inset 0 0 0 2.5px currentColor, inset 0 0 0 5px #f4e6c8;background:#f4e6c8;z-index:2;user-select:none}
  .pc.w{color:#a8341f}
  .pc.b{color:#1c1c30}
  .sq.sel .pc{box-shadow:0 0 0 3px #33387e, 0 2px 4px #0005, inset 0 0 0 2.5px currentColor, inset 0 0 0 5px #f4e6c8}
  .dot{width:13px;height:13px;border-radius:50%;background:#33387e88;z-index:1}
- .rivertext{position:absolute;left:0;right:0;text-align:center;color:#6b5532;font-size:15px;letter-spacing:14px;pointer-events:none;z-index:1}
+ .rivertext{position:absolute;left:0;right:0;top:243px;text-align:center;color:#6b5532;font-size:16px;letter-spacing:16px;pointer-events:none;z-index:1;opacity:.85}
  .side{flex:1;min-width:260px}
  .panel{background:#faf8f1;border:1px solid #8e8a7a;border-radius:4px;box-shadow:0 1px 4px #0002;margin-bottom:12px}
  .panel h2{font-size:11px;letter-spacing:.6px;margin:0;padding:6px 11px;background:linear-gradient(#cfcaba,#c4bfae);border-bottom:1px solid #8e8a7a}
@@ -55,6 +52,7 @@
   <div>
     <h1>Xiangqi — vs the trained model</h1>
     <div class="boardbox">
+      <svg id="lines" width="468" height="520" xmlns="http://www.w3.org/2000/svg"></svg>
       <div id="board"></div>
       <div class="rivertext" id="riv">楚 河 　 漢 界</div>
     </div>
@@ -80,6 +78,30 @@
 <script>
 "use strict";
 var st=null, sel=-1;
+(function drawBoard(){
+  var svg=document.getElementById('lines'), S=52, o=26;
+  function ln(x1,y1,x2,y2,wd){
+    var l=document.createElementNS('http://www.w3.org/2000/svg','line');
+    l.setAttribute('x1',x1);l.setAttribute('y1',y1);l.setAttribute('x2',x2);l.setAttribute('y2',y2);
+    l.setAttribute('stroke','#6b5532');l.setAttribute('stroke-width',wd||1.4);
+    svg.appendChild(l);
+  }
+  // horizontals: rows 0..9
+  for(var r=0;r<10;r++) ln(o, o+r*S, o+8*S, o+r*S);
+  // verticals: edge files run through; inner files break at the river
+  for(var c=0;c<9;c++){
+    if(c===0||c===8) ln(o+c*S, o, o+c*S, o+9*S);
+    else { ln(o+c*S, o, o+c*S, o+4*S); ln(o+c*S, o+5*S, o+c*S, o+9*S); }
+  }
+  // palace diagonals
+  ln(o+3*S,o,o+5*S,o+2*S); ln(o+5*S,o,o+3*S,o+2*S);
+  ln(o+3*S,o+7*S,o+5*S,o+9*S); ln(o+5*S,o+7*S,o+3*S,o+9*S);
+  // border
+  var b=document.createElementNS('http://www.w3.org/2000/svg','rect');
+  b.setAttribute('x',o-7);b.setAttribute('y',o-7);b.setAttribute('width',8*S+14);b.setAttribute('height',9*S+14);
+  b.setAttribute('fill','none');b.setAttribute('stroke','#6b5532');b.setAttribute('stroke-width',2.6);
+  svg.appendChild(b);
+})();
 var GLYPH={1:'兵',2:'馬',3:'相',4:'車',5:'炮',6:'仕',7:'帥',8:'卒',9:'馬',10:'象',11:'車',12:'砲',13:'士',14:'將'};
 function api(body){
   return fetch('/api/xiangqi',{method:'POST',headers:{'Content-Type':'text/plain'},body:body})
@@ -108,9 +130,6 @@ function render(){
     (function(i){ d.onclick=function(){ click(i); }; })(i);
     b.appendChild(d);
   }
-  // the river band: blank the vertical lines visually via the text overlay
-  var rivY = document.querySelector('.boardbox').offsetTop;
-  document.getElementById('riv').style.top = (14 + 4.5*52 + 18) + 'px';
   var stat=document.getElementById('status');
   if(st.status===1){
     stat.textContent = (st.side===1?'Red':'Black')+' has no move — '+(st.side===1?'the model wins':'you win')+'!';

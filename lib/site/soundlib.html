@@ -54,7 +54,7 @@
 </div>
 <div class="wrap">
 <h1>The Sound-Change Library</h1>
-<p class="sub">Twenty attested changes from real language history. Click to add them <b>in order</b> (order matters — chain shifts depend on it);
+<p class="sub">Forty-two attested changes from real language history. Click to add them <b>in order</b> (order matters — chain shifts depend on it);
 the tool assembles a SCArs ruleset and runs your sample words through the engine: one tool calling another.</p>
 <div class="cols">
   <div class="panel">
@@ -67,7 +67,12 @@ the tool assembles a SCArs ruleset and runs your sample words through the engine
     <div class="row">
       <input type="text" id="words" value="pater bhrater lupo skola" spellcheck="false" title="sample words">
       <button class="go" onclick="run()">Run through SCArs</button>
-      <button onclick="downloadSca()">Download .sca</button>
+    </div>
+    <div class="row">
+      <input type="text" id="scaname" placeholder="ruleset name" style="max-width:160px">
+      <button onclick="storeSca()">Store .sca</button>
+      <select id="scaload"><option value="">— open stored ruleset —</option></select>
+      <button onclick="downloadSca()">Download</button>
     </div>
     <div class="hint">sample words above; try <i>pater</i> with Grimm + Verner, or <i>skola</i> with prothesis.
     In the System GUI: <b>soundlib grimm1 verner words=pater</b> embeds this table in any text.</div>
@@ -116,6 +121,36 @@ function run(){
     document.getElementById('rows').innerHTML=h+'</table>';
   });
 }
+function storeSca(){
+  var name=document.getElementById('scaname').value.trim()||'ruleset';
+  var t=document.getElementById('sca').textContent;
+  if(t.indexOf('class')<0){ run(); setTimeout(function(){ storeSca(); }, 400); return; }
+  fetch('/api/scafile?name='+encodeURIComponent(name),{method:'POST',body:t})
+    .then(function(r){return r.text();}).then(function(msg){
+      document.querySelector('.sub').textContent=msg+' — SCArs and the phonology builder load it directly.';
+      refreshScaList();
+    });
+}
+function refreshScaList(){
+  fetch('/api/scafiles').then(function(r){return r.text();}).then(function(t){
+    var sel=document.getElementById('scaload');
+    sel.innerHTML='<option value="">— open stored ruleset —</option>';
+    t.split('\n').filter(Boolean).forEach(function(n){
+      var o=document.createElement('option'); o.value=n; o.textContent=n+'.sca'; sel.appendChild(o);
+    });
+  });
+}
+document.getElementById('scaload').addEventListener('change', function(){
+  var n=this.value; if(!n) return;
+  fetch('/api/scafile?name='+encodeURIComponent(n)).then(function(r){return r.text();}).then(function(t){
+    document.getElementById('sca').textContent=t;
+    document.getElementById('scaname').value=n;
+    // restore the ordered selection from the ":: changes:" header
+    var m=t.match(/:: changes:\s*(.+)/);
+    if(m){ CHOSEN=m[1].trim().split(/\s+/); renderChosen(); run(); }
+  });
+});
+refreshScaList();
 function downloadSca(){
   var t=document.getElementById('sca').textContent;
   var a=document.createElement('a');

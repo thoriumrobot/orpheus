@@ -396,9 +396,19 @@ a **debugger** (`latte debug`, or `debug <expr>` in any text) — the Loom call
 tracer rendering every arm call as an expandable tree with `break=ARM`
 breakpoints; the **conlang suite** (an attested sound-change library that
 assembles SCArs rulesets, and a phonology builder that generates and evolves
-vocabularies through it); **xiangqi** against a model whose piece values were
-learned by gradient descent in Latte; and a ray tracer whose scene is Latte
-data (`trace … scene=[ … ]`), with key + fill lights and graded reflections.
+vocabularies through it); **xiangqi** on a traditional board (river, palace
+diagonals) against a model whose piece values were learned by gradient descent
+in Latte, driving a native search — whose pseudo-move optimization transferred
+back to make the chess engine a ply deeper; and a ray tracer whose scene is
+Latte data (`trace … scene=[ … ]`), with key + fill lights and graded
+reflections. The conlang suite checks generated phonologies against the
+typological record (UPSID/WALS implications, with evidence), and persists
+rulesets as ordinary `.sca` files plus phonologies as `.phon` files that any
+tool can parse; the Draw editor designs covers and posters (canvas presets,
+backgrounds, font control, stars, snap, centering). Tool texts and System.Tool
+persist your stored versions across runs, and every command's output — your
+own packages' arms included — embeds as an object in texts, so **new tools are
+creatable wholly inside the GUI** (the recipe is in docs/the-system.md).
 
 ## The GUI — a WYSIWYG Facet editor
 

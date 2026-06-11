@@ -536,15 +536,47 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let body = String::from_utf8_lossy(&req.body);
             let mut changes: Vec<String> = Vec::new();
             let mut words: Vec<String> = Vec::new();
+            let mut file: Option<String> = None;
             for line in body.lines() {
                 if let Some(v) = line.strip_prefix("changes=") {
                     changes = v.split_whitespace().map(String::from).collect();
                 } else if let Some(v) = line.strip_prefix("words=") {
                     words = v.split_whitespace().map(String::from).collect();
+                } else if let Some(v) = line.strip_prefix("file=") {
+                    file = safe_doc_name(Some(v.trim()));
                 }
             }
             if words.is_empty() {
                 words = ["pater", "bhrater", "lupo", "skola"].iter().map(|s| s.to_string()).collect();
+            }
+            // file=NAME applies a STORED ruleset (sca/<name>.sca) directly
+            if let Some(f) = file {
+                let path = crate::conlang::sca_dir().join(format!("{}.sca", f));
+                let res = std::fs::read_to_string(&path)
+                    .map_err(|_| format!("no stored ruleset '{}'", f))
+                    .map(|sca| {
+                        let lines: Vec<String> = sca.lines().map(String::from).collect();
+                        let rows: Vec<(String, String)> = words
+                            .iter()
+                            .map(|w| (w.clone(), crate::sca::run_sca(w, &lines).unwrap_or_else(|e| format!("<error: {}>", e))))
+                            .collect();
+                        (sca, rows)
+                    });
+                let out = match res {
+                    Ok((sca, rows)) => {
+                        let mut j = format!("{{\"sca\":\"{}\",\"rows\":[", json_escape(&sca));
+                        for (i, (w, e)) in rows.iter().enumerate() {
+                            if i > 0 {
+                                j.push(',');
+                            }
+                            j.push_str(&format!("{{\"from\":\"{}\",\"to\":\"{}\"}}", json_escape(w), json_escape(e)));
+                        }
+                        j.push_str("]}");
+                        j
+                    }
+                    Err(e) => format!("{{\"error\":\"{}\"}}", json_escape(&e)),
+                };
+                return simple(200, "application/json; charset=utf-8", out.into_bytes());
             }
             let ids: Vec<&str> = changes.iter().map(|s| s.as_str()).collect();
             match crate::conlang::apply_changes(&ids, &words) {
@@ -605,9 +637,17 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 chosen
             };
             let ids: Vec<&str> = changes.iter().map(|s| s.as_str()).collect();
+            let report = crate::conlang::phonology_report(&ph);
             match crate::conlang::phonology_pipeline(&ph, n, seed, &ids) {
                 Ok((rows, sca)) => {
-                    let mut j = format!("{{\"sca\":\"{}\",\"rows\":[", json_escape(&sca));
+                    let rep: Vec<String> = report
+                        .iter()
+                        .map(|(l, m)| format!("{{\"level\":\"{}\",\"msg\":\"{}\"}}", l, json_escape(m)))
+                        .collect();
+                    let mut j = format!("{{\"report\":[{}],\"phon\":\"{}\",\"sca\":\"{}\",\"rows\":[",
+                        rep.join(","),
+                        json_escape(&crate::conlang::format_phon(&ph, "stored by the Orpheus phonology builder")),
+                        json_escape(&sca));
                     for (i, (w, e)) in rows.iter().enumerate() {
                         if i > 0 {
                             j.push(',');
@@ -620,6 +660,61 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 Err(e) => simple(200, "application/json; charset=utf-8", format!("{{\"error\":\"{}\"}}", json_escape(&e)).into_bytes()),
             }
         }
+        // ---- CONLANG FILES: sca/<name>.sca and phonology/<name>.phon ----------
+        ("GET", "/api/scafiles") => {
+            let names = list_ext(&crate::conlang::sca_dir(), "sca");
+            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
+        }
+        ("GET", "/api/scafile") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => match std::fs::read_to_string(crate::conlang::sca_dir().join(format!("{}.sca", name))) {
+                Ok(t) => simple(200, "text/plain; charset=utf-8", t.into_bytes()),
+                Err(_) => simple(404, "text/plain; charset=utf-8", b"no such ruleset".to_vec()),
+            },
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        ("POST", "/api/scafile") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                // validate: it must parse as a SCArs rule file before we store it
+                if let Err(e) = crate::sca::parse_sca(&body) {
+                    return simple(400, "text/plain; charset=utf-8", format!("not a valid .sca: {}", e).into_bytes());
+                }
+                let dir = crate::conlang::sca_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                match std::fs::write(dir.join(format!("{}.sca", name)), body.as_bytes()) {
+                    Ok(_) => simple(200, "text/plain; charset=utf-8",
+                        format!("saved sca/{}.sca — load it anywhere: latte sca --file sca/{}.sca <words>", name, name).into_bytes()),
+                    Err(e) => simple(500, "text/plain; charset=utf-8", format!("save failed: {}", e).into_bytes()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        ("GET", "/api/phonfiles") => {
+            let names = list_ext(&crate::conlang::phon_dir(), "phon");
+            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
+        }
+        ("GET", "/api/phonfile") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => match std::fs::read_to_string(crate::conlang::phon_dir().join(format!("{}.phon", name))) {
+                Ok(t) => simple(200, "text/plain; charset=utf-8", t.into_bytes()),
+                Err(_) => simple(404, "text/plain; charset=utf-8", b"no such phonology".to_vec()),
+            },
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        ("POST", "/api/phonfile") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                if let Err(e) = crate::conlang::parse_phon(&body) {
+                    return simple(400, "text/plain; charset=utf-8", format!("not a valid .phon: {}", e).into_bytes());
+                }
+                let dir = crate::conlang::phon_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                match std::fs::write(dir.join(format!("{}.phon", name)), body.as_bytes()) {
+                    Ok(_) => simple(200, "text/plain; charset=utf-8", format!("saved phonology/{}.phon", name).into_bytes()),
+                    Err(e) => simple(500, "text/plain; charset=utf-8", format!("save failed: {}", e).into_bytes()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
         // ---- DRAWINGS: the graphics tool's documents (drawings/<name>.svg) ----
         ("GET", "/api/drawings") => {
             let mut names: Vec<String> = Vec::new();
@@ -1456,6 +1551,21 @@ fn lib_dir(root: &str) -> Option<std::path::PathBuf> {
 /// The documentation directory (`docs/`), a sibling of the library directory.
 /// The user-text directory: <root>/../text (a sibling of lib/site), i.e. the
 /// distribution's text/ folder — documents with embedded objects live here.
+fn list_ext(dir: &std::path::Path, ext: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if let Some(n) = e.file_name().to_str() {
+                if let Some(stem) = n.strip_suffix(&format!(".{}", ext)) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
 fn drawings_dir(root: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(root).parent().and_then(|p| p.parent()).map(|p| p.join("drawings"));
     match p {

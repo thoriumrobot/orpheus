@@ -1,0 +1,4 @@
+:: stored by the Orpheus phonology builder
+consonants = p k m n l h w
+vowels = a e i o u
+patterns = CV V CV CVV

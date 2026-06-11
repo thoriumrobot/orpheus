@@ -560,16 +560,34 @@ the advice stream is auditable line by line.
 
 ## The chess engine
 
-`/chess` plays a real engine now: iterative-deepening alpha-beta to depth 5
+`/chess` plays a real engine: iterative-deepening alpha-beta to depth 6
 (~1.2 s/move) with quiescence search on captures, MVV-LVA move ordering, and a
-material + piece-square evaluation — replacing the old greedy chooser as the
-default opponent. It implements exactly the rules of `lib/chess.lat` (no
-castling or en passant, auto-queen promotion), and every move it returns is
-verified against the Latte rules' `legal` list, so the two implementations
-police each other; the test suite checks it finds mates, takes hanging pieces,
-and never proposes a Latte-illegal move. The Latte-trained linear evaluator
-(`lib/chessml.lat`) remains available as the "play the learned model" mode —
-the documented ML experiment, not the strongest opponent.
+material + piece-square evaluation. The search uses the optimization first
+proven on the xiangqi engine and then transferred back: it explores
+PSEUDO-legal moves with king capture as the terminal condition, instead of
+paying a full attack scan per move for legality — a move that leaves the king
+en prise is refuted one ply later by the capture, so values agree, and the
+saved cost buys the sixth ply. The root still filters strictly, and every
+returned move is verified against the Latte rules' `legal` list, so the two
+implementations police each other; the test suite checks mates are found,
+hanging pieces taken, and no Latte-illegal move is ever proposed. The
+Latte-trained linear evaluator (`lib/chessml.lat`) remains as the "play the
+learned model" mode.
+
+## Xiangqi — the trained model plays
+
+`/xiangqi` is Chinese chess on a traditional board (river, palaces with their
+diagonals, pieces on intersections) against an opponent whose evaluation was
+**learned in Latte**: `lib/xiangqiml.lat` fits the six piece values by batch
+gradient descent against teacher-labelled positions (converging from zero
+toward the classical soldier 1 · horse 4 · elephant 2 · chariot 9 · cannon 4.5
+· advisor 2 — the page displays what was actually learned), and those weights
+drive a native 4-ply alpha-beta. The full rules — horse-leg blocks, elephant
+eyes and the river, cannon screen captures, palace confinement, the
+flying-general prohibition — live in `lib/xiangqi.lat`, and the engine's every
+move is verified against that Latte `xqlegal` list (the same
+two-implementations-police-each-other discipline as chess; the opening's 44
+legal moves are a test).
 
 ## Forecast baselines: HAR earns its place or the report says so
 

@@ -215,6 +215,9 @@ latte fmt <file.lat> [--write]        # the conservative, compile-checked format
 latte pkg                             # list system libraries and user packages
 latte debug [--break ARM] "<expr>"    # the Loom call tracer: every arm call as a tree
 latte trace [--scene FILE|EXPR] [--w N] [--h N]   # ray-trace any Latte scene
+latte sca --file sca/<name>.sca <words>           # apply a STORED ruleset (the
+                                      #   soundlib page writes these; the
+                                      #   selection round-trips via its header)
 
 # the conlang suite (also /soundlib and /phono in the GUI)
 #   the sound-change library assembles attested changes into a SCArs file and

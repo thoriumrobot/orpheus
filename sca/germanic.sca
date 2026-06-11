@@ -1,0 +1,17 @@
+:: assembled by the Orpheus sound-change library tool
+:: changes: grimm1 verner
+:: rules apply IN ORDER — reorder the selection to explore chain shifts
+
+class V = a e i o u y aa ee ii oo uu eu ai au
+class C = p t k b d g m n r l s z f v h w j ch zh sh th dh gh
+
+:: Grimm's law (first phase) — Voiceless stops become fricatives: p t k > f th h. (Proto-Germanic, c. 500 BC)
+p > f
+t > th
+k > h
+
+:: Verner's law (simplified) — Medial fricatives voice between vowels (the full law is conditioned on accent; this is the vowel-context core). (Proto-Germanic, c. 400 BC)
+f > v / V _ V
+th > dh / V _ V
+s > z / V _ V
+h > g / V _ V
