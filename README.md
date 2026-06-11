@@ -378,7 +378,12 @@ is in [`docs/visualization-and-ml.md`](docs/visualization-and-ml.md).
 ## The GUI — an Oberon-class system surface
 
 `latte serve`, open `/`. The display is tracks of **viewers** (title bar + menu
-+ frame, all drag-resizable), and the medium is the **text**: middle-click any
++ frame), handled with Oberon's gestures: **drag a title bar** to resize the
+viewer, **inter-click the middle button while dragging** (or drag sideways, or
+Alt+drag) to lift it and drop it at any position in any track, and change the
+number of columns with `System.OpenTrack` / `System.CloseTrack` (header ⊞/⊟;
+new viewers open in the least-crowded column, Oberon's placement hint). The
+medium is the **text**: middle-click any
 command line, anywhere, and it runs. Inside a text frame, object-producing
 commands (`chart`, `gfx`, `trace`, `ta`, `trade`, `fin`, `gpu`, `derive`,
 `plan`) embed their output **into the text under the line you ran** — Oberon's

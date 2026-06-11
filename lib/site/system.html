@@ -30,6 +30,18 @@
  .vsep{flex:0 0 7px;cursor:row-resize;position:relative}
  .vsep::after{content:'';position:absolute;top:2px;left:0;right:0;height:3px;border-radius:2px;background:#a9a494}
  .vsep:hover::after{background:var(--accent)}
+ /* viewer move gesture (Oberon: left-drag the title bar resizes; middle inter-click moves) */
+ .dropline{flex:0 0 5px;border-radius:2px;background:var(--accent);box-shadow:0 0 5px #5059c8aa;margin:1px 2px}
+ .viewer.lifting{opacity:.55;outline:2px dashed var(--accent);outline-offset:-2px}
+ body.movedrag{cursor:grabbing!important;user-select:none}
+ body.movedrag *{cursor:grabbing!important}
+ .menu .name,.menu .spacer{cursor:grab}
+ .fillerhint{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;white-space:pre-line;
+   color:#9a957f;font-size:12px;border:1px dashed #c9c4ae;border-radius:4px;margin:2px;padding:10px;min-height:48px}
+ /* a PAGE viewer: the hosted page lives inside the viewer's main frame */
+ .pageframe{flex:1;width:100%;border:0;background:#fff}
+ /* iframes swallow mouse events: switch them off while any bar is being dragged */
+ body.movedrag iframe,body.sepdrag iframe{pointer-events:none}
  .viewer{display:flex;flex-direction:column;min-height:64px;background:var(--paper);
          border:1px solid var(--rule);border-radius:3px;flex:1 1 0;overflow:hidden;
          box-shadow:0 1px 3px #00000022}
@@ -112,30 +124,33 @@
 </style></head>
 <body>
 <header>
-  <span><b>ORPHEUS</b> — the system is its texts: <b>middle-click</b> any command line to run it (or caret + Ctrl/⌘+Enter); objects embed where you run them; drag the bars to resize.</span>
+  <span><b>ORPHEUS</b> — the system is its texts: <b>middle-click</b> any command line to run it (or caret + Ctrl/⌘+Enter); objects embed where you run them; drag a title bar to resize, middle inter-click while dragging to move the viewer.</span>
   <span class="links">
-    <a href="/draw" title="the graphics editor — drawings embed in texts" style="font-weight:700;color:#ffe9a8">✎ Draw</a>
-    <a href="#" onclick="openTool('Trade');return false" title="trading tool text">Trade</a><a class="pg" href="/trade" title="full page">↗</a>
-    <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart">↗</a>
-    <a href="#" onclick="openTool('Fin');return false" title="financial-ML tool text">Finance</a><a class="pg" href="/fin">↗</a>
-    <a href="#" onclick="openTool('Plan');return false" title="economic-planning tool text">Plan</a><a class="pg" href="/plan">↗</a>
+    <a href="#" onclick="exec('System.OpenTrack');return false" title="add a column (System.OpenTrack)">⊞ Track</a>
+    <a href="#" onclick="exec('System.CloseTrack');return false" title="remove a column (System.CloseTrack)">⊟</a>
+    <a href="#" onclick="openPage('Draw','/draw');return false" title="the graphics editor — drawings embed in texts" style="font-weight:700;color:#ffe9a8">✎ Draw</a><a class="pg" href="/draw" target="_blank" title="in a browser tab">↗</a>
+    <a href="#" onclick="openTool('Trade');return false" title="trading tool text">Trade</a><a class="pg" href="/trade" target="_blank" title="page in a browser tab">↗</a>
+    <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart" target="_blank">↗</a>
+    <a href="#" onclick="openTool('Fin');return false" title="financial-ML tool text">Finance</a><a class="pg" href="/fin" target="_blank">↗</a>
+    <a href="#" onclick="openTool('Plan');return false" title="economic-planning tool text">Plan</a><a class="pg" href="/plan" target="_blank">↗</a>
     <a href="#" onclick="openTool('Trace');return false" title="ray-tracer tool text">Trace</a>
-    <a href="#" onclick="openTool('Derive');return false" title="Ligurian derivation tool text">Derive</a><a class="pg" href="/derive">↗</a>
+    <a href="#" onclick="openTool('Derive');return false" title="Ligurian derivation tool text">Derive</a><a class="pg" href="/derive" target="_blank">↗</a>
     <a href="#" onclick="openTool('Debug');return false" title="the Loom call-tracer debugger">Debug</a>
-    <a href="#" onclick="openTool('Conlang');return false" title="the conlanging suite: phonology builder + sound-change library">Conlang</a><a class="pg" href="/phono">↗</a>
-    <a href="#" onclick="openTool('Gpu');return false" title="GPU tool text">GPU</a><a class="pg" href="/gpu">↗</a>
-    <a href="#" onclick="openDocsTool();return false" title="documentation index">Docs</a><a class="pg" href="/docs">↗</a>
-    <a href="/grammar" title="the Ligurian grammar (page)">Grammar</a>
-    <a href="/chess" title="the chess board (page)">Chess</a>
-    <a href="/xiangqi" title="xiangqi vs the trained model (page)">Xiangqi</a>
-    <a href="/editor" title="the WYSIWYG page editor">Editor</a>
+    <a href="#" onclick="openTool('Conlang');return false" title="the conlanging suite: phonology builder + sound-change library">Conlang</a><a class="pg" href="/phono" target="_blank">↗</a>
+    <a href="#" onclick="openTool('Gpu');return false" title="GPU tool text">GPU</a><a class="pg" href="/gpu" target="_blank">↗</a>
+    <a href="#" onclick="openTool('Net');return false" title="interaction-net tool text">Net</a>
+    <a href="#" onclick="openTool('News');return false" title="news-sentiment tool text">News</a>
+    <a href="#" onclick="openDocsTool();return false" title="documentation index">Docs</a><a class="pg" href="/docs" target="_blank">↗</a>
+    <a href="#" onclick="openPage('Grammar','/grammar');return false" title="the Ligurian grammar">Grammar</a>
+    <a href="#" onclick="openPage('Chess','/chess');return false" title="the chess board">Chess</a>
+    <a href="#" onclick="openPage('Xiangqi','/xiangqi');return false" title="xiangqi vs the trained model">Xiangqi</a>
+    <a href="#" onclick="openPage('Editor','/editor');return false" title="the WYSIWYG page editor">Editor</a>
     <a href="#" onclick="exec('System.Quit');return false" title="stop Orpheus" style="color:#e0a0a0">Quit</a>
   </span>
 </header>
 
 <div id="screen">
   <div class="track" id="userTrack"></div>
-  <div class="tsep" id="trackSep"></div>
   <div class="track" id="sysTrack"></div>
 </div>
 
@@ -153,13 +168,82 @@
 
 var viewers = [], marked = null, uid = 0;
 function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
-function track(name){ return document.getElementById(name==='sys'?'sysTrack':'userTrack'); }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* ---- tracks (Oberon: the display is a row of vertical TRACKS) --------------
+   The standard layout is two tracks — a wide user track and a narrow system
+   track (Project Oberon §4) — but the number is not fixed: Viewers.OpenTrack
+   and CloseTrack change the layout. Here: System.OpenTrack adds a column,
+   System.CloseTrack removes one (its viewers merge into the neighbour).
+   Placement follows Oberon's "hints as to where a viewer might best be
+   placed": user viewers open in the least-crowded user column.              */
+var MAX_TRACKS = 5;
+function tracks(){ return Array.prototype.slice.call(document.querySelectorAll('#screen > .track')); }
+function track(name){
+  var ts = tracks();
+  if(name==='sys') return ts[ts.length-1];
+  var user = ts.slice(0,-1), best = user[0] || ts[0];
+  user.forEach(function(t){
+    if(t.querySelectorAll(':scope > .viewer').length < best.querySelectorAll(':scope > .viewer').length) best = t;
+  });
+  return best;
+}
+function updateFiller(tr){
+  if(!tr) return;
+  var hint = tr.querySelector(':scope > .fillerhint');
+  if(tr.querySelectorAll(':scope > .viewer').length === 0){
+    if(!hint){
+      hint = el('div','fillerhint','empty track — drag a viewer\u2019s title bar here\n(System.CloseTrack removes the column)');
+      tr.appendChild(hint);
+    }
+  } else if(hint){ hint.remove(); }
+}
+function relayoutTracks(){
+  var sc = document.getElementById('screen');
+  Array.prototype.slice.call(sc.querySelectorAll(':scope > .tsep')).forEach(function(s){ s.remove(); });
+  var ts = tracks();
+  for(var i=1;i<ts.length;i++){
+    var s = el('div','tsep');
+    sc.insertBefore(s, ts[i]);
+    dragSep(s, ts[i-1], ts[i], true);
+  }
+  ts.forEach(updateFiller);
+}
+function openTrackCol(){
+  var ts = tracks();
+  if(ts.length >= MAX_TRACKS){ logOut('System.OpenTrack: at most '+MAX_TRACKS+' tracks', true); return; }
+  var t = el('div','track');
+  t.style.flexGrow = '40';
+  // the new column opens beside the system track (which stays rightmost,
+  // as in Oberon's standard layout)
+  document.getElementById('screen').insertBefore(t, ts[ts.length-1]);
+  relayoutTracks();
+  logOut('opened a track — '+tracks().length+' columns (drag a viewer\u2019s title bar to fill it)');
+}
+function closeTrackCol(tr){
+  var ts = tracks();
+  if(ts.length <= 2){ logOut('System.CloseTrack: the standard two tracks stay (user + system)', true); return; }
+  if(!tr || ts.indexOf(tr) < 0){
+    // prefer an empty extra column; else the marked viewer's column
+    tr = ts.slice(0,-1).find(function(t){ return t.querySelectorAll(':scope > .viewer').length===0; })
+      || (marked && ts.indexOf(marked.box.parentElement)>=0 && marked.box.parentElement)
+      || ts[ts.length-2];
+  }
+  var i = ts.indexOf(tr);
+  var dest = ts[i>0 ? i-1 : 1];               // merge into the left neighbour
+  Array.prototype.slice.call(tr.querySelectorAll(':scope > .viewer')).forEach(function(b){
+    b.style.flexGrow=''; dest.appendChild(b);
+  });
+  tr.remove();
+  relayoutTracks(); relayout(dest);
+  logOut('closed a track — its viewers merged left ('+tracks().length+' columns)');
+}
 
 /* ---- resizable layout ----------------------------------------------------- */
 function dragSep(sep, prevEl, nextEl, horizontal){
   sep.addEventListener('mousedown', function(e){
     e.preventDefault();
+    document.body.classList.add('sepdrag');   // page-viewer iframes must not eat the drag
     var p0 = horizontal ? prevEl.offsetWidth  : prevEl.offsetHeight;
     var n0 = horizontal ? nextEl.offsetWidth  : nextEl.offsetHeight;
     var start = horizontal ? e.clientX : e.clientY;
@@ -172,7 +256,10 @@ function dragSep(sep, prevEl, nextEl, horizontal){
       prevEl.style.flexGrow = (total * p / px).toFixed(4);
       nextEl.style.flexGrow = (total * n / px).toFixed(4);
     }
-    function up(){ window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); }
+    function up(){
+      document.body.classList.remove('sepdrag');
+      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+    }
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
   });
@@ -185,12 +272,125 @@ function relayout(tr){
     tr.insertBefore(s, kids[i]);
     dragSep(s, kids[i-1], kids[i], false);
   }
+  updateFiller(tr);
+}
+
+/* ---- viewer handling, the Oberon gestures (Wirth, "How to use Oberon"):
+   "A viewer is enlarged or shrunk by clicking the left button, while the
+    cursor is in the title bar, and then dragging the bar up or down. A viewer
+    is moved to another location by also inter-clicking with the middle
+    button."
+   Here: left-drag on the title bar moves the viewer's TOP EDGE (resize);
+   inter-clicking the MIDDLE button during the drag lifts the viewer so it can
+   be dropped anywhere — any position, any track. Dragging sideways into
+   another track (or Alt+drag from the start) lifts it too. Esc cancels.     */
+function prevViewerBox(box){
+  var p = box.previousElementSibling;
+  while(p && !p.classList.contains('viewer')) p = p.previousElementSibling;
+  return p;
+}
+function flexOf(elm){ return parseFloat(elm.style.flexGrow || getComputedStyle(elm).flexGrow || 1); }
+function wireBarDrag(menu, v){
+  menu.addEventListener('mousedown', function(e){
+    if(e.button!==0) return;
+    if(e.target.closest && e.target.closest('.cmd')) return;  // menu commands keep their click
+    e.preventDefault(); mark(v);
+    document.body.classList.add('sepdrag');   // page-viewer iframes must not eat the drag
+    var srcTrack = v.box.parentElement;
+    var startY = e.clientY, mode = e.altKey ? 'move' : 'resize';
+    var prevBox = prevViewerBox(v.box);
+    var p0 = prevBox ? prevBox.offsetHeight : 0, n0 = v.box.offsetHeight;
+    var g0 = prevBox ? flexOf(prevBox) : 0, gn0 = flexOf(v.box);
+    var gs0 = prevBox ? prevBox.style.flexGrow : '', gn0s = v.box.style.flexGrow;
+    var dropline = el('div','dropline');
+    function enterMove(){
+      mode='move';
+      if(prevBox) prevBox.style.flexGrow = gs0;       // undo any resize so far
+      v.box.style.flexGrow = gn0s;
+      v.box.classList.add('lifting');
+      document.body.classList.add('movedrag');
+    }
+    if(mode==='move') enterMove();
+    function dropSpot(x, y){
+      var ts = tracks(), tr = ts[0];
+      ts.forEach(function(t){ var r=t.getBoundingClientRect(); if(x >= r.left-4) tr = t; });
+      var boxes = Array.prototype.slice.call(tr.querySelectorAll(':scope > .viewer'))
+        .filter(function(b){ return b !== v.box; });
+      var before = null;
+      for(var i=0;i<boxes.length;i++){
+        var r = boxes[i].getBoundingClientRect();
+        if(y < r.top + r.height/2){ before = boxes[i]; break; }
+      }
+      return {track: tr, before: before};
+    }
+    function move(ev){
+      if(mode==='resize'){
+        var over = dropSpot(ev.clientX, ev.clientY).track;
+        if(over !== srcTrack){ enterMove(); }            // dragged sideways: lift it
+        else if(prevBox){
+          var d = ev.clientY - startY;
+          var p = Math.max(48, p0 + d), n = Math.max(48, n0 - d);
+          var total = g0 + gn0, px = p0 + n0;
+          prevBox.style.flexGrow = (total * p / px).toFixed(4);
+          v.box.style.flexGrow = (total * n / px).toFixed(4);
+        }
+      }
+      if(mode==='move'){
+        var spot = dropSpot(ev.clientX, ev.clientY);
+        if(spot.before) spot.track.insertBefore(dropline, spot.before);
+        else spot.track.appendChild(dropline);
+      }
+    }
+    function interclick(ev){ if(ev.button===1){ ev.preventDefault(); if(mode!=='move') enterMove(); } }
+    function cancel(){
+      if(prevBox) prevBox.style.flexGrow = gs0;
+      v.box.style.flexGrow = gn0s;
+      cleanup();
+    }
+    function key(ev){ if(ev.key==='Escape') cancel(); }
+    function cleanup(){
+      dropline.remove();
+      v.box.classList.remove('lifting');
+      document.body.classList.remove('movedrag');
+      document.body.classList.remove('sepdrag');
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('mousedown', interclick);
+      window.removeEventListener('keydown', key);
+    }
+    function up(ev){
+      if(mode==='move'){
+        var spot = dropSpot(ev.clientX, ev.clientY);
+        v.box.style.flexGrow = '';
+        if(spot.before) spot.track.insertBefore(v.box, spot.before);
+        else spot.track.appendChild(v.box);
+        relayout(srcTrack);
+        if(spot.track !== srcTrack) relayout(spot.track);
+      }
+      cleanup();
+    }
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    window.addEventListener('mousedown', interclick);
+    window.addEventListener('keydown', key);
+  });
+}
+/* command form of the move (mouse-free): send the viewer to the next track */
+function moveViewerNextTrack(v){
+  if(!v) return;
+  var ts = tracks(), src = v.box.parentElement;
+  var t = ts[(ts.indexOf(src)+1) % ts.length];
+  if(t === src) return;
+  v.box.style.flexGrow = '';
+  t.appendChild(v.box);
+  relayout(src); relayout(t);
 }
 
 /* ---- viewers --------------------------------------------------------------- */
 function makeViewer(opts){
   // kinds: 'text' (rich, editable, objects embed inline) · 'frame' (plain source)
-  //        'log'/'out' (rich output streams) · 'mods' · 'panel'
+  //        'log'/'out' (rich output streams) · 'mods'/'contents' · 'panel'
+  //        'page' (a hosted page inside the viewer's main frame)
   var v = {id:++uid, name:opts.name, kind:opts.kind, grown:false};
   var box = el('div','viewer'); v.box = box;
   var menu = el('div','menu');
@@ -203,11 +403,17 @@ function makeViewer(opts){
   });
   menu.appendChild(el('span','spacer'));
   menu.onmousedown=function(e){ if(e.target===menu||e.target.classList.contains('name')||e.target.classList.contains('star')) mark(v); };
+  wireBarDrag(menu, v);
   box.appendChild(menu);
 
   var body = el('div','body');
-  if(opts.kind==='mods'){
+  if(opts.kind==='mods'||opts.kind==='contents'){
     var md = el('div','mods'); v.mods = md; body.appendChild(md);
+  } else if(opts.kind==='page'){
+    var fr = document.createElement('iframe');
+    fr.className='pageframe'; fr.src=opts.src;
+    v.iframe = fr; v.src = opts.src;
+    body.appendChild(fr);
   } else if(opts.kind==='log'||opts.kind==='out'){
     var rl = el('div','richlog'); v.rich = rl; wireRichLog(rl, v); body.appendChild(rl);
   } else if(opts.kind==='panel'){
@@ -225,9 +431,10 @@ function makeViewer(opts){
   }
   box.appendChild(body);
   if(opts.foot) box.appendChild(el('div','foot', opts.foot));
-  track(opts.track).appendChild(box);
+  var tr = track(opts.track);
+  tr.appendChild(box);
   viewers.push(v);
-  relayout(track(opts.track));
+  relayout(tr);
   return v;
 }
 
@@ -354,18 +561,35 @@ function insertObjAt(v, afterNode, cmd, html){
 function parseInline(text, into){
   // inline elements, ETH-Oberon style: [Label](run: cmd) is an EMBEDDED
   // BUTTON that executes its command in place; [field: name=value] is an
-  // EMBEDDED INPUT whose value buttons reference as $name
-  var re=/(\[[^\]]+\]\(run:\s*[^)]+\)|\[field:\s*[^\]]+\]|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g, last=0, m;
+  // EMBEDDED INPUT whose value buttons reference as $name.
+  // Buttons are scanned with paren COUNTING (not a regex) so a command may
+  // contain nested parens/brackets: [Go](run: debug (primes 20)) works.
+  var bre=/\[([^\]]+)\]\(run:\s*/g, last=0, bm;
+  while((bm=bre.exec(text))){
+    parseInlinePlain(text.slice(last, bm.index), into);
+    var j=bre.lastIndex, depth=1;
+    while(j<text.length && depth>0){
+      var c=text.charAt(j);
+      if(c==='(') depth++;
+      else if(c===')'){ depth--; if(depth===0) break; }
+      j++;
+    }
+    var cmd=text.slice(bre.lastIndex, j).trim();
+    var b=el('button','runbtn',bm[1]);
+    b.contentEditable='false';
+    b.dataset.cmd=cmd;
+    b.title=cmd;
+    into.appendChild(b);
+    last=j+1; bre.lastIndex=last;
+  }
+  parseInlinePlain(text.slice(last), into);
+}
+function parseInlinePlain(text, into){
+  var re=/(\[field:\s*[^\]]+\]|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g, last=0, m;
   while((m=re.exec(text))){
     if(m.index>last) into.appendChild(document.createTextNode(text.slice(last,m.index)));
-    var t=m[0], bm, fm;
-    if((bm=t.match(/^\[([^\]]+)\]\(run:\s*([^)]+)\)$/))){
-      var b=el('button','runbtn',bm[1]);
-      b.contentEditable='false';
-      b.dataset.cmd=bm[2].trim();
-      b.title=bm[2].trim();
-      into.appendChild(b);
-    } else if((fm=t.match(/^\[field:\s*([A-Za-z0-9_]+)=([^\]]*)\]$/))){
+    var t=m[0], fm;
+    if((fm=t.match(/^\[field:\s*([A-Za-z0-9_]+)=([^\]]*)\]$/))){
       var f=document.createElement('input');
       f.className='runfld'; f.dataset.name=fm[1]; f.value=fm[2];
       f.contentEditable='false';
@@ -686,7 +910,7 @@ function runObjectCommand(line, done){
       post('/api/fin', rest, function(h){ done(h,false); }); return true;
     case 'gpu':
       post('/api/gpu', rest, function(h){ done(h,false); }); return true;
-    case 'debug': case 'trace': {
+    case 'debug': {
       // debug [break=ARM] <expr> — run on Loom with the call tracer; the tree
       // renders as nested expandables (click a call to step into it)
       var body=rest;
@@ -805,6 +1029,9 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.Copy'){ logEcho(line); copyViewer(targetViewer(rest, fromViewer)); return; }
   if(headTok==='System.Clear'){ clearLog(); return; }
   if(headTok==='System.Modules'||headTok==='System.Sources'){ logEcho(line); refreshModules(); return; }
+  if(headTok==='System.OpenTrack'){ logEcho(line); openTrackCol(); return; }
+  if(headTok==='System.CloseTrack'){ logEcho(line); var ctv=targetViewer(rest, fromViewer); closeTrackCol(ctv && rest ? ctv.box.parentElement : null); return; }
+  if(headTok==='System.Move'){ logEcho(line); moveViewerNextTrack(targetViewer(rest, fromViewer)); return; }
   if(headTok==='System.New'){ logEcho(line); newModuleViewer(rest||'mymod'); return; }
   if(headTok==='System.NewText'){ logEcho(line); newText(rest||'untitled'); return; }
   if(headTok==='System.OpenText'){ logEcho(line); if(rest) openText(rest); else listTexts(); return; }
@@ -813,13 +1040,33 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.Tool'){ logEcho(line); openTool(rest||'Trade'); return; }
   if(headTok==='System.Quit'){
     logEcho(line);
-    if(!confirm('Quit Orpheus? The server stops; restart with `latte serve`.')) return;
+    if(!confirm('Quit Orpheus? The server stops; restart with `latte gui` (or bare `latte`).')) return;
     fetch('/api/quit',{method:'POST'}).then(function(r){return r.text();}).then(function(h){
       document.open(); document.write(h); document.close();
     });
     return;
   }
-  if(headTok==='System.Chess'||headTok==='Game.Chess'){ logEcho(line); window.location='/chess'; return; }
+  if(headTok==='System.Chess'||headTok==='Game.Chess'){ logEcho(line); openPage('Chess','/chess'); return; }
+  if(headTok==='System.Page'){
+    logEcho(line);
+    if(!rest){ logOut('System.Page: name a path, e.g.  System.Page /phono', true); return; }
+    var pgp=rest.split(/\s+/)[0];
+    if(pgp.charAt(0)!=='/') pgp='/'+pgp;
+    var pgn=rest.slice(rest.split(/\s+/)[0].length).trim() || pgp.slice(1).replace(/^./,function(c){return c.toUpperCase();});
+    openPage(pgn, pgp); return;
+  }
+  if(headTok==='System.Pop'){
+    logEcho(line);
+    var pv=targetViewer(rest, fromViewer);
+    if(pv&&pv.src){ window.open(pv.src); } else { logOut('System.Pop: mark a page viewer', true); }
+    return;
+  }
+  if(headTok==='System.Reload'){
+    logEcho(line);
+    var rv2=targetViewer(rest, fromViewer);
+    if(rv2&&rv2.iframe){ rv2.iframe.src=rv2.src; } else { logOut('System.Reload: mark a page viewer', true); }
+    return;
+  }
   if(headTok==='System.Docs'||headTok==='System.Help'){ logEcho(line); openDocsTool(); return; }
   if(headTok==='System.Edit'||headTok==='Edit.Doc'){ logEcho(line); if(rest) openDoc(rest); else logOut('System.Edit: name a doc, e.g.  System.Edit latte-language', true); return; }
   if(headTok==='Edit.Save'){ logEcho(line); saveDoc(targetViewer(rest, fromViewer)); return; }
@@ -1052,13 +1299,41 @@ function fillDocIndex(st){
       st.rich.insertBefore(line, marker);
     });
     marker.remove();
-  });
+  }).catch(function(e){ logOut('doc index failed to load: '+e, true); });
 }
 
-/* the opening table of contents: documentation + tools, one click each */
+/* the opening table of contents: documentation + tool texts + every hosted
+   tool PAGE (soundlib, phono, chess, …) — one click each. A page opens INSIDE
+   the system, as a viewer whose main frame is the live page; ↗ Tab in its
+   menu opens it in a browser tab when a full window is wanted. */
+function openPage(name, path){
+  var existing = viewers.find(function(v){ return v.kind==='page' && v.src===path; });
+  if(existing){ mark(existing); return existing; }
+  var v = makeViewer({name:name, track:'user', kind:'page', src:path, menu:pageMenu,
+    foot:path+' — the live page in a viewer; \u2197 Tab opens it in its own browser tab'});
+  mark(v);
+  return v;
+}
+var PAGES = [
+  ['Draw — the vector-graphics editor', '/draw'],
+  ['Soundlib — the sound-change library', '/soundlib'],
+  ['Phono — the phonology builder', '/phono'],
+  ['Derive — Ligurian live (PIE \u2192 Solar \u2192 Heart)', '/derive'],
+  ['Editor — WYSIWYG Facet pages', '/editor'],
+  ['Compiler — compile a module', '/compile'],
+  ['Chess — play the model or a peer', '/chess'],
+  ['Xiangqi — vs the trained model', '/xiangqi'],
+  ['Trade — the advisor page', '/trade'],
+  ['Finance — the ML pipeline page', '/fin'],
+  ['Charts — visualization page', '/chart'],
+  ['GPU — data-parallel compute page', '/gpu'],
+  ['Plan — the economic planner page', '/plan'],
+  ['Docs — the manual shelf', '/docs'],
+  ['Grammar — the Ligurian reference', '/grammar']
+];
 function buildContents(){
-  var v = makeViewer({name:'Contents', track:'sys', kind:'mods', menu:[{cmd:'System.Docs',label:'All docs'}],
-    foot:'click a document to open it as an editable frame; click a tool to open its tool text'});
+  var v = makeViewer({name:'Contents', track:'sys', kind:'contents', menu:[{cmd:'System.Docs',label:'All docs'}],
+    foot:'documents, tool texts, and pages all open as viewers — the desktop stays put'});
   fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
     var names=t.split('\n').filter(Boolean);
     var md=v.mods; md.innerHTML='';
@@ -1068,20 +1343,26 @@ function buildContents(){
       d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openDoc(n); } };
       md.appendChild(d);
     });
-    md.appendChild(el('div','hd','TOOLS'));
+    md.appendChild(el('div','hd','TOOL TEXTS'));
     Object.keys(TOOLS).forEach(function(n){
       var d=el('div','m', n+'.Tool');
       d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openTool(n); } };
       md.appendChild(d);
     });
-    var dx=el('div','m','Draw  (the graphics editor page)');
-    dx.onmousedown=function(e){ if(e.button===0||e.button===1) window.location='/draw'; };
-    md.appendChild(dx);
-  });
+    md.appendChild(el('div','hd','PAGES'));
+    PAGES.forEach(function(p){
+      var d=el('div','m', p[0]);
+      var short=p[0].split(' \u2014')[0];
+      d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openPage(short, p[1]); } };
+      md.appendChild(d);
+    });
+  }).catch(function(e){ logOut('Contents failed to load: '+e, true); });
   return v;
 }
 
 function refreshModules(){
+  var mv = viewers.find(function(v){return v.kind==='mods';});  // the Modules list
+  if(!mv) return;                                               // (Contents is kind 'contents')
   Promise.all([
     fetch('/api/sources').then(function(r){return r.text();}),
     fetch('/api/run',{method:'POST',headers:{'Content-Type':'text/plain'},body:'libs'}).then(function(r){return r.text();})
@@ -1089,14 +1370,14 @@ function refreshModules(){
     var names=res[0].split('\n').filter(Boolean);
     var rt=(res[1].match(/compiled:\s*(.*)/)||[])[1]||'';
     var rtset={}; rt.split(/\s+/).filter(Boolean).forEach(function(n){rtset[n]=1;});
-    var md=viewers.find(function(v){return v.kind==='mods';}).mods; md.innerHTML='';
+    var md=mv.mods; md.innerHTML='';
     md.appendChild(el('div','hd','MODULES — click to open source'));
     names.forEach(function(n){
       var d=el('div','m'+(rtset[n]?' rt':''), n+(rtset[n]?'  \u00B7live':''));
       d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openModule(n); } };
       md.appendChild(d);
     });
-  });
+  }).catch(function(e){ logOut('Modules refresh failed: '+e, true); });
 }
 
 function post(url, body, cb){
@@ -1121,6 +1402,8 @@ var docMenu=[{cmd:'Edit.Save *',label:'Save'},
   {cmd:'Edit.Syntax *',label:'Syntax'},
   {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var modsMenu=[{cmd:'System.Modules',label:'Refresh'}];
+var pageMenu=[{cmd:'System.Reload *',label:'Reload'},{cmd:'System.Pop *',label:'\u2197 Tab'},
+  {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Close *',label:'Close'}];
 var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Grow'}];
 
 /* ---- TOOL TEXTS: each tool is a text (Oberon's Draw.Tool idea) -------------- */
@@ -1131,8 +1414,12 @@ var TOOLS = {
 '# Trade.Tool — the trading advisor\n'+
 'TA votes \u00d7 news sentiment \u00d7 HAR-RV volatility-targeted Kelly sizing. Reports embed below.\n'+
 '\n'+
-'account [field: account=10000]  kelly [field: kelly=1.0]  market [field: market=btc]\n'+
-'[Advise](run: trade account=$account kelly=$kelly market=$market) [Advise live](run: trade account=$account kelly=$kelly market=$market live=1) [Technical analysis](run: ta market=$market) [Chart 180d](run: chart market market=$market days=180)\n'+
+'account [field: account=10000]  kelly [field: kelly=1.0]  market [field: market=btc]  ta window [field: win=120]\n'+
+'[Advise](run: trade account=$account kelly=$kelly market=$market) [Advise live](run: trade account=$account kelly=$kelly market=$market live=1) [Technical analysis](run: ta market=$market win=$win) [Chart 180d](run: chart market market=$market days=180)\n'+
+'\n'+
+'## Blend a sentiment score in\n'+
+'sentiment \u22121..1 [field: s=0.4]\n'+
+'[Advise with sentiment](run: trade account=$account kelly=$kelly market=$market sentiment=$s) — or score real text in News.Tool first.\n'+
 '\n'+
 '## Other markets\n'+
 'Fetch once from the CLI (`latte fetch --market eth`, or `--all`); then set the market field above\n'+
@@ -1152,6 +1439,9 @@ var TOOLS = {
 'days [field: days=120]  market [field: market=btc]\n'+
 '[Market chart](run: chart market market=$market days=$days) [Live](run: chart market market=$market days=$days live=1)\n'+
 '\n'+
+'values [field: vals=3 1 4 1 5 9 2 6]\n'+
+'[Bar](run: chart bar $vals) [Line](run: chart line $vals) [Scatter](run: chart scatter $vals)\n'+
+'\n'+
 '[Bar demo](run: chart bar 3 1 4 1 5 9 2 6) [Line demo](run: chart line 10 12 9 14 17 13 18) [Scatter demo](run: chart scatter 3 7 1 9 4 6 8 2) [Rings](run: gfx Tool.rings 6)\n'+
 '\n'+
 'chart bar 2 7 1 8 2 8\n',
@@ -1159,8 +1449,11 @@ var TOOLS = {
 '# Fin.Tool — the financial-ML pipeline\n'+
 'A logistic model on real market data; equity NET of 5bp costs; honest baselines throughout.\n'+
 '\n'+
-'iters [field: iters=80]\n'+
-'[Volatility task](run: fin $iters) [Direction task + risk stats](run: fin --direction $iters) [The advisor](run: trade account=10000)\n',
+'iters [field: iters=80]  horizon (days ahead) [field: horizon=1]\n'+
+'[Volatility task](run: fin $iters horizon=$horizon) [Direction task](run: fin --direction $iters horizon=$horizon) [The advisor](run: trade account=10000)\n'+
+'\n'+
+'The volatility regime is the dependable edge; daily direction stays near-chance\n'+
+'(de Prado\u2019s point) — compare the two yourself above.\n',
  Plan:
 '# Plan.Tool — economic planning\n'+
 '*Towards a New Socialism* (Cockshott & Cottrell): labour values (v = l + vA), Leontief gross\n'+
@@ -1217,6 +1510,14 @@ var TOOLS = {
 'preset [field: preset=pie]  n [field: n=12]  seed [field: seed=42]\n'+
 '[Generate](run: phono preset=$preset n=$n seed=$seed) [Generate + Grimm](run: phono preset=$preset n=$n seed=$seed changes=grimm1,verner,apocope)\n'+
 '\n'+
+'## Ad-hoc rules (the raw SCArs engine)\n'+
+'word [field: word=kasa]  rules [field: rules=k>g s>z/a_a]\n'+
+'[Apply](run: scar $word $rules)\n'+
+'\n'+
+'## Solar \u2192 Heart (the Ligurian ruleset)\n'+
+'solar words [field: solar=liga nivo mazda]\n'+
+'[Evolve](run: sca $solar)\n'+
+'\n'+
 '## Stored files\n'+
 'Rulesets persist as ordinary SCArs files (sca/*.sca), phonologies as phonology/*.phon \u2014\n'+
 'the /soundlib and /phono pages Store and reopen them; SCArs loads them directly.\n'+
@@ -1231,7 +1532,37 @@ var TOOLS = {
 '[Run](run: gpu dim=$dim) [Small](run: gpu dim=512) [Large](run: gpu dim=65536)\n'+
 '\n'+
 'Pair it with the vector jets: `fast %tag` arms in your own packages get the\n'+
-'same treatment \u2014 see [adding libraries](run: System.Edit adding-libraries).\n'
+'same treatment \u2014 see [adding libraries](run: System.Edit adding-libraries).\n',
+ Net:
+'# Net.Tool — interaction nets\n'+
+'Lafont\u2019s \u03b3/\u03b4/\u03b5 combinators; Latte\u2019s numeric fragment compiles to nets and\n'+
+'reduces by pure interaction \u2014 every result audited against the interpreter.\n'+
+'\n'+
+'expr [field: expr=(mul (add 2 3) 2)]\n'+
+'[Run on the net](run: net $expr) [Type it](run: type $expr) [Eval it](run: eval $expr) [Combinator demo](run: icomb)\n'+
+'\n'+
+'[gcd, net recursion](run: net let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)) [Lazy if](run: net if (lt 2 3) then (add 10 5) else (mul 100 100)) [Factorial](run: net let fac = fn [n] -> if (n == 0) then 1 else (mul n (fac (sub n 1))) in (fac 8))\n'+
+'\n'+
+'Native-number agents make one arithmetic op ONE interaction; the manual:\n'+
+'[open it](run: System.Edit interaction-nets). CLI: `latte net "<expr>"`,\n'+
+'`latte net --peano` (unary mode), `latte net --par 4` (the parallel reducer).\n',
+ News:
+'# News.Tool — sentiment & the advice stream\n'+
+'Loughran-McDonald lexicon \u00d7 the trained classifier; documents score sentence\n'+
+'by sentence; scores feed the trading advisor.\n'+
+'\n'+
+'headline [field: headline=miners capitulate as hashrate drops]\n'+
+'[Score the headline](run: System.Sentiment $headline)\n'+
+'\n'+
+'doc [field: doc=visualization-and-ml]\n'+
+'[Score the document](run: Doc.Score $doc)\n'+
+'\n'+
+'## Feed it to the advisor\n'+
+'sentiment \u22121..1 [field: s=0.4]  account [field: account=10000]\n'+
+'[Advise with sentiment](run: trade account=$account sentiment=$s)\n'+
+'\n'+
+'CLI: `latte fetch --news <url>` curls a document into news/; `latte trade\n'+
+'--news FILE` scores it whole and blends it in; `latte sentiment --file f.txt`.\n'
 };
 
 function openTool(name){
@@ -1286,8 +1617,17 @@ var SYSTEM_TOOL =
 '\n'+
 '## TOOLS\n'+
 'Every tool text is one click away in the header or the Contents viewer (right):\n'+
-'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu — plus the Draw\n'+
-'editor, the chess and xiangqi boards, and the Facet page editor as pages.\n'+
+'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu, Net, News — plus\n'+
+'the Draw editor, the soundlib/phono conlang pages, the chess and xiangqi\n'+
+'boards, and the Facet page editor as pages (all listed under Contents).\n'+
+'\n'+
+'## VIEWER HANDLING (the Oberon gestures)\n'+
+'Drag a title bar up/down to resize the viewer. Inter-click the MIDDLE button\n'+
+'while dragging (or Alt+drag, or drag sideways) to LIFT the viewer and drop it\n'+
+'anywhere — any position, any column. Columns:\n'+
+'System.OpenTrack\n'+
+'System.CloseTrack\n'+
+'System.Move *\n'+
 '\n'+
 '## YOURS\n'+
 'Texts: System.NewText notes \u00b7 System.Texts \u00b7 Store is in each text\'s menu, and\n'+
@@ -1325,7 +1665,7 @@ window.addEventListener('load', function(){
   makeViewer({name:'System.Log', track:'sys', kind:'log', menu:logMenu,
     foot:'the command trail — middle-click a line to run it again'});
   makeViewer({name:'Modules', track:'sys', kind:'mods', menu:modsMenu});
-  dragSep(document.getElementById('trackSep'), track('user'), track('sys'), true);
+  relayoutTracks();
   mark(h);
   refreshModules();
   appendLog('Orpheus System ready. Middle-click command lines; outputs embed in texts; drag bars to resize.');

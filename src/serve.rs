@@ -902,15 +902,35 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
         // financial ML front end: run the gold pipeline, return an HTML fragment
         // (metrics + an inline equity/volatility-timing SVG).
         ("POST", "/api/fin") => {
+            // body tokens: a bare number = iters; `--direction`/`--dir`/`direction=1`
+            // selects the direction task; `horizon=N` sets the prediction horizon.
             let body = String::from_utf8_lossy(&req.body);
-            let iters: u64 = body.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(80);
-            let html = match crate::numerics::market_eval(iters.clamp(10, 400)) {
+            let mut iters: u64 = 80;
+            let mut horizon: usize = 1;
+            let mut vol_task = true;
+            for tok in body.split_whitespace() {
+                if let Ok(n) = tok.parse::<u64>() {
+                    iters = n;
+                } else if tok == "--direction" || tok == "--dir" || tok == "direction=1" {
+                    vol_task = false;
+                } else if let Some(v) = tok.strip_prefix("horizon=") {
+                    horizon = v.parse().unwrap_or(horizon).clamp(1, 30);
+                } else if let Some(v) = tok.strip_prefix("iters=") {
+                    iters = v.parse().unwrap_or(iters);
+                }
+            }
+            let html = match crate::numerics::market_eval_cfg(iters.clamp(10, 400), horizon, vol_task) {
                 Ok(res) => {
                     let svg = crate::numerics::market_chart(&res);
+                    let task = if res.vol {
+                        format!("predict {}-day-ahead volatility regime (high vs low)", horizon)
+                    } else {
+                        format!("predict {}-day-ahead direction (up vs down)", horizon)
+                    };
                     format!(
                         "<table class='m'>\
                          <tr><td>market</td><td>{} &mdash; {} daily closes, {} &rarr; {}</td></tr>\
-                         <tr><td>task</td><td>predict next-day volatility regime (high vs low)</td></tr>\
+                         <tr><td>task</td><td>{}</td></tr>\
                          <tr><td>features</td><td>momentum (ROC 1/3/5/10) + price/MA10 + realized vol</td></tr>\
                          <tr><td>validation</td><td>walk-forward &mdash; {} train, {} unseen test days</td></tr>\
                          <tr><td>training acc.</td><td>{:.1}% (in-sample)</td></tr>\
@@ -924,7 +944,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                          predictable here &mdash; a real, honest out-of-sample edge over baseline (still modest; \
                          not a profit guarantee). The same model earns ~+50 pts on a synthetic mean-reverting \
                          series in the test suite, confirming it learns.</p>",
-                        crate::marketdata::MARKET_NAME, res.n, res.d0, res.d1, res.split, res.nsamples - res.split,
+                        crate::marketdata::MARKET_NAME, res.n, res.d0, res.d1, task, res.split, res.nsamples - res.split,
                         res.train, res.test, res.base, res.test - res.base, svg
                     )
                 }

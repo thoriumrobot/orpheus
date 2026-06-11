@@ -56,8 +56,9 @@ Documents under `docs/` open as plain editable frames with `System.Edit <name>`
 
 ## Tools are texts
 
-The header links (Trade, Charts, Finance, Plan, Trace, Derive, GPU, Docs) open
-**tool texts** — editable command sheets, exactly Oberon's `Draw.Tool` idea.
+The header links (Trade, Charts, Finance, Plan, Trace, Derive, Debug, Conlang,
+GPU, Net, News, Docs) open **tool texts** — editable command sheets, exactly
+Oberon's `Draw.Tool` idea.
 Edit the arguments, run lines, embed outputs, Store your customized tool. The
 small ↗ beside each link opens the corresponding full page when you want one.
 
@@ -78,16 +79,70 @@ A module frame (`hello.Mod` on the default desktop, `System.Open <name>`,
   (`latte fmt` from the shell).
 
 The Modules viewer (right track) lists every module; `·live` marks runtime-
-compiled ones. Click a name to open its source.
+compiled ones. Click a name to open its source. The **Contents** viewer above
+it indexes the whole surface: every manual page, every tool text, and every
+hosted page (Draw, Soundlib, Phono, Derive, Editor, Compiler, Chess, Xiangqi,
+Trade, Finance, Charts, GPU, Plan, Docs, Grammar). A page opens **inside the
+system** — a viewer whose main frame is the live page — so the desktop and
+its texts stay put; the viewer's menu has **Reload**, **↗ Tab** (a browser
+tab when a full window is wanted), Grow, and Close. By command:
+`System.Page /phono` opens any path as a page viewer, `System.Pop *` sends
+the marked page to a tab, `System.Reload *` refreshes it. Page viewers drag,
+move, and grow like any other viewer.
+
+## Viewer handling — the Oberon gestures
+
+The gestures are Project Oberon's, carried over as directly as a browser
+allows. Wirth's *How to use the Oberon System* (2015) specifies them: "A
+viewer is enlarged or shrunk by clicking the left button, while the cursor is
+in the title bar, and then dragging the bar up or down. A viewer is moved to
+another location by also inter-clicking with the middle button." And of Grow:
+"System.grow … generates a copy extending over the entire column (or over the
+entire display) … we may imagine that grow lifts a viewer to an overlay in the
+third dimension."
+
+Here, identically:
+
+- **Resize** — left-drag a viewer's title bar up or down: the bar is the
+  viewer's top edge, and the viewer above gives or takes the space. (The
+  separator bars still work too.)
+- **Move** — while dragging, **inter-click the middle button**: the viewer
+  lifts (it dims and shows a dashed outline) and follows the pointer; a drop
+  bar shows where it will land. Release to drop it **at any position in any
+  track**. Two modern equivalents lift it as well: dragging sideways into
+  another track, or starting the drag with Alt held. Esc cancels.
+  `System.Move *` sends the marked viewer to the next track by command.
+- **Grow** — the menu's Grow cycles normal → column → whole display (siblings
+  collapse to their title bars), the flex-layout equivalent of Oberon's
+  overlay; a third Grow (or growing another viewer) restores.
+
+## Tracks — changing the number of columns
+
+In Oberon the display is a row of vertical **tracks**, standardly a wide user
+track and a narrow system track, and the layout is not fixed:
+`Viewers.OpenTrack` lays a new track over any contiguous sequence of existing
+ones and `CloseTrack` restores what was beneath (the hierarchy is
+"three-dimensional"). Here tracks sit side by side instead of overlaying:
+
+- **`System.OpenTrack`** (or the header's ⊞ Track) adds a column beside the
+  system track, up to five. A new column is empty — a filler hint marks it
+  (Oberon's filler viewer) — and is a drop target for moved viewers.
+- **`System.CloseTrack`** (header ⊟) removes a column — an empty extra one if
+  any, else the marked viewer's; `System.CloseTrack *` names it explicitly.
+  Its viewers merge into the left neighbour. The standard two tracks stay.
+- New viewers open in the **least-crowded** user column — Oberon's
+  `Viewers` module likewise "delivers hints as to where it might best be
+  placed". Tool outputs, sources, and texts spread across your columns
+  instead of piling into one.
 
 ## The desktop
 
-Two tracks (drag the bars between viewers and between tracks to resize;
-Grow/Close in each menu). The left track holds your texts, tools, documents,
-and modules; the right holds the System.Log (the command trail — middle-click
-any line to re-run it) and the Modules index. `System.Sentiment <text>` scores
-text in place with the trained classifier; `Doc.Score <name>` scores a whole
-document into its evidence table.
+Two tracks by default (more with System.OpenTrack). The left track holds your
+texts, tools, documents, and modules; the right holds Contents, the System.Log
+(the command trail — middle-click any line to re-run it) and the Modules
+index. `System.Sentiment <text>` scores text in place with the trained
+classifier; `Doc.Score <name>` scores a whole document into its evidence
+table.
 
 ## Controls in texts — buttons and fields
 
