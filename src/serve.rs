@@ -660,6 +660,18 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 Err(e) => simple(200, "application/json; charset=utf-8", format!("{{\"error\":\"{}\"}}", json_escape(&e)).into_bytes()),
             }
         }
+        // delete a stored text (the GUI's "Default" button: removing a stored
+        // tool text restores the built-in version on next open)
+        ("DELETE", "/api/text") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let p = text_dir(root).map(|d| d.join(format!("{}.md", name)));
+                match p.map(std::fs::remove_file) {
+                    Some(Ok(_)) => simple(200, "text/plain; charset=utf-8", b"deleted".to_vec()),
+                    _ => simple(404, "text/plain; charset=utf-8", b"no such stored text".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
         // ---- CONLANG FILES: sca/<name>.sca and phonology/<name>.phon ----------
         ("GET", "/api/scafiles") => {
             let names = list_ext(&crate::conlang::sca_dir(), "sca");

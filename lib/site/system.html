@@ -831,6 +831,19 @@ function exec(line, fromViewer, ctx){
   if(headTok==='Edit.Head'||headTok==='Edit.Heading'){ logEcho(line); toggleHeading('h1'); return; }
   if(headTok==='Edit.Sub'||headTok==='Edit.Subhead'){ logEcho(line); toggleHeading('h2'); return; }
   // ---- the SYNTAX VIEW: the raw markdown behind a rendered text -------------
+  if(headTok==='Edit.Default'){
+    logEcho(line);
+    var dv=targetViewer(rest, fromViewer);
+    if(!dv||!dv.textname){ logOut('Edit.Default: mark a tool text', true); return; }
+    if(!confirm('Restore the shipped '+(dv.toolname||dv.name)+'? Your stored text/'+dv.textname+'.md will be deleted.')) return;
+    fetch('/api/text?name='+encodeURIComponent(dv.textname),{method:'DELETE'}).then(function(){
+      var nm=dv.toolname;
+      closeViewer(dv);
+      if(nm==='System'){ window.location.reload(); } else if(nm){ openTool(nm); }
+      logOut('restored the shipped version');
+    });
+    return;
+  }
   if(headTok==='Edit.Syntax'){
     logEcho(line);
     var tv=targetViewer(rest, fromViewer);
@@ -973,6 +986,16 @@ function targetViewer(rest, fromViewer){
 }
 
 /* ---- viewer operations --------------------------------------------------- */
+/* append a menu command to an existing viewer's title bar (used when a
+   stored override is detected after the viewer was built) */
+function addMenuItem(v, c){
+  var menu=v.box.querySelector('.menu');
+  if(!menu || menu.querySelector('[title="'+c.cmd+'"]')) return;
+  var b=el('span','cmd', c.label||c.cmd); b.title=c.cmd;
+  b.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); mark(v); exec(c.cmd, v); } };
+  var sp=menu.querySelector('.spacer');
+  menu.insertBefore(b, sp);
+}
 function closeViewer(v){
   if(!v||v.kind==='log') return;
   var tr=v.box.parentElement;
@@ -1200,7 +1223,15 @@ var TOOLS = {
 'soundlib file=germanic words=pater bhrater\n',
  Gpu:
 '# Gpu.Tool — data-parallel compute\n'+
-'[Run the device demo](run: gpu)\n'
+'The same Latte kernel (lib/gpu.lat) runs element-wise over a vector; the host\n'+
+'auto-detects a GPU and falls back to the CPU path, reporting which ran and the\n'+
+'per-element timing. Output embeds below.\n'+
+'\n'+
+'dim [field: dim=4096]\n'+
+'[Run](run: gpu dim=$dim) [Small](run: gpu dim=512) [Large](run: gpu dim=65536)\n'+
+'\n'+
+'Pair it with the vector jets: `fast %tag` arms in your own packages get the\n'+
+'same treatment \u2014 see [adding libraries](run: System.Edit adding-libraries).\n'
 };
 
 function openTool(name){
@@ -1211,23 +1242,31 @@ function openTool(name){
   // across runs (Store in the tool's menu writes text/<name>-tool.md)
   fetch('/api/text?name='+encodeURIComponent(stored))
     .then(function(r){ if(!r.ok) throw 0; return r.text(); })
-    .then(function(md){ openToolWith(name, stored, md, 'your stored version (text/'+stored+'.md) — Store keeps changes; delete the file to get the default back'); })
-    .catch(function(){ openToolWith(name, stored, TOOLS[name]||('# '+name+'\n'), 'a tool TEXT — edit it, run lines, outputs embed inline; Store saves it with its objects, and the stored version loads next time'); });
+    .then(function(md){ openToolWith(name, stored, md, 'YOUR STORED VERSION (text/'+stored+'.md) overrides the built-in — Default (menu) restores the shipped tool', true); })
+    .catch(function(){ openToolWith(name, stored, TOOLS[name]||('# '+name+'\n'), 'a tool TEXT — edit it, run lines or click buttons; Store keeps your version across runs', false); });
 }
-function openToolWith(name, stored, md, foot){
-  var v = makeViewer({name:name+'.Tool', track:'user', kind:'text', content:md, menu:textMenu, foot:foot});
+function openToolWith(name, stored, md, foot, isStored){
+  var menu = isStored
+    ? textMenu.concat([{cmd:'Edit.Default *',label:'Default'}])
+    : textMenu;
+  var v = makeViewer({name:name+'.Tool', track:'user', kind:'text', content:md, menu:menu, foot:foot});
   v.textname = stored;
+  v.toolname = name;
   mark(v);
 }
 function openDocsTool(){
   fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
     var names=t.split('\n').filter(Boolean);
-    var md='# Docs.Tool — the manual shelf. Middle-click to open a document frame.\n'+
-      names.map(function(n){ return 'System.Edit '+n; }).join('\n')+'\n'+
-      '# score any of them with the trained classifier:\n'+
-      (names[0]?('Doc.Score '+names[0]+'\n'):'');
+    var md='# Docs.Tool — the manual shelf\n'+
+      'Every document opens as a RENDERED, editable frame; open several side by side.\n'+
+      '\n'+
+      names.map(function(n){ return '[\u25b8 '+n.replace(/-/g,' ')+'](run: System.Edit '+n+')'; }).join('\n')+'\n'+
+      '\n'+
+      '## The classifier\'s opinion\n'+
+      'doc [field: doc='+(names[0]||'the-system')+']\n'+
+      '[Score it](run: Doc.Score $doc) [Score this very shelf](run: System.Sentiment the manual shelf is honest and complete)\n';
     var v = makeViewer({name:'Docs.Tool', track:'user', kind:'text', content:md, menu:textMenu,
-      foot:'every document opens as an editable frame — open several side by side'});
+      foot:'one button per manual page — System.Edit opens the formatted view; Syntax (in its menu) shows raw markdown'});
     v.textname='docs-tool';
     mark(v);
   });
@@ -1273,7 +1312,12 @@ window.addEventListener('load', function(){
   st.textname='system-tool';
   fetch('/api/text?name=system-tool')
     .then(function(r){ if(!r.ok) throw 0; return r.text(); })
-    .then(function(md){ setTextContent(st, md); st.box.querySelector('.foot').textContent='your stored System.Tool (text/system-tool.md) — Store keeps changes'; })
+    .then(function(md){
+      setTextContent(st, md);
+      st.toolname='System';
+      st.box.querySelector('.foot').textContent='YOUR STORED System.Tool (text/system-tool.md) overrides the built-in — Default (menu) restores it';
+      addMenuItem(st, {cmd:'Edit.Default *',label:'Default'});
+    })
     .catch(function(){ fillDocIndex(st); });
   var h=makeViewer({name:'hello.Mod', track:'user', kind:'frame', content:HELLO_MOD, menu:sourceMenu,
     foot:'module `hello` — Compile loads it into the running system; Store writes pkg/hello.lat'});
