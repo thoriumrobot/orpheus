@@ -660,42 +660,6 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 Err(e) => simple(200, "application/json; charset=utf-8", format!("{{\"error\":\"{}\"}}", json_escape(&e)).into_bytes()),
             }
         }
-        // ---- TOOL TEXTS ARE FILES. Shipped defaults live in lib/tools/<name>.md
-        // (read-only, part of the distribution, like the site pages); the user's
-        // version is text/<name>-tool.md, written by Store. Resolution is
-        // stored-first, and the response SAYS which one it served — no hidden
-        // constants, no silent masking.
-        ("GET", "/api/tool") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
-            Some(name) => match resolve_tool(root, &name) {
-                Some((source, md)) => simple(
-                    200,
-                    "application/json; charset=utf-8",
-                    format!("{{\"source\":\"{}\",\"md\":\"{}\"}}", source, json_escape(&md)).into_bytes(),
-                ),
-                None => simple(404, "text/plain; charset=utf-8", b"no such tool".to_vec()),
-            },
-            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
-        },
-        ("GET", "/api/tools") => {
-            let mut names = list_ext(&tools_dir(root), "md");
-            // user-created tools (stored texts named <x>-tool) join the list
-            if let Some(td) = text_dir(root) {
-                for n in list_ext(&td, "md") {
-                    if let Some(stem) = n.strip_suffix("-tool") {
-                        if !names.iter().any(|x| x == stem) {
-                            names.push(stem.to_string());
-                        }
-                    }
-                }
-            }
-            names.sort();
-            // system first: it is the front door
-            if let Some(pos) = names.iter().position(|n| n == "system") {
-                let sys = names.remove(pos);
-                names.insert(0, sys);
-            }
-            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
-        }
         // delete a stored text (the GUI's "Default" button: removing a stored
         // tool text restores the built-in version on next open)
         ("DELETE", "/api/text") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
@@ -1612,26 +1576,6 @@ fn list_ext(dir: &std::path::Path, ext: &str) -> Vec<String> {
     }
     names.sort();
     names
-}
-
-fn tools_dir(root: &str) -> std::path::PathBuf {
-    std::path::Path::new(root)
-        .parent()
-        .map(|p| p.join("tools"))
-        .unwrap_or_else(|| std::path::PathBuf::from("lib/tools"))
-}
-
-/// Stored-first tool resolution: text/<name>-tool.md ("stored"), else the
-/// shipped lib/tools/<name>.md ("shipped").
-fn resolve_tool(root: &str, name: &str) -> Option<(&'static str, String)> {
-    if let Some(td) = text_dir(root) {
-        if let Ok(md) = std::fs::read_to_string(td.join(format!("{}-tool.md", name))) {
-            return Some(("stored", md));
-        }
-    }
-    std::fs::read_to_string(tools_dir(root).join(format!("{}.md", name)))
-        .ok()
-        .map(|md| ("shipped", md))
 }
 
 fn drawings_dir(root: &str) -> Option<std::path::PathBuf> {

@@ -135,21 +135,10 @@ in the System; nothing requires a shell:
    objects serialized as ```` ```tool ```` fences.
 
 Stored texts survive restarts — `System.OpenText mytool` brings the tool back
-with every object rehydrated. Better: name it `<x>-tool` and it **joins the
-tool list itself** — the Contents viewer and `/api/tools` show your tool next
-to the shipped ones, opened the same way.
-
-### Tools are files
-
-There are no tool texts hidden in the program. The shipped tools are ordinary
-markdown files in `lib/tools/` — `trade.md`, `conlang.md`, `system.md`
-(System.Tool itself), and the rest — distributed alongside the site pages,
-readable and diffable outside the GUI. Store writes your version to
-`text/<name>-tool.md`, which resolves first; the frame's footer names exactly
-which file you are looking at, and **Default** (in the menu of any overridden
-tool) deletes your version and reopens the shipped file. Nothing is masked:
-the two files are both on disk, and the server's `/api/tool` reply says which
-one it served.
+with every object rehydrated — and **stored tool texts override the built-in
+ones**: edit Trade.Tool to your taste, Store it, and your version is what the
+Trade header link opens next session (delete `text/trade-tool.md` to restore
+the default). System.Tool itself works the same way.
 
 ## The toolbox
 

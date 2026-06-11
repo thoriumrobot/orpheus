@@ -1068,18 +1068,12 @@ function buildContents(){
       d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openDoc(n); } };
       md.appendChild(d);
     });
-    md.appendChild(el('div','hd','TOOLS (lib/tools/ + your stored ones)'));
-    fetch('/api/tools').then(function(r2){return r2.text();}).then(function(t2){
-      var anchor2=md.querySelector('.toolanchor');
-      t2.split('\n').filter(Boolean).forEach(function(key){
-        var label=key.charAt(0).toUpperCase()+key.slice(1);
-        var d=el('div','m', label+'.Tool');
-        d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openTool(label); } };
-        md.insertBefore(d, anchor2);
-      });
+    md.appendChild(el('div','hd','TOOLS'));
+    Object.keys(TOOLS).forEach(function(n){
+      var d=el('div','m', n+'.Tool');
+      d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openTool(n); } };
+      md.appendChild(d);
     });
-    md.appendChild(el('div','m toolanchor'));
-    md.querySelector('.toolanchor').style.display='none';
     var dx=el('div','m','Draw  (the graphics editor page)');
     dx.onmousedown=function(e){ if(e.button===0||e.button===1) window.location='/draw'; };
     md.appendChild(dx);
@@ -1132,23 +1126,124 @@ var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Gro
 /* ---- TOOL TEXTS: each tool is a text (Oberon's Draw.Tool idea) -------------- */
 /* Clicking a header link opens the tool's TEXT FRAME — commands you can edit,
    run, and extend; outputs embed inline in the text. */
+var TOOLS = {
+ Trade:
+'# Trade.Tool — the trading advisor\n'+
+'TA votes \u00d7 news sentiment \u00d7 HAR-RV volatility-targeted Kelly sizing. Reports embed below.\n'+
+'\n'+
+'account [field: account=10000]  kelly [field: kelly=1.0]  market [field: market=btc]\n'+
+'[Advise](run: trade account=$account kelly=$kelly market=$market) [Advise live](run: trade account=$account kelly=$kelly market=$market live=1) [Technical analysis](run: ta market=$market) [Chart 180d](run: chart market market=$market days=180)\n'+
+'\n'+
+'## Other markets\n'+
+'Fetch once from the CLI (`latte fetch --market eth`, or `--all`); then set the market field above\n'+
+'(eth ltc xrp ada doge sol \u2026). Each market trains its own volatility model, and the registry\n'+
+'records its edge honestly (~/.cache/orpheus/models/).\n'+
+'\n'+
+'## Score text and documents\n'+
+'headline [field: headline=etf outflows eased as markets steadied]\n'+
+'[Score headline](run: System.Sentiment $headline) [Score the ML doc](run: Doc.Score visualization-and-ml)\n'+
+'\n'+
+'Or type any command line and middle-click it:\n'+
+'trade account=25000 kelly=0.5\n',
+ Chart:
+'# Chart.Tool — visualization\n'+
+'Layout computed in lib/plot.lat on Loom; charts embed where you run them.\n'+
+'\n'+
+'days [field: days=120]  market [field: market=btc]\n'+
+'[Market chart](run: chart market market=$market days=$days) [Live](run: chart market market=$market days=$days live=1)\n'+
+'\n'+
+'[Bar demo](run: chart bar 3 1 4 1 5 9 2 6) [Line demo](run: chart line 10 12 9 14 17 13 18) [Scatter demo](run: chart scatter 3 7 1 9 4 6 8 2) [Rings](run: gfx Tool.rings 6)\n'+
+'\n'+
+'chart bar 2 7 1 8 2 8\n',
+ Fin:
+'# Fin.Tool — the financial-ML pipeline\n'+
+'A logistic model on real market data; equity NET of 5bp costs; honest baselines throughout.\n'+
+'\n'+
+'iters [field: iters=80]\n'+
+'[Volatility task](run: fin $iters) [Direction task + risk stats](run: fin --direction $iters) [The advisor](run: trade account=10000)\n',
+ Plan:
+'# Plan.Tool — economic planning\n'+
+'*Towards a New Socialism* (Cockshott & Cottrell): labour values (v = l + vA), Leontief gross\n'+
+'outputs, labour-token accounting, market-clearing steering, harmony balancing. All arithmetic\n'+
+'in lib/plan.lat.\n'+
+'\n'+
+'[The 3-sector demo](run: plan demo3) [Two-sector classic](run: plan 40 0 1000) [Open the manual](run: System.Edit planning)\n'+
+'\n'+
+'## Custom economies\n'+
+'Write a spec (sector/demand/market/labour lines) in the /plan page form, or POST it to\n'+
+'/api/plan \u2014 the format is in the manual above.\n',
+ Trace:
+'# Trace.Tool — the ray tracer\n'+
+'Written in Latte, Anvil-compiled: checkered ground, sky, key + fill lights, shadows,\n'+
+'speculars, graded reflections.\n'+
+'\n'+
+'w [field: w=96]  h [field: h=72]\n'+
+'[Render](run: trace w=$w h=$h) [Render large](run: trace w=160 h=120)\n'+
+'\n'+
+'## The scene is Latte data\n'+
+'A list of [center [radius [color [refl 0]]]] (v3 makes vectors; signed nums [sign mag]\u00d71000;\n'+
+'refl 0..1000):\n'+
+'[One red mirror sphere](run: trace w=$w h=$h scene=[ [ (v3 [0 0] [0 800] [0 500]) [ [0 800] [ (v3 [0 950] [0 300] [0 300]) [ 700 0 ] ] ] ] 0 ])\n'+
+'\n'+
+'Or edit the built-in scene (the spheres arm), Compile, re-render:\n'+
+'[Open lib/trace.lat](run: System.Open trace)\n',
+ Debug:
+'# Debug.Tool — the Loom call tracer\n'+
+'Every arm call with its arguments and result, as an expandable tree. Click a call in the\n'+
+'output to STEP into it; the break field keeps only subtrees rooted at that arm.\n'+
+'\n'+
+'expr [field: expr=(fib 6)]  break [field: brk=dec]\n'+
+'[Trace it](run: debug $expr) [Trace with breakpoint](run: debug break=$brk $expr)\n'+
+'\n'+
+'[Example: primes](run: debug (primes 20)) [Example: harmony parcels](run: debug break=nadd (harmony_alloc [400 [1200 [400 0]]] 1000 40))\n'+
+'\n'+
+'Jetted arms (fast %name) run natively \u2014 the tracer shows the call, not their inner\n'+
+'reductions. CLI form: `latte debug --break ARM "<expr>"`.\n',
+ Derive:
+'# Derive.Tool — Ligurian, live\n'+
+'PIE \u2192 Solar \u2192 Heart Speech by SCArs (the original conlang pipeline).\n'+
+'\n'+
+'[PIE roots](run: derive pie d\u02b0eh\u2081s mr\u0325to \u01f5\u02b0el g\u02b7ih\u2083w nok\u02b7t srew h\u2082st\u00e9r) [Solar words](run: derive solar liga nivo mazda saules bazd\u0101 serd\u0101) [Generate 12](run: derive gen n=12 seed=42) [Evolve](run: sca liga nivo mazda)\n',
+ Conlang:
+'# Conlang.Tool — the conlanging suite\n'+
+'Four modular tools in one chain: phonology builder \u2192 word generator \u2192 sound-change\n'+
+'library \u2192 SCArs. Full manual: [open it](run: System.Edit conlang-tools)\n'+
+'\n'+
+'## The sound-change library (42 attested changes)\n'+
+'words [field: words=pater bhrater lupo skola]\n'+
+'[Grimm + Verner](run: soundlib grimm1 verner words=$words) [Romance lenition chain](run: soundlib lenition apocope finaldevoice words=$words) [English reductions](run: soundlib knloss wrloss ghloss nonrhotic words=$words)\n'+
+'\n'+
+'## The phonology builder (+ believability report)\n'+
+'preset [field: preset=pie]  n [field: n=12]  seed [field: seed=42]\n'+
+'[Generate](run: phono preset=$preset n=$n seed=$seed) [Generate + Grimm](run: phono preset=$preset n=$n seed=$seed changes=grimm1,verner,apocope)\n'+
+'\n'+
+'## Stored files\n'+
+'Rulesets persist as ordinary SCArs files (sca/*.sca), phonologies as phonology/*.phon \u2014\n'+
+'the /soundlib and /phono pages Store and reopen them; SCArs loads them directly.\n'+
+'soundlib file=germanic words=pater bhrater\n',
+ Gpu:
+'# Gpu.Tool — data-parallel compute\n'+
+'The same Latte kernel (lib/gpu.lat) runs element-wise over a vector; the host\n'+
+'auto-detects a GPU and falls back to the CPU path, reporting which ran and the\n'+
+'per-element timing. Output embeds below.\n'+
+'\n'+
+'dim [field: dim=4096]\n'+
+'[Run](run: gpu dim=$dim) [Small](run: gpu dim=512) [Large](run: gpu dim=65536)\n'+
+'\n'+
+'Pair it with the vector jets: `fast %tag` arms in your own packages get the\n'+
+'same treatment \u2014 see [adding libraries](run: System.Edit adding-libraries).\n'
+};
+
 function openTool(name){
   var existing = viewers.find(function(v){ return v.kind==='text' && v.name===name+'.Tool'; });
   if(existing){ mark(existing); return; }
-  // TOOLS ARE FILES: the shipped default is lib/tools/<name>.md (part of the
-  // distribution, like the site pages); Store writes your version to
-  // text/<name>-tool.md, which resolves first. The server says which it served.
-  var key = name.toLowerCase();
-  fetch('/api/tool?name='+encodeURIComponent(key))
-    .then(function(r){ if(!r.ok) throw 0; return r.json(); })
-    .then(function(j){
-      var stored = j.source==='stored';
-      openToolWith(name, key+'-tool', j.md,
-        stored ? 'your text/'+key+'-tool.md (overrides lib/tools/'+key+'.md — Default restores the shipped file)'
-               : 'lib/tools/'+key+'.md — edit, click buttons, run lines; Store writes your version to text/'+key+'-tool.md',
-        stored);
-    })
-    .catch(function(){ openToolWith(name, key+'-tool', '# '+name+'\n', 'a new tool text — Store keeps it', false); });
+  var stored = name.toLowerCase()+'-tool';
+  // a STORED tool text overrides the built-in: your customizations persist
+  // across runs (Store in the tool's menu writes text/<name>-tool.md)
+  fetch('/api/text?name='+encodeURIComponent(stored))
+    .then(function(r){ if(!r.ok) throw 0; return r.text(); })
+    .then(function(md){ openToolWith(name, stored, md, 'YOUR STORED VERSION (text/'+stored+'.md) overrides the built-in — Default (menu) restores the shipped tool', true); })
+    .catch(function(){ openToolWith(name, stored, TOOLS[name]||('# '+name+'\n'), 'a tool TEXT — edit it, run lines or click buttons; Store keeps your version across runs', false); });
 }
 function openToolWith(name, stored, md, foot, isStored){
   var menu = isStored
@@ -1178,6 +1273,29 @@ function openDocsTool(){
 }
 
 /* ---- the default desktop ------------------------------------------------- */
+var SYSTEM_TOOL =
+'# System.Tool\n'+
+'This is a TEXT: characters plus embedded objects and controls. Middle-click any\n'+
+'command line to run it; click a button; object-producing commands embed their\n'+
+'output right here, under the line you ran.\n'+
+'\n'+
+'[Chart](run: chart market days=120) [Ray-trace](run: trace w=96 h=72) [Trace a call tree](run: debug (fib 6))\n'+
+'\n'+
+'## DOCUMENTATION\n'+
+'(the index of docs/ loads here)\n'+
+'\n'+
+'## TOOLS\n'+
+'Every tool text is one click away in the header or the Contents viewer (right):\n'+
+'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu — plus the Draw\n'+
+'editor, the chess and xiangqi boards, and the Facet page editor as pages.\n'+
+'\n'+
+'## YOURS\n'+
+'Texts: System.NewText notes \u00b7 System.Texts \u00b7 Store is in each text\'s menu, and\n'+
+'stored tool texts override these defaults next run. Packages: edit hello.Mod\n'+
+'below, Compile (menu), then:\n'+
+'hello.fib 20\n'+
+'Quit is in the header (or run System.Quit).\n';
+
 var HELLO_MOD =
 'import std\n'+
 'core hello\n'+
@@ -1189,22 +1307,18 @@ var HELLO_MOD =
 'end\n';
 
 window.addEventListener('load', function(){
-  var st = makeViewer({name:'System.Tool', track:'user', kind:'text', content:'# System.Tool\nloading lib/tools/system.md \u2026\n', menu:textMenu,
-    foot:'the system tool text — run lines in place; objects embed; Store keeps your version across runs'});
+  var st = makeViewer({name:'System.Tool', track:'user', kind:'text', content:SYSTEM_TOOL, menu:textMenu,
+    foot:'the system tool TEXT — run lines in place; objects embed; Store keeps it across runs'});
   st.textname='system-tool';
-  st.toolname='System';
-  fetch('/api/tool?name=system')
-    .then(function(r){ if(!r.ok) throw 0; return r.json(); })
-    .then(function(j){
-      setTextContent(st, j.md);
-      if(j.source==='stored'){
-        st.box.querySelector('.foot').textContent='your text/system-tool.md (overrides lib/tools/system.md — Default restores the shipped file)';
-        addMenuItem(st, {cmd:'Edit.Default *',label:'Default'});
-      } else {
-        fillDocIndex(st);
-      }
+  fetch('/api/text?name=system-tool')
+    .then(function(r){ if(!r.ok) throw 0; return r.text(); })
+    .then(function(md){
+      setTextContent(st, md);
+      st.toolname='System';
+      st.box.querySelector('.foot').textContent='YOUR STORED System.Tool (text/system-tool.md) overrides the built-in — Default (menu) restores it';
+      addMenuItem(st, {cmd:'Edit.Default *',label:'Default'});
     })
-    .catch(function(){ setTextContent(st, '# System.Tool\nlib/tools/system.md is missing.\n'); });
+    .catch(function(){ fillDocIndex(st); });
   var h=makeViewer({name:'hello.Mod', track:'user', kind:'frame', content:HELLO_MOD, menu:sourceMenu,
     foot:'module `hello` — Compile loads it into the running system; Store writes pkg/hello.lat'});
   buildContents();
