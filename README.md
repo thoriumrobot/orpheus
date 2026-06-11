@@ -405,8 +405,10 @@ reflections. The conlang suite checks generated phonologies against the
 typological record (UPSID/WALS implications, with evidence), and persists
 rulesets as ordinary `.sca` files plus phonologies as `.phon` files that any
 tool can parse; the Draw editor designs covers and posters (canvas presets,
-backgrounds, font control, stars, snap, centering). Tool texts and System.Tool
-persist your stored versions across runs, and every command's output — your
+backgrounds, font control, stars, snap, centering). Tool texts are files —
+shipped defaults in `lib/tools/*.md`, your versions in `text/*-tool.md`,
+resolved stored-first with the footer naming which file is open and Default
+restoring the shipped one — and every command's output — your
 own packages' arms included — embeds as an object in texts. Texts also embed
 live **buttons and fields** (`[Label](run: cmd)`, `[field: name=value]`, with
 `$name` substitution) — the shipped tool texts are working panels in the ETH
