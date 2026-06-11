@@ -193,7 +193,15 @@ pub fn render_lines_dated(title: &str, labels: &[&str], series: &[Vec<f64>], dat
 /// Chart the (real, optionally live-refreshed) market series: daily closes with
 /// SMA20 and SMA50 overlays over the last `days` days.
 pub fn market_chart(days: usize, live: bool) -> String {
-    let (closes_x100, span, note) = crate::marketdata::closes(live);
+    market_chart_sym("btc", days, live)
+}
+pub fn market_chart_sym(market: &str, days: usize, live: bool) -> String {
+    let (closes_x100, span, note) = match crate::marketdata::closes_market(market, live) {
+        Ok(t) => t,
+        Err(e) => {
+            return format!("<svg xmlns='http://www.w3.org/2000/svg' width='460' height='40'><text x='6' y='24' font-family='monospace' font-size='12'>{}</text></svg>", e);
+        }
+    };
     let all: Vec<f64> = closes_x100.iter().map(|&c| c as f64 / 100.0).collect();
     let sma = |w: usize| -> Vec<f64> {
         (0..all.len())
@@ -213,7 +221,7 @@ pub fn market_chart(days: usize, live: bool) -> String {
     });
     let title = format!(
         "{} — last {} days to {}  ({})",
-        crate::marketdata::MARKET_NAME,
+        crate::marketdata::market_label(market),
         n - lo,
         span.1,
         note

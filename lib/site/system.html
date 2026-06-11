@@ -5,83 +5,104 @@
 <title>Orpheus · System</title>
 <style>
  :root{
-   --bg:#cfcab9; --ink:#1a1a2e; --paper:#f4f1e8; --title:#c9c4b4; --titlemark:#aeb0d8;
-   --btn:#e8e4d8; --accent:#2a2d6e; --rule:#1a1a2e; --dim:#5b5848; --cmd:#1a2e6e;
-   --lh:20px;
+   --bg:#d6d2c4; --ink:#22222e; --paper:#faf8f1; --title:#cfcaba; --titlemark:#b9bce0;
+   --btn:#ece8dc; --accent:#33387e; --rule:#8e8a7a; --dim:#6b6858; --cmd:#1d3a8f;
+   --obj:#ffffff; --lh:20px;
  }
  *{box-sizing:border-box}
  html,body{height:100%}
- body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;background:var(--bg);color:var(--ink);font-size:13px}
- header{background:var(--ink);color:var(--paper);padding:6px 12px;display:flex;justify-content:space-between;align-items:center;font-size:13px;letter-spacing:.3px}
- header b{font-weight:600}
- header .links a{color:#bcd;text-decoration:none;margin-left:12px}
- header .links a:hover{text-decoration:underline}
- #screen{display:flex;height:calc(100vh - 34px);padding:4px}
+ body{font-family:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;margin:0;
+      background:var(--bg);color:var(--ink);font-size:13px}
+ header{background:linear-gradient(#262633,#1c1c26);color:#e8e6dc;padding:7px 14px;
+        display:flex;justify-content:space-between;align-items:center;font-size:13px;
+        letter-spacing:.3px;border-bottom:2px solid var(--accent);box-shadow:0 1px 6px #0004}
+ header b{font-weight:600;color:#cfd3ff}
+ header .links a{color:#c9c4e8;text-decoration:none;margin-left:11px;padding:2px 4px;border-radius:3px}
+ header .links a:hover{background:#ffffff22}
+ header .links a.pg{color:#8f8cae;font-size:11px;margin-left:2px}
+ #screen{display:flex;height:calc(100vh - 36px);padding:5px;gap:0}
  .track{display:flex;flex-direction:column;min-width:120px;height:100%}
  #userTrack{flex:62 1 0}
  #sysTrack{flex:38 1 0}
- /* draggable separators: between tracks (col) and between viewers (row) */
- .tsep{flex:0 0 6px;cursor:col-resize;position:relative}
- .tsep::after{content:'';position:absolute;left:2px;top:0;bottom:0;width:2px;background:#b7b2a2}
+ .tsep{flex:0 0 7px;cursor:col-resize;position:relative}
+ .tsep::after{content:'';position:absolute;left:2px;top:0;bottom:0;width:3px;border-radius:2px;background:#a9a494}
  .tsep:hover::after{background:var(--accent)}
- .vsep{flex:0 0 6px;cursor:row-resize;position:relative}
- .vsep::after{content:'';position:absolute;top:2px;left:0;right:0;height:2px;background:#b7b2a2}
+ .vsep{flex:0 0 7px;cursor:row-resize;position:relative}
+ .vsep::after{content:'';position:absolute;top:2px;left:0;right:0;height:3px;border-radius:2px;background:#a9a494}
  .vsep:hover::after{background:var(--accent)}
- .viewer{display:flex;flex-direction:column;min-height:64px;background:var(--paper);border:1.5px solid var(--rule);flex:1 1 0;overflow:hidden}
+ .viewer{display:flex;flex-direction:column;min-height:64px;background:var(--paper);
+         border:1px solid var(--rule);border-radius:3px;flex:1 1 0;overflow:hidden;
+         box-shadow:0 1px 3px #00000022}
  .viewer.grown{flex:8 1 0}
- .menu{display:flex;align-items:center;background:var(--title);border-bottom:1.5px solid var(--rule);
-       padding:2px 6px;font-size:12px;cursor:default;user-select:none;flex-wrap:wrap}
- .viewer.marked .menu{background:var(--titlemark)}
- .menu .name{font-weight:700;margin-right:10px;white-space:nowrap}
+ .menu{display:flex;align-items:center;background:linear-gradient(var(--title),#c4bfae);
+       border-bottom:1px solid var(--rule);padding:3px 7px;font-size:12px;cursor:default;
+       user-select:none;flex-wrap:wrap;min-height:24px}
+ .viewer.marked .menu{background:linear-gradient(var(--titlemark),#a6aad6)}
+ .menu .name{font-weight:700;margin-right:10px;white-space:nowrap;color:#1c1c30}
  .menu .star{margin-right:6px;width:12px;display:inline-block;text-align:center;color:var(--accent)}
- .menu .cmd{color:var(--cmd);cursor:pointer;padding:0 6px;border-left:1px solid #b7b2a2}
+ .menu .cmd{color:var(--cmd);cursor:pointer;padding:0 7px;border-left:1px solid #aaa594}
  .menu .cmd:first-of-type{border-left:0}
- .menu .cmd:hover{background:#fff;text-decoration:underline}
+ .menu .cmd:hover{background:#ffffffcc;text-decoration:underline;border-radius:2px}
  .menu .spacer{flex:1}
  .body{flex:1;min-height:0;display:flex}
- /* A text frame: editable text that is also executable (the Oberon TUI). */
- textarea.frame{flex:1;width:100%;border:0;margin:0;padding:6px 8px;resize:none;outline:none;
-       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:var(--lh);
+ /* A SOURCE frame: plain editable text (modules, raw markdown). */
+ textarea.frame{flex:1;width:100%;border:0;margin:0;padding:7px 9px;resize:none;outline:none;
+       font-family:inherit;font-size:13px;line-height:var(--lh);
        background:var(--paper);color:var(--ink);white-space:pre;overflow:auto}
- /* The rich Log: text lines (each executable) interleaved with embedded OBJECTS
-    (SVG drawings, charts, HTML reports) — the Oberon "texts with embedded
-    gadgets" idea. */
- .richlog{flex:1;overflow:auto;padding:6px 8px;background:#fbfbf6;line-height:var(--lh)}
- .richlog .ln{white-space:pre-wrap;min-height:var(--lh);cursor:default}
- .richlog .ln:hover{background:#f0eddc}
+ /* A TEXT frame: an editable text whose lines are commands and whose body can
+    hold EMBEDDED DYNAMIC OBJECTS inline — Oberon's texts-with-elements. */
+ .richtext{flex:1;overflow:auto;padding:7px 10px;background:var(--paper);line-height:var(--lh);
+           outline:none;white-space:pre-wrap;word-break:break-word}
+ .richtext div{min-height:var(--lh)}
+ .richtext .obj{margin:7px 0 9px 14px;padding:6px;border:1px solid #cdc7b4;border-radius:3px;
+                background:var(--obj);display:block;max-width:calc(100% - 28px);overflow:auto;
+                box-shadow:0 1px 2px #00000014;user-select:none;white-space:normal}
+ .richtext .obj::before{content:'⚙ ' attr(data-cmd);display:block;font-size:10px;color:#8a8676;
+                margin:0 0 4px 1px;letter-spacing:.2px}
+ .richtext .obj svg{display:block;max-width:100%;height:auto}
+ /* The Log and tool-output viewers (read-only rich streams). */
+ .richlog{flex:1;overflow:auto;padding:7px 9px;background:#fdfcf7;line-height:var(--lh)}
+ .richlog .ln{white-space:pre-wrap;min-height:var(--lh);cursor:default;border-radius:2px}
+ .richlog .ln:hover{background:#f1eedd}
  .richlog .ln.echo{color:var(--cmd)}
- .richlog .ln.err{color:#7a1a1a}
- .richlog .obj{margin:6px 0 10px 12px;padding:4px;border:1px solid #c8c2b0;background:#fff;
-               display:inline-block;max-width:calc(100% - 24px);overflow:auto;vertical-align:top}
+ .richlog .ln.err{color:#8d1f1f}
+ .richlog .obj{margin:7px 0 10px 14px;padding:6px;border:1px solid #cdc7b4;border-radius:3px;
+               background:var(--obj);display:inline-block;max-width:calc(100% - 28px);
+               overflow:auto;vertical-align:top;box-shadow:0 1px 2px #00000014}
  .richlog .obj svg{display:block;max-width:100%;height:auto}
- .richlog .obj table.m{border-collapse:collapse}
- .richlog .obj table.m td{border:1px solid #c9c4b4;padding:2px 8px;font-size:12px}
- .richlog .obj table.m td:first-child{color:#444;background:#efeadd;white-space:nowrap}
- .richlog .obj .note{color:#444;font-size:11px;max-width:560px;line-height:1.4}
- .richlog .obj h3{font-size:12px;margin:4px 0}
- .mods{flex:1;overflow:auto;padding:6px 4px;font:13px/1.7 ui-monospace,monospace}
- .mods .m{padding:1px 8px;cursor:pointer;border-radius:2px}
- .mods .m:hover{background:#e7e3d6;text-decoration:underline}
+ .obj table.m, .richtext .obj table.m{border-collapse:collapse}
+ .obj table.m td, .richtext .obj table.m td{border:1px solid #d3cebc;padding:2px 9px;font-size:12px}
+ .obj table.m td:first-child{color:#4c4a3e;background:#f1ecdd;white-space:nowrap}
+ .obj .note{color:#54513f;font-size:11px;max-width:580px;line-height:1.45}
+ .obj h3{font-size:12px;margin:4px 0;color:#33387e}
+ .mods{flex:1;overflow:auto;padding:7px 5px;font:13px/1.75 inherit}
+ .mods .m{padding:1px 9px;cursor:pointer;border-radius:3px}
+ .mods .m:hover{background:#e9e5d6;text-decoration:underline}
  .mods .m.rt{font-weight:700}
- /* A PANEL viewer: a graphical front end described in Latte (lib/ui.lat). */
- .panelbody{flex:1;overflow:auto;padding:10px 12px}
- .panelbody .prow{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
- .panelbody .plabel{color:#333}
- .panelbody input{font:13px ui-monospace,monospace;padding:3px 6px;border:1px solid var(--rule);background:#fff;width:90px}
- .panelbody button{font:13px ui-monospace,monospace;border:1px solid var(--rule);background:var(--btn);cursor:pointer;padding:4px 12px}
- .panelbody button:hover{background:#fff}
- .foot{font-size:11px;color:var(--dim);padding:2px 8px;border-top:1px solid #bdb8a8;background:#efece1}
+ .mods .hd{padding:3px 9px;color:#7a7666;font-size:11px;letter-spacing:.6px}
+ .panelbody{flex:1;overflow:auto;padding:12px 14px}
+ .panelbody .prow{display:flex;gap:9px;align-items:center;margin:7px 0;flex-wrap:wrap}
+ .panelbody .plabel{color:#3b3930}
+ .panelbody input{font:13px inherit;padding:4px 7px;border:1px solid var(--rule);border-radius:3px;background:#fff;width:92px}
+ .panelbody button{font:13px inherit;border:1px solid var(--rule);border-radius:3px;background:var(--btn);cursor:pointer;padding:5px 13px}
+ .panelbody button:hover{background:#fff;box-shadow:0 1px 2px #0002}
+ .foot{font-size:11px;color:var(--dim);padding:3px 9px;border-top:1px solid #c4bfae;background:#efece1}
 </style></head>
 <body>
 <header>
-  <span><b>Orpheus · System</b> &nbsp;—&nbsp; tiled, <b>resizable</b> text frames. <b>Execute</b> a command with <b>middle-click</b> on its line, or caret-on-line + <b>Ctrl/⌘+Enter</b>; drag the bars between frames to resize. Every frame is editable.</span>
+  <span><b>ORPHEUS</b> — the system is its texts: <b>middle-click</b> any command line to run it (or caret + Ctrl/⌘+Enter); objects embed where you run them; drag the bars to resize.</span>
   <span class="links">
-    <a href="/docs">Docs</a>
-    <a href="/grammar">Grammar</a>
-    <a href="/derive">Derive</a>
-    <a href="/chess">Chess</a>
-    <a href="#" onclick="openModule('tool');return false">open tool</a>
-    <a href="/editor">Editor</a><a href="/chart">Charts</a><a href="/fin">Finance</a><a href="/trade">Trade</a><a href="/gpu">GPU</a><a href="/plan">Planner</a>
+    <a href="#" onclick="openTool('Trade');return false" title="trading tool text">Trade</a><a class="pg" href="/trade" title="full page">↗</a>
+    <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart">↗</a>
+    <a href="#" onclick="openTool('Fin');return false" title="financial-ML tool text">Finance</a><a class="pg" href="/fin">↗</a>
+    <a href="#" onclick="openTool('Plan');return false" title="economic-planning tool text">Plan</a><a class="pg" href="/plan">↗</a>
+    <a href="#" onclick="openTool('Trace');return false" title="ray-tracer tool text">Trace</a>
+    <a href="#" onclick="openTool('Derive');return false" title="Ligurian derivation tool text">Derive</a><a class="pg" href="/derive">↗</a>
+    <a href="#" onclick="openTool('Gpu');return false" title="GPU tool text">GPU</a><a class="pg" href="/gpu">↗</a>
+    <a href="#" onclick="openDocsTool();return false" title="documentation index">Docs</a><a class="pg" href="/docs">↗</a>
+    <a href="/grammar" title="the Ligurian grammar (page)">Grammar</a>
+    <a href="/chess" title="the chess board (page)">Chess</a>
+    <a href="/editor" title="the WYSIWYG page editor">Editor</a>
   </span>
 </header>
 
@@ -94,32 +115,21 @@
 <script>
 "use strict";
 /* ============================================================================
-   Oberon-style environment: tiled VIEWERS in two resizable TRACKS, each viewer
-   a TEXT FRAME (an editable text that is also the command interface), a rich
-   LOG that embeds dynamic objects (drawings, charts, reports) between its
-   executable text lines, and PANEL viewers — graphical front ends described in
-   Latte (lib/ui.lat) and connected straight to module arms.
-
-   Point the mouse at any `Module.cmd args` line and middle-click to execute
-   it; or put the caret on it and press Ctrl/Cmd+Enter; or select command text
-   and run that. Drag the separator bars to resize frames and tracks.
-
-   System.*  viewer/OS commands run in the browser (the display layer).
-   Compiler.* posts source to the running system (/api/compile, /api/source).
-   gfx/chart/ta/trade/ui render EMBEDDED OBJECTS (SVG or HTML) into the Log or
-   open live panels. Everything else -> /api/run, calling a Latte arm: the
-   command set of the system is Latte source you can open, edit and recompile
-   right here.
+   The Oberon model, faithfully: the display is tracks of VIEWERS; a viewer is
+   a title bar (name + a command menu) over a main frame; tools are TEXTS, and
+   a text is a sequence of elements where an element is a character OR an
+   embedded dynamic object (a chart, a drawing, a report) produced by running
+   a command inside that very text. Texts store to files and load back with
+   their objects rehydrated. Modules compile from frames straight into the
+   running system; user packages persist to pkg/.
    ============================================================================ */
 
 var viewers = [], marked = null, uid = 0;
 function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
 function track(name){ return document.getElementById(name==='sys'?'sysTrack':'userTrack'); }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 /* ---- resizable layout ----------------------------------------------------- */
-/* Each viewer is a flex child; a drag on the separator before it trades
-   flex-grow with the previous viewer, pixel-for-pixel. The track separator
-   does the same horizontally between the two tracks. */
 function dragSep(sep, prevEl, nextEl, horizontal){
   sep.addEventListener('mousedown', function(e){
     e.preventDefault();
@@ -140,7 +150,6 @@ function dragSep(sep, prevEl, nextEl, horizontal){
     window.addEventListener('mouseup', up);
   });
 }
-/* (re)build the viewer separators of a track after any add/remove */
 function relayout(tr){
   Array.prototype.slice.call(tr.querySelectorAll(':scope > .vsep')).forEach(function(s){ s.remove(); });
   var kids = Array.prototype.slice.call(tr.children).filter(function(c){ return c.classList.contains('viewer'); });
@@ -151,9 +160,10 @@ function relayout(tr){
   }
 }
 
-/* ---- a Viewer (a text frame, the rich log, the module list, or a panel) --- */
+/* ---- viewers --------------------------------------------------------------- */
 function makeViewer(opts){
-  // opts: {name, track, kind:'frame'|'log'|'mods'|'panel', menu, content, foot, panel}
+  // kinds: 'text' (rich, editable, objects embed inline) · 'frame' (plain source)
+  //        'log'/'out' (rich output streams) · 'mods' · 'panel'
   var v = {id:++uid, name:opts.name, kind:opts.kind, grown:false};
   var box = el('div','viewer'); v.box = box;
   var menu = el('div','menu');
@@ -176,6 +186,11 @@ function makeViewer(opts){
   } else if(opts.kind==='panel'){
     var pb = el('div','panelbody'); v.panelbody = pb; body.appendChild(pb);
     if(opts.panel) renderPanel(v, opts.panel);
+  } else if(opts.kind==='text'){
+    var rt = el('div','richtext'); rt.contentEditable = 'true'; rt.spellcheck = false;
+    v.rich = rt; wireRichText(rt, v);
+    if(opts.content) setTextContent(v, opts.content);
+    body.appendChild(rt);
   } else {
     var ta = el('textarea','frame'); ta.spellcheck=false; ta.value=opts.content||'';
     wireFrame(ta, v);
@@ -189,12 +204,9 @@ function makeViewer(opts){
   return v;
 }
 
-/* The text-frame mouse/keyboard model. */
+/* plain source frames (modules, raw markdown) */
 function wireFrame(ta, v){
-  ta.addEventListener('mousedown', function(e){
-    mark(v);
-    if(e.button===1){ e.preventDefault(); } // middle: suppress autoscroll; run on auxclick
-  });
+  ta.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
   ta.addEventListener('auxclick', function(e){
     if(e.button===1){ e.preventDefault(); execText(v, lineAtPoint(ta, e.clientY)); }
   });
@@ -206,7 +218,6 @@ function wireFrame(ta, v){
     }
   });
 }
-// Which text line is under vertical coordinate y? (monospace, no wrap -> exact)
 function lineAtPoint(ta, y){
   var cs=getComputedStyle(ta), lh=parseFloat(cs.lineHeight)||20, pt=parseFloat(cs.paddingTop)||0;
   var rel = y - ta.getBoundingClientRect().top - pt + ta.scrollTop;
@@ -218,19 +229,122 @@ function caretLine(ta){
   var a=s.lastIndexOf('\n',p-1)+1, b=s.indexOf('\n',p); if(b<0)b=s.length;
   return s.slice(a,b);
 }
-// Run a line of frame text as a command (skip blanks and comments).
 function execText(v, lineText){
   var t=(lineText||'').trim();
   if(!t || t.charAt(0)==='#' || t.slice(0,2)==='::') return;
   mark(v); exec(t, v);
 }
 
-function mark(v){
-  marked=v;
-  viewers.forEach(function(x){ x.box.classList.toggle('marked', x===v); x.star.textContent=(x===v?'\u2737':''); });
+/* ---- TEXT frames: editable texts with embedded dynamic objects ------------ */
+/* Middle-click a line: it runs as a command, and if it produces an object
+   (a chart, drawing, table, render…), the object is inserted INTO THE TEXT
+   right under that line — Oberon's "text as a sequence of characters and
+   active elements". Objects remember their command (data-cmd), so the text
+   serializes to markdown (```tool <cmd>``` fences) and rehydrates on load. */
+function wireRichText(rt, v){
+  rt.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
+  rt.addEventListener('auxclick', function(e){
+    if(e.button!==1) return;
+    e.preventDefault();
+    var node = lineNodeAt(rt, e.target);
+    if(node) runTextLine(v, node);
+  });
+  rt.addEventListener('keydown', function(e){
+    if(e.key==='Enter' && (e.ctrlKey||e.metaKey)){
+      e.preventDefault();
+      var sel = window.getSelection();
+      var node = sel && sel.anchorNode ? lineNodeAt(rt, sel.anchorNode) : null;
+      if(node) runTextLine(v, node);
+    }
+  });
+  // objects are atomic: a click selects, backspace/delete removes whole object
+  rt.addEventListener('keydown', function(e){
+    if((e.key==='Backspace'||e.key==='Delete')){
+      var sel=window.getSelection();
+      if(sel && sel.anchorNode){
+        var o = closestObj(rt, sel.anchorNode);
+        if(o){ e.preventDefault(); o.remove(); }
+      }
+    }
+  });
+}
+function closestObj(rt, n){
+  while(n && n!==rt){ if(n.classList && n.classList.contains('obj')) return n; n=n.parentNode; }
+  return null;
+}
+function lineNodeAt(rt, n){
+  // the nearest block-level child of the richtext that contains n
+  if(n.nodeType===3) n=n.parentNode;
+  var o = closestObj(rt, n);
+  if(o) return o; // middle-click an object: re-run its command in place
+  while(n && n!==rt && n.parentNode!==rt) n=n.parentNode;
+  return (n===rt) ? null : n;
+}
+function runTextLine(v, node){
+  var cmd = node.classList && node.classList.contains('obj')
+    ? (node.dataset.cmd||'')
+    : (node.textContent||'').trim();
+  cmd = cmd.replace(/^[\u25B8! ] ?/,'');
+  if(!cmd || cmd.charAt(0)==='#' || cmd.slice(0,2)==='::') return;
+  mark(v);
+  exec(cmd, v, {textViewer:v, afterNode:node});
+}
+/* insert (or replace) an object under `afterNode` in a text frame */
+function insertObjAt(v, afterNode, cmd, html){
+  var d = el('div','obj');
+  d.contentEditable='false';
+  d.dataset.cmd = cmd;
+  d.innerHTML = html;
+  // replace an existing object produced by the same line (re-run updates it)
+  var nxt = afterNode.nextSibling;
+  if(afterNode.classList && afterNode.classList.contains('obj')){
+    afterNode.replaceWith(d); return;
+  }
+  if(nxt && nxt.classList && nxt.classList.contains('obj') && nxt.dataset.cmd===cmd){
+    nxt.replaceWith(d); return;
+  }
+  afterNode.after(d);
+}
+/* serialize a text frame to markdown: objects become ```tool <cmd>``` fences */
+function textToMarkdown(v){
+  var out=[];
+  v.rich.childNodes.forEach(function(n){
+    if(n.nodeType===3){ var t=n.textContent; if(t.trim()!=='') out.push(t); return; }
+    if(n.classList && n.classList.contains('obj')){
+      out.push('```tool '+(n.dataset.cmd||'')+'\n```');
+      return;
+    }
+    out.push(n.textContent||'');
+  });
+  return out.join('\n')+'\n';
+}
+/* load markdown into a text frame, REHYDRATING ```tool fences by re-running */
+function setTextContent(v, md){
+  v.rich.innerHTML='';
+  var lines = md.replace(/\n$/,'').split('\n');
+  var i=0;
+  while(i<lines.length){
+    var m = lines[i].match(/^```tool (.+)$/);
+    if(m){
+      var cmd=m[1].trim();
+      var line=el('div',null,'');
+      var ph=el('div','obj'); ph.contentEditable='false'; ph.dataset.cmd=cmd; ph.textContent='… rehydrating: '+cmd;
+      v.rich.appendChild(ph);
+      while(i<lines.length && lines[i].trim()!=='```') i++;
+      i++;
+      (function(ph,cmd){ runObjectCommand(cmd, function(html, isText, isErr){
+        if(isText) ph.innerHTML='<span class="note">'+esc(html)+'</span>';
+        else ph.innerHTML=html;
+      }); })(ph,cmd);
+      void line;
+      continue;
+    }
+    v.rich.appendChild(el('div',null,lines[i]===''?'\u200b':lines[i]));
+    i++;
+  }
 }
 
-/* ---- the rich Log: executable text lines + embedded dynamic objects ------- */
+/* ---- the rich Log / tool-output streams ----------------------------------- */
 function wireRichLog(rl, v){
   rl.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
   rl.addEventListener('auxclick', function(e){
@@ -251,7 +365,6 @@ function logOut(s, isErr){
   String(s).replace(/\n+$/,'').split('\n').forEach(function(l){ logLine((isErr?'! ':'  ')+l, isErr?'err':null); });
   logLine('');
 }
-/* Embed a dynamic object (an SVG drawing, a chart, an HTML report) into the Log. */
 function logObj(html){
   var rl=logView().rich;
   var d=el('div','obj'); d.innerHTML=html;
@@ -260,10 +373,12 @@ function logObj(html){
 }
 function clearLog(){ logView().rich.innerHTML=''; }
 
-/* ---- PANEL viewers: graphical front ends described in Latte --------------- */
-/* A panel arrives as JSON from /api/ui (built by lib/ui.lat constructors).
-   Buttons run their command with $name replaced by the panel's field values —
-   so a Latte module designs its own front end and wires it to its own arms. */
+function mark(v){
+  marked=v;
+  viewers.forEach(function(x){ x.box.classList.toggle('marked', x===v); x.star.textContent=(x===v?'\u2737':''); });
+}
+
+/* ---- panels ---------------------------------------------------------------- */
 function renderPanel(v, p){
   var pb=v.panelbody; pb.innerHTML='';
   var fields={};
@@ -285,9 +400,7 @@ function renderPanel(v, p){
       into.appendChild(b); return;
     }
   }
-  var wrap=el('div','prow'); // top row collector not needed; stack directly
   (p.items||[]).forEach(function(it){ build(it, pb); });
-  void wrap;
 }
 function openPanel(spec){
   post('/api/ui', spec, function(out){
@@ -300,11 +413,7 @@ function openPanel(spec){
   });
 }
 
-/* ---- per-tool OUTPUT viewers: every tool gets its own window -------------- */
-/* The Oberon discipline: a tool's results open in the tool's own viewer, so
-   several tools can run AT THE SAME TIME, each filling its own frame, while
-   you keep editing text in others (Hymn serves each request on its own
-   thread). The Log keeps the command trail and quick textual answers. */
+/* ---- per-tool OUTPUT viewers ------------------------------------------------ */
 function outViewer(name){
   var v = viewers.find(function(x){ return x.kind==='out' && x.name===name; });
   if(!v){
@@ -315,17 +424,16 @@ function outViewer(name){
 }
 var runSeq = 0;
 function runInto(name, line, fire){
-  // echo into the Log, mark the tool viewer busy, fire the async request(s)
   logEcho(line);
   var v = outViewer(name); mark(v);
   var seq = ++runSeq;
   v.busySeq = seq;
   v.rich.innerHTML = '';
-  var hdr = el('div','ln echo', '▸ '+line);
+  var hdr = el('div','ln echo', '\u25B8 '+line);
   var run = el('div','ln', '  … running ('+new Date().toLocaleTimeString()+')');
   v.rich.appendChild(hdr); v.rich.appendChild(run);
   fire(function(html, isText, isErr){
-    if(v.busySeq!==seq) return;             // a newer run took the viewer
+    if(v.busySeq!==seq) return;
     run.remove();
     if(isText){
       String(html).replace(/\n+$/,'').split('\n').forEach(function(l){
@@ -338,7 +446,7 @@ function runInto(name, line, fire){
   });
 }
 
-/* ---- documents as first-class frames: edit several at once ---------------- */
+/* ---- documents as frames ---------------------------------------------------- */
 function openDoc(name){
   fetch('/api/doc?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(md){
     var v = makeViewer({name:name+'.md', track:'user', kind:'frame', content:md, menu:docMenu,
@@ -354,18 +462,106 @@ function saveDoc(v){
     .then(function(msg){ logOut(msg==='saved' ? 'saved docs/'+v.docname+'.md' : msg, msg!=='saved'); });
 }
 
+/* ---- TEXTS: create, store, load (the documents-with-objects) ---------------- */
+function newText(name){
+  var v = makeViewer({name:(name||'untitled')+'.Text', track:'user', kind:'text',
+    content:'A new text. Type anything; middle-click a command line to run it —\nobject-producing commands embed their result right here in the text.\n\nchart bar 3 1 4 1 5 9 2 6\ngfx Tool.rings 5\n',
+    menu:textMenu,
+    foot:'a TEXT — characters and embedded objects; Store saves it (with its objects) to text/'+(name||'untitled')+'.md'});
+  v.textname = name||'untitled';
+  mark(v);
+}
+function storeText(v){
+  if(!v||v.kind!=='text'){ logOut('Edit.StoreText: mark a text frame first', true); return; }
+  var name = v.textname || v.name.replace(/\.Text$/,'') || 'untitled';
+  fetch('/api/text?name='+encodeURIComponent(name),{method:'POST',body:textToMarkdown(v)})
+    .then(function(r){return r.text();})
+    .then(function(msg){ logOut(msg==='saved' ? 'stored text/'+name+'.md (objects serialized as ```tool fences)' : msg, msg!=='saved'); });
+}
+function openText(name){
+  fetch('/api/text?name='+encodeURIComponent(name))
+    .then(function(r){ if(!r.ok) throw new Error('no such text'); return r.text(); })
+    .then(function(md){
+      var v = makeViewer({name:name+'.Text', track:'user', kind:'text', content:md, menu:textMenu,
+        foot:'text/'+name+'.md — objects rehydrated by re-running their commands; Store writes it back'});
+      v.textname = name;
+      mark(v);
+    })
+    .catch(function(e){ logOut('System.OpenText: '+e, true); });
+}
+function listTexts(){
+  fetch('/api/texts').then(function(r){return r.text();}).then(function(t){
+    var names=t.split('\n').filter(Boolean);
+    logOut(names.length ? ('texts on disk: '+names.join('  ')+'\nopen one:  System.OpenText <name>') : 'no stored texts yet — System.NewText <name>, then Store');
+  });
+}
+
+/* ---- OBJECT-PRODUCING commands: one router used by Log, out-viewers, texts -- */
+function runObjectCommand(line, done){
+  var sp=line.indexOf(' ');
+  var head = sp<0?line:line.slice(0,sp);
+  var rest = sp<0?'':line.slice(sp+1).trim();
+  function svgOr(done){ return function(svg){ if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true); }; }
+  switch(head){
+    case 'gfx': case 'draw':
+      post('/api/gfx', rest, svgOr(done)); return true;
+    case 'trace': case 'render':
+      post('/api/trace', rest.split(/\s+/).filter(Boolean).join('\n'), svgOr(done)); return true;
+    case 'chart': case 'plot':
+      if(/^market\b/.test(rest)){
+        post('/api/marketchart', rest.replace(/^market\s*/,'').split(/\s+/).filter(Boolean).join('\n'), svgOr(done));
+      } else {
+        post('/api/plot', rest, svgOr(done));
+      }
+      return true;
+    case 'ta': case 'indicators':
+      post('/api/ta', rest.split(/\s+/).filter(Boolean).join('\n'), function(h){ done(h,false); }); return true;
+    case 'trade': case 'advise':
+      post('/api/trade', rest.split(/\s+/).filter(Boolean).join('\n'), function(h){ done(h,false); }); return true;
+    case 'fin':
+      post('/api/fin', rest, function(h){ done(h,false); }); return true;
+    case 'gpu':
+      post('/api/gpu', rest, function(h){ done(h,false); }); return true;
+    case 'plan':
+      post('/api/plan', rest||'demo3', function(out){
+        done('<pre style="margin:0;font:12px/1.5 inherit;white-space:pre-wrap">'+esc(out)+'</pre>', false);
+      });
+      return true;
+    case 'derive': {
+      var parts = rest.split(/\s+/).filter(Boolean);
+      var mode = parts[0]||'solar';
+      var body = 'mode='+mode+'\n'+parts.slice(1).map(function(w){
+        return /^(n|seed)=/.test(w) ? w : w;
+      }).join('\n');
+      post('/api/derive', body, function(out){
+        try{
+          var j=JSON.parse(out);
+          var withPie = mode==='pie';
+          var h='<table class="m"><tr>'+(withPie?'<td><b>PIE</b></td>':'')+'<td><b>Solar</b></td><td><b>Heart</b></td></tr>';
+          j.rows.forEach(function(r){
+            h+='<tr>'+(withPie?('<td><i>*'+esc(r.pie)+'</i></td>'):'')+'<td><b>'+esc(r.solar)+'</b></td><td>'+esc(r.heart)+'</td></tr>';
+          });
+          done(h+'</table>', false);
+        } catch(e){ done(out, true, true); }
+      });
+      return true;
+    }
+    default: return false; // not an object command
+  }
+}
+
 /* ---- the command interpreter -------------------------------------------- */
 function resolveArgs(line){
   var sel=(window.getSelection && String(window.getSelection()))||'';
   return line.replace(/\^/g, function(){ return sel.trim(); });
 }
-function exec(line, fromViewer){
+function exec(line, fromViewer, ctx){
   if(!line) return; line=line.trim();
   var sp=line.indexOf(' ');
   var headTok = sp<0?line:line.slice(0,sp);
   var rest = sp<0?'':line.slice(sp+1).trim();
 
-  // ---- System.* : the display/OS commands (browser side) ----
+  // ---- System.* ----
   if(headTok==='System.Open'||headTok==='Edit.Open'){ logEcho(line); openModule(rest||'std'); return; }
   if(headTok==='System.Close'){ logEcho(line); closeViewer(targetViewer(rest, fromViewer)); return; }
   if(headTok==='System.Grow'){ logEcho(line); growViewer(targetViewer(rest, fromViewer)); return; }
@@ -373,17 +569,16 @@ function exec(line, fromViewer){
   if(headTok==='System.Clear'){ clearLog(); return; }
   if(headTok==='System.Modules'||headTok==='System.Sources'){ logEcho(line); refreshModules(); return; }
   if(headTok==='System.New'){ logEcho(line); newModuleViewer(rest||'mymod'); return; }
+  if(headTok==='System.NewText'){ logEcho(line); newText(rest||'untitled'); return; }
+  if(headTok==='System.OpenText'){ logEcho(line); if(rest) openText(rest); else listTexts(); return; }
+  if(headTok==='System.Texts'){ logEcho(line); listTexts(); return; }
+  if(headTok==='Edit.StoreText'){ logEcho(line); storeText(targetViewer(rest, fromViewer)); return; }
+  if(headTok==='System.Tool'){ logEcho(line); openTool(rest||'Trade'); return; }
   if(headTok==='System.Chess'||headTok==='Game.Chess'){ logEcho(line); window.location='/chess'; return; }
-  if(headTok==='System.Docs'||headTok==='System.Help'){ logEcho(line); window.location = rest ? ('/docs#'+rest) : '/docs'; return; }
-  if(headTok==='System.Finance'||headTok==='Fin.Run'){ logEcho(line); window.location='/fin'; return; }
-  if(headTok==='System.Charts'||headTok==='Chart.Open'){ logEcho(line); window.location='/chart'; return; }
-  if(headTok==='System.Gpu'||headTok==='Gpu.Run'){ logEcho(line); window.location='/gpu'; return; }
-  if(headTok==='System.Trade'||headTok==='Trade.Advise'){ logEcho(line); window.location='/trade'; return; }
-  if(headTok==='System.Derive'||headTok==='Derive.Open'){ logEcho(line); window.location='/derive'; return; }
-  // open a documentation file as an editable frame (several at once is the point)
+  if(headTok==='System.Docs'||headTok==='System.Help'){ logEcho(line); openDocsTool(); return; }
   if(headTok==='System.Edit'||headTok==='Edit.Doc'){ logEcho(line); if(rest) openDoc(rest); else logOut('System.Edit: name a doc, e.g.  System.Edit latte-language', true); return; }
   if(headTok==='Edit.Save'){ logEcho(line); saveDoc(targetViewer(rest, fromViewer)); return; }
-  // Oberon-style: a command that operates on the text after it (the selection).
+  if(headTok==='Edit.Format'){ logEcho(line); formatFrame(targetViewer(rest, fromViewer)); return; }
   if(headTok==='System.Sentiment'||headTok==='News.Score'){
     logEcho(line);
     if(!rest){ logOut('System.Sentiment: type some headline text after the command', true); return; }
@@ -396,8 +591,6 @@ function exec(line, fromViewer){
     });
     return;
   }
-  // score a whole DOCUMENT (a report) with the trained classifier, sentence by
-  // sentence — the evidence table opens in its own viewer.
   if(headTok==='Doc.Score'||headTok==='Report.Score'){
     if(!rest){ logEcho(line); logOut('Doc.Score: name a doc, e.g.  Doc.Score visualization-and-ml', true); return; }
     runInto('Score.Out', line, function(done){
@@ -412,8 +605,8 @@ function exec(line, fromViewer){
                 '<table class="m"><tr><td><b>score</b></td><td><b>sentence</b></td></tr>';
           var ranked=j.sentences.slice().sort(function(a,b){return Math.abs(b.polarity)-Math.abs(a.polarity);}).slice(0,10);
           ranked.forEach(function(sx){
-            var c = sx.polarity>0.15?'#1a6e2a':(sx.polarity<-0.15?'#7a1a1a':'#555');
-            h+='<tr><td style="color:'+c+'">'+(sx.polarity>=0?'+':'')+sx.polarity+'</td><td>'+sx.text.replace(/&/g,'&amp;').replace(/</g,'&lt;').slice(0,140)+'</td></tr>';
+            var c = sx.polarity>0.15?'#1a6e2a':(sx.polarity<-0.15?'#8d1f1f':'#555');
+            h+='<tr><td style="color:'+c+'">'+(sx.polarity>=0?'+':'')+sx.polarity+'</td><td>'+esc(sx.text).slice(0,140)+'</td></tr>';
           });
           h+='</table>';
           done(h,false);
@@ -423,60 +616,34 @@ function exec(line, fromViewer){
     return;
   }
 
-  // ---- tool commands: each tool runs in ITS OWN viewer (in parallel) -------
-  // gfx <expr|Mod.arm args> : a Latte gfx scene, rendered to SVG
-  if(headTok==='gfx'||headTok==='draw'){
-    runInto('Gfx.Out', line, function(done){
-      post('/api/gfx', rest, function(svg){
-        if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true);
+  // ---- object-producing commands -------------------------------------------
+  // Inside a TEXT frame they embed where you ran them; otherwise each tool
+  // fills its own output viewer (several can run at once).
+  var sink = ctx && ctx.textViewer ? ctx : null;
+  var OUT = {gfx:'Gfx.Out',draw:'Gfx.Out',trace:'Trace.Out',render:'Trace.Out',
+             chart:'Chart.Out',plot:'Chart.Out',ta:'TA.Out',indicators:'TA.Out',
+             trade:'Trade.Out',advise:'Trade.Out',fin:'Fin.Out',gpu:'Gpu.Out',
+             derive:'Derive.Out',plan:'Plan.Out'};
+  if(OUT[headTok]){
+    if(sink){
+      logEcho(line);
+      var ph = sink.afterNode;
+      runObjectCommand(line, function(html, isText, isErr){
+        if(isErr){ logOut(html, true); return; }
+        insertObjAt(sink.textViewer, ph, line, isText?('<span class="note">'+esc(html)+'</span>'):html);
       });
-    });
+    } else {
+      runInto(OUT[headTok], line, function(done){ runObjectCommand(line, done); });
+    }
     return;
   }
-  // trace [w=N h=N] : the Latte ray tracer (lib/trace.lat) -> SVG raster
-  if(headTok==='trace'||headTok==='render'){
-    runInto('Trace.Out', line, function(done){
-      post('/api/trace', rest.split(/\s+/).filter(Boolean).join('\n'), function(svg){
-        if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true);
-      });
-    });
-    return;
-  }
-  // chart bar|line|scatter <nums> : a chart (layout computed in lib/plot.lat)
-  // chart market [days=N] [live=1] : the real price series with SMA overlays
-  if(headTok==='chart'||headTok==='plot'){
-    runInto('Chart.Out', line, function(done){
-      if(/^market\b/.test(rest)){
-        var body = rest.replace(/^market\s*/,'').split(/\s+/).filter(Boolean).join('\n');
-        post('/api/marketchart', body, function(svg){ if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true); });
-      } else {
-        post('/api/plot', rest, function(svg){ if(/^\s*<svg/.test(svg)) done(svg,false); else done(svg,true,true); });
-      }
-    });
-    return;
-  }
-  // ta [live=1] [win=N] : the technical-analysis verdict table (lib/ta.lat)
-  if(headTok==='ta'||headTok==='indicators'){
-    runInto('TA.Out', line, function(done){
-      post('/api/ta', rest.split(/\s+/).filter(Boolean).join('\n'), function(html){ done(html,false); });
-    });
-    return;
-  }
-  // trade [account=N] [kelly=F] [live=1] : the full advisor report
-  if(headTok==='trade'||headTok==='advise'){
-    runInto('Trade.Out', line, function(done){
-      post('/api/trade', rest.split(/\s+/).filter(Boolean).join('\n'), function(html){ done(html,false); });
-    });
-    return;
-  }
-  // net <expr> : the interaction-net engine, in its own viewer (audited)
+  // net runs in its own viewer (textual, audited)
   if(headTok==='net'){
     runInto('Net.Out', line, function(done){
       post('/api/run', resolveArgs(line), function(out){ done(out,true,/^!|error/i.test(out)); });
     });
     return;
   }
-  // ui Mod.arm [args] : open a graphical front end described in Latte
   if(headTok==='ui'||headTok==='panel'){
     logEcho(line);
     if(!rest){ logOut('ui: name a panel arm, e.g.  ui Tool.calc', true); return; }
@@ -484,7 +651,7 @@ function exec(line, fromViewer){
     return;
   }
 
-  // ---- Compiler.* : edit -> compile -> run, on the running system ----
+  // ---- Compiler.* ----
   if(headTok==='Compiler.Compile'){
     logEcho(line);
     var cv=targetViewer(rest, fromViewer);
@@ -496,22 +663,28 @@ function exec(line, fromViewer){
     logEcho(line);
     var sv=targetViewer(rest, fromViewer);
     if(!sv||!sv.textarea){ logOut('Store: mark a source frame first',true); return; }
-    var name=(sv.textarea.value.match(/\bcore\s+([A-Za-z0-9_]+)/)||[])[1];
-    if(!name){ logOut('Store: source has no `core NAME`',true); return; }
-    post('/api/source?name='+encodeURIComponent(name), sv.textarea.value, function(out){ logOut(out, /error/i.test(out)); refreshModules(); });
+    post('/api/source', sv.textarea.value, function(out){ logOut(out, /error/i.test(out)); refreshModules(); });
     return;
   }
 
-  // ---- everything else -> the running system (a Latte arm / tool verb) ----
+  // ---- everything else -> the running system ----
   logEcho(line);
   post('/api/run', resolveArgs(line), function(out){ logOut(out, /^!|error/i.test(out)); });
+}
+
+function formatFrame(v){
+  if(!v||!v.textarea){ logOut('Edit.Format: mark a source frame first', true); return; }
+  post('/api/fmt', v.textarea.value, function(out){
+    if(out && out !== v.textarea.value){ v.textarea.value = out; logOut('formatted (conservative; compile-checked)'); }
+    else logOut('already formatted');
+  });
 }
 
 function targetViewer(rest, fromViewer){
   rest=(rest||'').trim();
   if(rest===''||rest==='*') return marked||fromViewer;
   var nm=rest.replace(/\.Mod$/,'');
-  return viewers.find(function(v){ return v.name===rest||v.name===nm||v.name===nm+'.Mod'; })||marked||fromViewer;
+  return viewers.find(function(v){ return v.name===rest||v.name===nm||v.name===nm+'.Mod'||v.name===nm+'.Text'; })||marked||fromViewer;
 }
 
 /* ---- viewer operations --------------------------------------------------- */
@@ -523,22 +696,24 @@ function closeViewer(v){
   if(tr) relayout(tr);
 }
 function growViewer(v){ if(!v) return; v.grown=!v.grown; v.box.classList.toggle('grown', v.grown); v.box.style.flexGrow=''; }
-function copyViewer(v){ if(!v||!v.textarea) return; mark(makeViewer({name:v.name, track:'user', kind:'frame', content:v.textarea.value, menu:sourceMenu})); }
+function copyViewer(v){
+  if(!v) return;
+  if(v.textarea){ mark(makeViewer({name:v.name, track:'user', kind:'frame', content:v.textarea.value, menu:sourceMenu})); return; }
+  if(v.kind==='text'){ var n=makeViewer({name:v.name, track:'user', kind:'text', content:textToMarkdown(v), menu:textMenu}); n.textname=v.textname; mark(n); }
+}
 
-/* ---- opening a module's source as an editable text frame ----------------- */
+/* ---- modules ---------------------------------------------------------------- */
 function openModule(name){
   fetch('/api/source?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(src){
     mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
-      foot:'editing module `'+name+'` — Compile loads it into the running system'}));
+      foot:'module `'+name+'` — Compile loads it into the running system; Store persists it (system libs to lib/, your packages to pkg/)'}));
   });
 }
 function newModuleViewer(name){
   var src='import std\ncore '+name+'\n  greet = fn [_] -> %hello\nend\n';
   mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
-    foot:'new module — edit, then Compiler.Compile'}));
+    foot:'a new module — Compile, then Store writes pkg/'+name+'.lat (a user package, loaded at every startup)'}));
 }
-
-/* ---- the loaded-module list (click a name to open its source) ------------ */
 function refreshModules(){
   Promise.all([
     fetch('/api/sources').then(function(r){return r.text();}),
@@ -548,8 +723,9 @@ function refreshModules(){
     var rt=(res[1].match(/compiled:\s*(.*)/)||[])[1]||'';
     var rtset={}; rt.split(/\s+/).filter(Boolean).forEach(function(n){rtset[n]=1;});
     var md=viewers.find(function(v){return v.kind==='mods';}).mods; md.innerHTML='';
+    md.appendChild(el('div','hd','MODULES — click to open source'));
     names.forEach(function(n){
-      var d=el('div','m'+(rtset[n]?' rt':''), n+(rtset[n]?'  \u00B7compiled':''));
+      var d=el('div','m'+(rtset[n]?' rt':''), n+(rtset[n]?'  \u00B7live':''));
       d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openModule(n); } };
       md.appendChild(d);
     });
@@ -561,97 +737,171 @@ function post(url, body, cb){
     .then(function(r){return r.text();}).then(cb).catch(function(e){ cb('network error: '+e); });
 }
 
-/* ---- menu (command strip) presets ---------------------------------------- */
+/* ---- menus ------------------------------------------------------------------ */
 var sourceMenu=[
   {cmd:'Compiler.Compile *',label:'Compile'},{cmd:'Compiler.Store *',label:'Store'},
+  {cmd:'Edit.Format *',label:'Format'},
+  {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
+var textMenu=[
+  {cmd:'Edit.StoreText *',label:'Store'},
   {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var toolMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Close *',label:'Close'}];
 var outMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var docMenu=[{cmd:'Edit.Save *',label:'Save'},{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
-var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Grow'}];
 var modsMenu=[{cmd:'System.Modules',label:'Refresh'}];
+var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Grow'}];
+
+/* ---- TOOL TEXTS: each tool is a text (Oberon's Draw.Tool idea) -------------- */
+/* Clicking a header link opens the tool's TEXT FRAME — commands you can edit,
+   run, and extend; outputs embed inline in the text. */
+var TOOLS = {
+ Trade:
+'# Trade.Tool — the advisor: technical analysis × news sentiment × HAR-RV sizing.\n'+
+'# Middle-click a line; the report embeds below it. Edit arguments freely.\n'+
+'trade account=10000\n'+
+'trade account=10000 live=1\n'+
+'trade account=25000 kelly=0.5\n'+
+'#\n'+
+'# OTHER MARKETS: fetch once (CLI: latte fetch --market eth — or --all), then\n'+
+'# every tool takes market=…  (eth ltc xrp ada doge sol, or any Coin Metrics\n'+
+'# symbol). The volatility model trains per market and the registry records\n'+
+'# its edge HONESTLY (test vs baseline) in ~/.cache/orpheus/models/.\n'+
+'trade market=eth account=10000\n'+
+'ta market=eth\n'+
+'chart market market=eth days=180\n'+
+'#\n'+
+'ta\n'+
+'ta live=1 win=200\n'+
+'chart market days=180\n'+
+'# score text or a whole document with the trained classifier:\n'+
+'System.Sentiment etf outflows eased as the market stabilized\n'+
+'Doc.Score visualization-and-ml\n',
+ Chart:
+'# Chart.Tool — the visualization engine (layout computed in lib/plot.lat).\n'+
+'chart bar 3 1 4 1 5 9 2 6\n'+
+'chart line 10 12 9 14 17 13 18\n'+
+'chart scatter 3 7 1 9 4 6 8 2\n'+
+'chart market days=120\n'+
+'chart market days=365 live=1\n'+
+'chart market market=eth days=180\n'+
+'gfx (demo 0)\n'+
+'gfx Tool.rings 6\n',
+ Fin:
+'# Fin.Tool — the financial-ML pipeline (logistic model, equity net of costs).\n'+
+'fin 80\n'+
+'fin 200\n'+
+'trade account=10000\n',
+ Plan:
+'# Plan.Tool — economic planning after Cockshott & Cottrell, *Towards a New\n'+
+'# Socialism*: labour values (v = l + vA), Leontief gross outputs (x = y + Ax),\n'+
+'# labour-token accounting, consumer-goods market clearing steering the plan\n'+
+'# (price/labour-value ratios, TNS ch. 8), and harmony-function balancing when\n'+
+'# the labour budget binds (TNS pp. 94-99). All arithmetic in lib/plan.lat.\n'+
+'plan demo3\n'+
+'plan 40 0 1000\n'+
+'#\n'+
+'# CUSTOM ECONOMIES: write a spec in a text (System.NewText economy), Store it,\n'+
+'# and plan it from the page form (/plan), or POST it to /api/plan. Spec lines:\n'+
+'#   sector steel  l=0.4  steel=0.2 grain=0.1\n'+
+'#   sector grain  l=0.3  steel=0.5 grain=0.1\n'+
+'#   demand steel=0 grain=1.0\n'+
+'#   market grain=1.4          # observed clearing prices (labour tokens)\n'+
+'#   labour 1.2                # the labour budget\n'+
+'# the manual (incl. the calculation-debate criticisms):\n'+
+'System.Edit planning\n',
+ Trace:
+'# Trace.Tool — the ray tracer written in Latte (Anvil-compiled).\n'+
+'trace\n'+
+'trace w=160 h=120\n'+
+'trace w=64 h=48\n'+
+'# the scene lives in lib/trace.lat — open, edit, Compile, re-run:\n'+
+'System.Open trace\n',
+ Derive:
+'# Derive.Tool — Ligurian, live: PIE -> Solar -> Heart by SCArs.\n'+
+'derive pie dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt srew h₂stér sāwel weseti\n'+
+'derive solar liga nivo mazda saules bazdā serdā\n'+
+'derive gen n=12 seed=42\n'+
+'sca liga nivo mazda\n',
+ Gpu:
+'# Gpu.Tool — the data-parallel device demo (matmul + Mandelbrot).\n'+
+'gpu\n'
+};
+function openTool(name){
+  var existing = viewers.find(function(v){ return v.kind==='text' && v.name===name+'.Tool'; });
+  if(existing){ mark(existing); return; }
+  var v = makeViewer({name:name+'.Tool', track:'user', kind:'text', content:TOOLS[name]||('# '+name+'\n'), menu:textMenu,
+    foot:'a tool TEXT — edit it, run lines, outputs embed inline; Store saves it with its objects'});
+  v.textname = name.toLowerCase()+'-tool';
+  mark(v);
+}
+function openDocsTool(){
+  fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
+    var names=t.split('\n').filter(Boolean);
+    var md='# Docs.Tool — the manual shelf. Middle-click to open a document frame.\n'+
+      names.map(function(n){ return 'System.Edit '+n; }).join('\n')+'\n'+
+      '# score any of them with the trained classifier:\n'+
+      (names[0]?('Doc.Score '+names[0]+'\n'):'');
+    var v = makeViewer({name:'Docs.Tool', track:'user', kind:'text', content:md, menu:textMenu,
+      foot:'every document opens as an editable frame — open several side by side'});
+    v.textname='docs-tool';
+    mark(v);
+  });
+}
 
 /* ---- the default desktop ------------------------------------------------- */
 var SYSTEM_TOOL =
-'# System.Tool — middle-click a command line to run it (or caret + Ctrl/Cmd+Enter).\n'+
-'# These call Latte arms in the `tool` module (lib/tool.lat): the command set\n'+
-'# is itself Latte source you can open, edit and recompile below.\n'+
-'Tool.fib 30\n'+
-'Tool.fact 10\n'+
-'Tool.primes 60\n'+
-'Tool.collatz 27\n'+
-'Tool.gcd [1071 462]\n'+
-'eval (mul (add 3 4) 5)\n'+
-'type head [1 2]\n'+
+'# System.Tool — this is a TEXT: characters plus embedded objects. Middle-click\n'+
+'# any command line to run it (or caret + Ctrl/⌘+Enter). Object-producing\n'+
+'# commands (charts, drawings, renders, reports) embed their output RIGHT\n'+
+'# HERE in the text, under the line you ran — and System.NewText gives you as\n'+
+'# many texts as you like. Store saves a text with its objects to text/*.md.\n'+
 '#\n'+
-'# TOOLS RUN IN PARALLEL: each command below opens (or reuses) its own viewer.\n'+
-'# Middle-click several in a row — they run simultaneously, each filling its\n'+
-'# own frame while you keep editing text anywhere else (Hymn serves every\n'+
-'# request on its own thread). The Log keeps the command trail.\n'+
-'trace\n'+
-'trace w=160 h=120\n'+
-'gfx (demo 0)\n'+
-'gfx Tool.rings 6\n'+
-'chart bar 3 1 4 1 5 9 2 6\n'+
+'# Try these — the objects appear inline below each line:\n'+
 'chart market days=120\n'+
+'gfx Tool.rings 6\n'+
+'trace w=96 h=72\n'+
 'ta\n'+
-'trade account=10000\n'+
 '#\n'+
-'# Documents are frames too — open several and edit them side by side\n'+
-'# (Save is in each frame\'s menu):\n'+
+'# The header links open TOOL TEXTS (Trade, Charts, Finance, Plan, Trace,\n'+
+'# Derive, GPU, Docs) — each a text like this one. Tools run IN PARALLEL:\n'+
+'# middle-click several lines in a row; each fills in as its server thread\n'+
+'# finishes, while you keep editing anywhere else.\n'+
+'#\n'+
+'# Texts and documents:\n'+
+'System.NewText notes\n'+
+'System.Texts\n'+
+'System.OpenText notes\n'+
 'System.Edit latte-language\n'+
-'System.Edit interaction-nets\n'+
 '#\n'+
-'# Open a graphical FRONT END designed in Latte (lib/ui.lat + Tool.calc) —\n'+
-'# its buttons call the module\'s own arms with the field\'s value:\n'+
-'ui Tool.calc\n'+
-'#\n'+
-'# The interaction-net engine (lazy if, net-level recursion, dynamic div/mod):\n'+
-'net (sub 10 4)\n'+
+'# Commands are Latte arms (lib/tool.lat); the language is live:\n'+
+'Tool.fib 30\n'+
+'Tool.primes 60\n'+
+'eval (mul (add 3 4) 5)\n'+
 'net let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)\n'+
 '#\n'+
-'# Tools, exposed in the system: SCArs, the general sound-change engine, the planner:\n'+
-'sca liga nivo mazda\n'+
-'scar kasa k>g s>z/a_a\n'+
-'plan 40 0 1000\n'+
-'libs\n'+
+'# Graphical front ends are Latte data (lib/ui.lat):\n'+
+'ui Tool.calc\n'+
 '#\n'+
-'# Read the manuals (Latte, Facet, SCArs, interaction nets) in the GUI:\n'+
-'System.Docs\n'+
-'System.Docs latte-language\n'+
+'# Packages: a package IS a compiled Latte source. Mark hello.Mod below, hit\n'+
+'# Compile in its menu (it becomes part of the running system at once), then:\n'+
+'hello.fib 20\n'+
+'# Store writes user modules to pkg/<name>.lat — loaded at every startup.\n'+
+'System.New mymod\n'+
+'System.Open tool\n'+
 '#\n'+
-'# Live Ligurian derivation (PIE -> Solar -> Heart, via SCArs), chess, finance:\n'+
-'System.Derive\n'+
-'System.Chess\n'+
-'System.Finance\n'+
-'System.Trade\n'+
-'System.Gpu\n'+
-'System.Charts\n'+
-'#\n'+
-'# Score text in place with the TRAINED classifier (it reads context and negation —\n'+
-'# "outflows eased" is positive — where word-counting fails); or score a whole\n'+
-'# document or report, sentence by sentence, into its own viewer:\n'+
-'System.Sentiment etf outflows eased as the market stabilized\n'+
-'System.Sentiment selloff deepens as tech stocks falter amid recession fears\n'+
+'# Score text and documents with the trained classifier:\n'+
+'System.Sentiment selloff deepens as tech stocks falter\n'+
 'Doc.Score visualization-and-ml\n'+
 '#\n'+
-'# Edit -> compile -> run (the Oberon loop):\n'+
-'#   1. middle-click into the hello.Mod frame to mark it\n'+
-'#   2. middle-click Compile in its menu (loads into the running system)\n'+
-'#   3. run an arm of it:\n'+
-'hello.fib 20\n'+
-'hello.shout\n'+
-'#\n'+
-'# Open the system\'s own source to edit it live:\n'+
-'System.Open tool\n'+
-'System.Open ui\n'+
-'System.Open chessgame\n'+
-'System.New mymod\n';
+'# Sound change, planning, the rest:\n'+
+'sca liga nivo mazda\n'+
+'plan 40 0 1000\n'+
+'libs\n';
 
 var HELLO_MOD =
 'import std\n'+
 'core hello\n'+
-'  :: edit me, then Compile (menu), then run  hello.fib 20  from the tool text\n'+
+'  :: edit me, Compile (menu), then run  hello.fib 20  from any text\n'+
 '  fib   = fn [n] -> loop with [a = 0, b = 1, i = n] :\n'+
 '                      if (i == 0) then a else again(b, (add a b), (dec i))\n'+
 '                    end\n'+
@@ -659,17 +909,18 @@ var HELLO_MOD =
 'end\n';
 
 window.addEventListener('load', function(){
-  makeViewer({name:'System.Tool', track:'user', kind:'frame', content:SYSTEM_TOOL, menu:toolMenu,
-    foot:'a tool text — middle-click any command line to execute it'});
+  var st = makeViewer({name:'System.Tool', track:'user', kind:'text', content:SYSTEM_TOOL, menu:textMenu,
+    foot:'the system tool TEXT — run lines in place; objects embed; Store keeps it'});
+  st.textname='system-tool';
   var h=makeViewer({name:'hello.Mod', track:'user', kind:'frame', content:HELLO_MOD, menu:sourceMenu,
-    foot:'editing module `hello` — Compile loads it into the running system'});
+    foot:'module `hello` — Compile loads it into the running system; Store writes pkg/hello.lat'});
   makeViewer({name:'System.Log', track:'sys', kind:'log', menu:logMenu,
-    foot:'output — middle-click a text line to run it again; drawings, charts and reports embed inline'});
+    foot:'the command trail — middle-click a line to run it again'});
   makeViewer({name:'Modules', track:'sys', kind:'mods', menu:modsMenu});
   dragSep(document.getElementById('trackSep'), track('user'), track('sys'), true);
   mark(h);
   refreshModules();
-  appendLog('Orpheus System ready. Middle-click a command line in System.Tool, drag the bars to resize frames.');
+  appendLog('Orpheus System ready. Middle-click command lines; outputs embed in texts; drag bars to resize.');
   logLine('');
 });
 </script>

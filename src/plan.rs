@@ -76,8 +76,319 @@ pub fn plan_report(demand_steel: u128, demand_grain: u128, iters: u64) -> String
     out
 }
 
+// ============================================================================
+// CUSTOM ECONOMIES. An economy spec is line-oriented text:
+//
+//   sector steel  l=0.4  steel=0.2 grain=0.1     # inputs per unit output
+//   sector grain  l=0.3  steel=0.5 grain=0.1
+//   demand steel=0 grain=1.0                     # net final demand
+//   market steel=0.9 grain=1.4                   # observed clearing prices
+//                                                #   (labour tokens), optional
+//   labour 1.2                                   # labour budget, optional
+//
+// With `market` lines the report runs ONE STEERING STEP (TNS ch. 8): each
+// demand entry scales by its price/labour-value ratio. With a `labour` budget
+// below requirements it runs the HARMONY allocation (TNS pp. 94-99). The
+// arithmetic — labour values, Leontief gross outputs, steering, harmony —
+// all runs in lib/plan.lat on Loom.
+// ============================================================================
+
+#[derive(Default)]
+pub struct Economy {
+    pub goods: Vec<String>,
+    pub labour: Vec<u128>,        // direct labour per unit (×1000)
+    pub recipes: Vec<Vec<u128>>,  // recipe per good: inputs of each good (×1000)
+    pub demand: Vec<u128>,        // final demand (×1000)
+    pub market: Option<Vec<u128>>, // observed clearing prices (×1000)
+    pub budget: Option<u128>,     // labour budget (×1000)
+}
+
+fn fx(s: &str) -> Option<u128> {
+    let s = s.trim();
+    let neg = s.starts_with('-');
+    if neg {
+        return None; // quantities are non-negative
+    }
+    let mut it = s.splitn(2, '.');
+    let whole: u128 = it.next()?.parse().ok()?;
+    let frac = it.next().unwrap_or("0");
+    let frac3: String = format!("{:0<3}", frac.chars().take(3).collect::<String>());
+    Some(whole * 1000 + frac3.parse::<u128>().ok()?)
+}
+
+pub fn parse_economy(spec: &str) -> Result<Economy, String> {
+    let mut eco = Economy::default();
+    let mut demand_map: Vec<(String, u128)> = Vec::new();
+    let mut market_map: Vec<(String, u128)> = Vec::new();
+    let mut inputs: Vec<Vec<(String, u128)>> = Vec::new();
+    for raw in spec.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        match toks.next() {
+            Some("sector") | Some("good") => {
+                let name = toks.next().ok_or("sector: missing name")?.to_string();
+                let mut l = 0u128;
+                let mut ins: Vec<(String, u128)> = Vec::new();
+                for t in toks {
+                    let mut kv = t.splitn(2, '=');
+                    let k = kv.next().unwrap_or("");
+                    let v = fx(kv.next().ok_or_else(|| format!("sector {}: bad token {}", name, t))?)
+                        .ok_or_else(|| format!("sector {}: bad number in {}", name, t))?;
+                    if k == "l" || k == "labour" || k == "labor" {
+                        l = v;
+                    } else {
+                        ins.push((k.to_string(), v));
+                    }
+                }
+                eco.goods.push(name);
+                eco.labour.push(l);
+                inputs.push(ins);
+            }
+            Some("labour") | Some("labor") => {
+                // labour <budget>
+                let v = toks.next().and_then(fx).ok_or("labour: missing budget")?;
+                eco.budget = Some(v);
+            }
+            Some(kw @ ("demand" | "market")) => {
+                for t in toks {
+                    let mut kv = t.splitn(2, '=');
+                    let k = kv.next().unwrap_or("").to_string();
+                    let v = fx(kv.next().ok_or_else(|| format!("{}: bad token {}", kw, t))?)
+                        .ok_or_else(|| format!("{}: bad number in {}", kw, t))?;
+                    if kw == "demand" {
+                        demand_map.push((k, v));
+                    } else {
+                        market_map.push((k, v));
+                    }
+                }
+            }
+            Some(other) => return Err(format!("unknown directive '{}'", other)),
+            None => {}
+        }
+    }
+    if eco.goods.is_empty() {
+        return Err("no sectors defined".into());
+    }
+    let idx = |n: &str| eco.goods.iter().position(|g| g == n);
+    // recipes: column per good over ALL goods
+    for ins in &inputs {
+        let mut col = vec![0u128; eco.goods.len()];
+        for (n, v) in ins {
+            let i = idx(n).ok_or_else(|| format!("unknown input good '{}'", n))?;
+            col[i] = *v;
+        }
+        eco.recipes.push(col);
+    }
+    eco.demand = vec![0; eco.goods.len()];
+    for (n, v) in demand_map {
+        let i = idx(&n).ok_or_else(|| format!("demand names unknown good '{}'", n))?;
+        eco.demand[i] = v;
+    }
+    if !market_map.is_empty() {
+        let mut m = vec![0; eco.goods.len()];
+        for (n, v) in market_map {
+            let i = idx(&n).ok_or_else(|| format!("market names unknown good '{}'", n))?;
+            m[i] = v;
+        }
+        eco.market = Some(m);
+    }
+    Ok(eco)
+}
+
+fn lat_vec(v: &[u128]) -> String {
+    let mut s = String::from("0");
+    for x in v.iter().rev() {
+        s = format!("[{} {}]", x, s);
+    }
+    s
+}
+fn lat_mat(m: &[Vec<u128>]) -> String {
+    let mut s = String::from("0");
+    for row in m.iter().rev() {
+        s = format!("[ {} {} ]", lat_vec(row), s);
+    }
+    s
+}
+
+/// The full TNS report for a custom economy. Every numeric step runs in
+/// lib/plan.lat on Loom; this host only parses, formats, and narrates.
+pub fn plan_report_custom(eco: &Economy, iters: u64) -> Result<String, String> {
+    let mut out = String::new();
+    let n = eco.goods.len();
+    out.push_str(&format!(
+        "{}-sector economy: {}.  {} iterations of each recurrence; all arithmetic in lib/plan.lat on Loom.\n\n",
+        n,
+        eco.goods.join(" · "),
+        iters
+    ));
+    out.push_str("technology (inputs per unit output; direct labour l):\n");
+    for (j, g) in eco.goods.iter().enumerate() {
+        let ins: Vec<String> = eco
+            .recipes[j]
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v > 0)
+            .map(|(i, &v)| format!("{} {}", fixed(v), eco.goods[i]))
+            .collect();
+        out.push_str(&format!(
+            "  1 {} needs {}  + {} labour\n",
+            g,
+            if ins.is_empty() { "nothing".into() } else { ins.join(" + ") },
+            fixed(eco.labour[j])
+        ));
+    }
+
+    // labour values: v = l + v·A
+    let values = to_vec(&run(&format!(
+        "(values {} {} {})",
+        lat_vec(&eco.labour),
+        lat_mat(&eco.recipes),
+        iters
+    ))?);
+    out.push_str("\nlabour values  (v = l + v·A, iterated — total embodied labour per unit):\n");
+    for (g, v) in eco.goods.iter().zip(&values) {
+        out.push_str(&format!("  {:<10} = {} hours\n", g, fixed(*v)));
+    }
+
+    // gross outputs for the demand
+    let gross = to_vec(&run(&format!(
+        "(gross {} {} {})",
+        lat_vec(&eco.demand),
+        lat_mat(&eco.recipes),
+        iters
+    ))?);
+    out.push_str(&format!(
+        "\ngross outputs  (x = y + A·x — production including intermediate use)\n  for final demand [{}]:\n",
+        eco.goods
+            .iter()
+            .zip(&eco.demand)
+            .map(|(g, d)| format!("{} {}", g, fixed(*d)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    for (g, x) in eco.goods.iter().zip(&gross) {
+        out.push_str(&format!("  {:<10} = {} units\n", g, fixed(*x)));
+    }
+    // labour-token accounting: total labour = v·y (equivalently l·x)
+    let need: u128 = values
+        .iter()
+        .zip(&eco.demand)
+        .map(|(v, y)| v * y / 1000)
+        .sum();
+    out.push_str(&format!(
+        "\nlabour accounting: this plan costs {} hours of social labour\n  (Σ v·y; labour tokens issued for work done buy exactly this product — TNS ch. 2, 5)\n",
+        fixed(need)
+    ));
+
+    // market steering, if clearing prices were observed
+    if let Some(prices) = &eco.market {
+        let steered = to_vec(&run(&format!(
+            "(steer {} {} {})",
+            lat_vec(&eco.demand),
+            lat_vec(prices),
+            lat_vec(&values)
+        ))?);
+        let ratios = to_vec(&run(&format!(
+            "(ratios {} {})",
+            lat_vec(prices),
+            lat_vec(&values)
+        ))?);
+        out.push_str("\nconsumer-goods market clearing (TNS ch. 8): price/labour-value steers the plan\n");
+        for i in 0..n {
+            let dir = if ratios[i] > 1050 {
+                "expand"
+            } else if ratios[i] < 950 {
+                "contract"
+            } else {
+                "hold"
+            };
+            out.push_str(&format!(
+                "  {:<10} clearing price {} vs value {}  ->  ratio {}  ->  {} target to {}\n",
+                eco.goods[i],
+                fixed(prices[i]),
+                fixed(values[i]),
+                fixed(ratios[i]),
+                dir,
+                fixed(steered[i])
+            ));
+        }
+        let g2 = to_vec(&run(&format!(
+            "(gross {} {} {})",
+            lat_vec(&steered),
+            lat_mat(&eco.recipes),
+            iters
+        ))?);
+        out.push_str("  next-period gross outputs for the steered plan:\n");
+        for (g, x) in eco.goods.iter().zip(&g2) {
+            out.push_str(&format!("    {:<10} = {} units\n", g, fixed(*x)));
+        }
+    }
+
+    // harmony allocation, if a labour budget binds
+    if let Some(budget) = eco.budget {
+        let costs: Vec<u128> = values
+            .iter()
+            .zip(&eco.demand)
+            .map(|(v, y)| v * y / 1000)
+            .collect();
+        let total: u128 = costs.iter().sum();
+        if budget < total {
+            let alloc = to_vec(&run(&format!(
+                "(harmony_alloc {} {} 400)",
+                lat_vec(&costs),
+                budget
+            ))?);
+            let h = run(&format!(
+                "(harmony {} {})",
+                lat_vec(&alloc),
+                lat_vec(&costs)
+            ))?
+            .as_atom()
+            .and_then(|a| a.to_u128())
+            .unwrap_or(0);
+            out.push_str(&format!(
+                "\nharmony balancing (TNS pp. 94-99): budget {} hours < required {} hours.\n  Allocating labour to maximize Σ 1-(1-r)² (the concave harmony function —\n  marginals equalized by parcel transfers, Cockshott's marginalist method):\n",
+                fixed(budget),
+                fixed(total)
+            ));
+            for i in 0..n {
+                let r = if costs[i] == 0 { 1000 } else { (alloc[i] * 1000 / costs[i]).min(1000) };
+                out.push_str(&format!(
+                    "  {:<10} gets {} hours of {} needed  ->  {}% of target\n",
+                    eco.goods[i],
+                    fixed(alloc[i]),
+                    fixed(costs[i]),
+                    r / 10
+                ));
+            }
+            out.push_str(&format!(
+                "  total harmony achieved: {} of a possible {}.000\n",
+                fixed(h),
+                n
+            ));
+        } else {
+            out.push_str(&format!(
+                "\nlabour budget {} hours covers the full requirement ({} hours); no rationing needed.\n",
+                fixed(budget),
+                fixed(total)
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The built-in demonstration economy (used when no spec is given).
+pub fn demo_spec() -> &'static str {
+    "sector steel  l=0.4  steel=0.2 grain=0.1\n     sector grain  l=0.3  steel=0.5 grain=0.1\n     sector bread  l=0.2  grain=0.6\n     demand steel=0 grain=1.0 bread=2.0\n     market steel=0.9 grain=1.6 bread=0.8\n     labour 1.2\n"
+}
+
 pub fn cmd_plan(args: &[String]) {
     let mut iters: u64 = 60;
+    let mut spec_path: Option<String> = None;
+    let mut demo = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -87,12 +398,43 @@ pub fn cmd_plan(args: &[String]) {
                     iters = args[i].parse().unwrap_or(60);
                 }
             }
+            "--spec" | "--economy" => {
+                i += 1;
+                if i < args.len() {
+                    spec_path = Some(args[i].clone());
+                }
+            }
+            "--demo3" | "--demo" => demo = true,
             other => {
                 eprintln!("plan: unknown arg {}", other);
+                eprintln!("usage: latte plan [--iters N] [--spec FILE | --demo3]");
+                eprintln!("  --spec FILE   plan a CUSTOM economy (sector/demand/market/labour lines)");
+                eprintln!("  --demo3       the 3-sector demo with market steering and a labour budget");
                 return;
             }
         }
         i += 1;
+    }
+    // a custom or demo economy takes the full TNS path
+    let spec = match (&spec_path, demo) {
+        (Some(p), _) => match std::fs::read_to_string(p) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("plan: cannot read {}: {}", p, e);
+                return;
+            }
+        },
+        (None, true) => Some(demo_spec().to_string()),
+        _ => None,
+    };
+    if let Some(spec) = spec {
+        println!("Planning — Towards a New Socialism (Cockshott & Cottrell)\n");
+        match parse_economy(&spec).and_then(|eco| plan_report_custom(&eco, iters)) {
+            Ok(r) => println!("{}", r),
+            Err(e) => eprintln!("plan: {}", e),
+        }
+        println!("Criticisms and replies are documented in docs/planning.md (the calculation debate).");
+        return;
     }
 
     println!("Planning calculations — Towards a New Socialism (Cockshott & Cottrell)");
@@ -156,5 +498,17 @@ mod tests {
         let xs = to_vec(&x);
         assert!(xs[1] >= 1000, "grain gross {} < demand", xs[1]); // at least the 1.0 demanded
         assert!(xs[0] > 0, "steel gross should be positive (grain needs steel)");
+    }
+
+    #[test]
+    fn custom_economy_full_tns_report() {
+        let eco = super::parse_economy(super::demo_spec()).unwrap();
+        assert_eq!(eco.goods.len(), 3);
+        let r = super::plan_report_custom(&eco, 60).unwrap();
+        assert!(r.contains("labour values"), "{}", r);
+        assert!(r.contains("market clearing"), "{}", r);
+        assert!(r.contains("harmony balancing"), "{}", r);
+        // labour value of steel solves v_s = .4 + .2 v_s + .1 v_g -> 0.581
+        assert!(r.contains("steel      = 0.58"), "{}", r);
     }
 }

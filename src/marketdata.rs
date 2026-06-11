@@ -176,6 +176,33 @@ pub const MARKET_NEWS: &[(&str, &str, &str)] = &[
 
 const LIVE_URL: &str = "https://raw.githubusercontent.com/coinmetrics/data/master/csv/btc.csv";
 
+/// The MARKETS the tools know how to fetch: Coin Metrics community assets that
+/// are liquid, long-history, and plausible financial-ML targets. Any other
+/// Coin Metrics asset symbol also works (`latte fetch --market <sym>`); these
+/// are the curated defaults the GUI offers.
+pub const MARKETS: &[(&str, &str)] = &[
+    ("btc", "BTC/USD (Bitcoin)"),
+    ("eth", "ETH/USD (Ethereum)"),
+    ("ltc", "LTC/USD (Litecoin)"),
+    ("xrp", "XRP/USD (XRP)"),
+    ("ada", "ADA/USD (Cardano)"),
+    ("doge", "DOGE/USD (Dogecoin)"),
+    ("sol", "SOL/USD (Solana)"),
+];
+pub fn market_label(sym: &str) -> String {
+    MARKETS
+        .iter()
+        .find(|(s, _)| *s == sym)
+        .map(|(_, l)| l.to_string())
+        .unwrap_or_else(|| format!("{}/USD (Coin Metrics)", sym.to_uppercase()))
+}
+fn market_url(sym: &str) -> String {
+    format!("https://raw.githubusercontent.com/coinmetrics/data/master/csv/{}.csv", sym)
+}
+fn market_cache_file(sym: &str) -> std::path::PathBuf {
+    cache_dir().join(format!("{}-priceusd.csv", sym))
+}
+
 fn cache_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("ORPHEUS_CACHE") {
         return std::path::PathBuf::from(d).join("market");
@@ -226,8 +253,14 @@ fn parse_cm_csv(text: &str) -> Vec<(String, i64)> {
 
 /// Fetch the live series with `curl`, cache it, and return the parsed rows.
 pub fn fetch_live() -> Result<Vec<(String, i64)>, String> {
+    fetch_live_market("btc")
+}
+
+/// Fetch any Coin Metrics market with `curl`, cache it per symbol, return rows.
+pub fn fetch_live_market(sym: &str) -> Result<Vec<(String, i64)>, String> {
+    let url = market_url(sym);
     let out = std::process::Command::new("curl")
-        .args(["-sSL", "--max-time", "90", LIVE_URL])
+        .args(["-sSL", "--max-time", "90", &url])
         .output()
         .map_err(|e| format!("curl not available ({}) — using the embedded series", e))?;
     if !out.status.success() {
@@ -246,13 +279,16 @@ pub fn fetch_live() -> Result<Vec<(String, i64)>, String> {
     for (d, p) in &rows {
         keep.push_str(&format!("{},{:.2}\n", d, *p as f64 / 100.0));
     }
-    let _ = std::fs::write(cache_file(), keep);
+    let _ = std::fs::write(market_cache_file(sym), keep);
     Ok(rows)
 }
 
 /// Read the cached live series, if a previous `latte fetch` stored one.
 pub fn cached_live() -> Option<Vec<(String, i64)>> {
-    let text = std::fs::read_to_string(cache_file()).ok()?;
+    cached_live_market("btc")
+}
+pub fn cached_live_market(sym: &str) -> Option<Vec<(String, i64)>> {
+    let text = std::fs::read_to_string(market_cache_file(sym)).ok()?;
     let rows = parse_cm_csv(&text);
     if rows.len() < 100 {
         None
@@ -266,6 +302,39 @@ pub fn cached_live() -> Option<Vec<(String, i64)>> {
 /// series — and if the freshest live/cached series ends *before* the embedded
 /// one (the community file lags), the embedded tail is appended so recent real
 /// closes are never lost. Returns (closes x100, span, provenance note).
+/// The price series for ANY known market. For btc the embedded fallback (and
+/// fresher embedded tail) applies as in `closes`; other markets need a
+/// `latte fetch --market <sym>` first and say so plainly when none exists.
+pub fn closes_market(sym: &str, live: bool) -> Result<(Vec<i64>, (String, String), String), String> {
+    if sym == "btc" {
+        return Ok(closes(live));
+    }
+    let fetched: Option<(Vec<(String, i64)>, &str)> = if live {
+        match fetch_live_market(sym) {
+            Ok(r) => Some((r, "live Coin Metrics fetch")),
+            Err(e) => {
+                eprintln!("  fetch {}: {}", sym, e);
+                cached_live_market(sym).map(|r| (r, "cached Coin Metrics fetch"))
+            }
+        }
+    } else {
+        cached_live_market(sym).map(|r| (r, "cached Coin Metrics fetch"))
+    };
+    match fetched {
+        Some((rows, what)) => {
+            let closes: Vec<i64> = rows.iter().map(|(_, p)| *p).collect();
+            let first = rows.first().map(|(d, _)| d.clone()).unwrap_or_default();
+            let last = rows.last().map(|(d, _)| d.clone()).unwrap_or_default();
+            let note = format!("{} ({} days)", what, closes.len());
+            Ok((closes, (first, last), note))
+        }
+        None => Err(format!(
+            "no data for market '{}' — run `latte fetch --market {}` first (only btc ships embedded)",
+            sym, sym
+        )),
+    }
+}
+
 pub fn closes(live: bool) -> (Vec<i64>, (String, String), String) {
     let fetched: Option<(Vec<(String, i64)>, &str)> = if live {
         match fetch_live() {
@@ -307,34 +376,9 @@ pub fn closes(live: bool) -> (Vec<i64>, (String, String), String) {
 /// How many trailing embedded days fall strictly after date `d` (YYYY-MM-DD)?
 /// The embedded series is daily and ends at MARKET_SPAN.1, so this is a date
 /// difference clamped to the press-report window documented above.
-/// "YYYY-MM-DD" -> days since the civil epoch (Howard Hinnant's algorithm).
-pub fn date_ordinal(s: &str) -> Option<i64> {
-    let mut it = s.split('-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: i64 = it.next()?.parse().ok()?;
-    let day: i64 = it.next()?.parse().ok()?;
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
-    let yoe = y2 - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146097 + doe - 719468)
-}
+pub use crate::dates::{date_ordinal, ordinal_date};
 
-/// days since the civil epoch -> "YYYY-MM-DD" (the inverse).
-pub fn ordinal_date(z: i64) -> String {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
-}
+
 
 fn embedded_days_after(d: &str) -> usize {
     fn ordinal(s: &str) -> Option<i64> {

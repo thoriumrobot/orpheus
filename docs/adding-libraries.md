@@ -200,3 +200,28 @@ dedicated front end.
 | `src/serve.rs`, `lib/site/*.html` | GUI console (`run_tool`) and pages |
 | `src/latte.rs` · `register_runtime_lib` / `compile_and_register` / `all_libs` | run-time library loading, Oberon-style compile, default scope |
 | `/api/lib`, `/api/compile`, `lib/site/compile.html` | load / compile a library from the GUI at run time |
+
+## The package system, transparently
+
+There is no package format, no manifest, no registry daemon. **A package is a
+Latte source whose `core NAME` names it** — the same thing a library is. The
+whole mechanism:
+
+1. `import NAME` resolves in three tiers: modules compiled at run time (the
+   live registry), then the built-in libraries (`lib/*.lat`, compiled into the
+   binary), then **`pkg/NAME.lat`** — the user package directory.
+2. Compiling a module — `Compiler.Compile` in a GUI frame, or just dropping a
+   `.lat` file into `pkg/` — registers it in the running system at once: the
+   next command can call it, `libs` lists it, the Modules viewer marks it
+   `·live`.
+3. `Store` persists it. Names that ship in `lib/` write back there (you are
+   editing the system); anything else writes `pkg/<name>.lat`. Everything in
+   `pkg/` is compiled and registered automatically at startup, so Compile +
+   Store is a permanent extension.
+4. `latte pkg` prints the inventory; `latte fmt file.lat --write` formats a
+   source (conservatively — the result is compile-checked, and the original is
+   returned untouched if formatting would break it).
+
+This answers "where does Latte code that is not library code live": **your
+modules live in `pkg/`, your documents-with-objects live in `text/`,** and the
+system's own libraries live in `lib/`.

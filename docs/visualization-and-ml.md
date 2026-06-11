@@ -530,6 +530,47 @@ latte sentiment --doc visualization-and-ml                      # score a docs/ 
 <text>` scores in place and **`Doc.Score <name>`** opens a whole document's evidence table in
 its own viewer. The advisor's news leg uses the fused score everywhere.
 
+## Many markets, one pipeline — and an honest model registry
+
+`latte fetch --market eth` (or `ltc`, `xrp`, `ada`, `doge`, `sol`, any Coin
+Metrics symbol; `--all` for the curated set) caches that market's full daily
+history, and then **every tool takes the market as an option**: `latte ta
+--market eth`, `latte trade --market eth`, `chart market market=eth days=180`
+in the GUI, `market=` lines over the HTTP API. The advisor trains the
+volatility model on that market's own series, once per process, and records the
+result in the **model registry** (`~/.cache/orpheus/models/<market>.txt`) —
+test accuracy, the majority-class baseline, and the edge between them. The
+registry is honest by construction: on BTC the model currently earns "+4.5 pts
+— a real edge"; on ETH it reads "NO EDGE on this market; the advisor says so",
+and the report repeats that to your face instead of calling every number
+dependable. Position sizing never leans on a model that failed its baseline:
+the HAR-RV forecast drives the volatility targeting.
+
+## The document advice stream
+
+The classifier reads more than the bundled headlines. Drop reports, articles,
+or notes into **`news/`** (`.txt`/`.md`; name them `YYYY-MM-DD-anything.txt` to
+date them, else the file's mtime is used), or pull one straight from the web
+with `latte fetch --news <url>`. Every document is scored WHOLE — sentence by
+sentence, with the per-sentence evidence — recency-weighted with a 5-day
+half-life (documents age slower than headlines), aggregated, and **blended into
+the advisor's news leg** (documents 40%, headlines 60%). The trade report shows
+each document's date, weight, polarity, and its single strongest sentence, so
+the advice stream is auditable line by line.
+
+## The chess engine
+
+`/chess` plays a real engine now: iterative-deepening alpha-beta to depth 5
+(~1.2 s/move) with quiescence search on captures, MVV-LVA move ordering, and a
+material + piece-square evaluation — replacing the old greedy chooser as the
+default opponent. It implements exactly the rules of `lib/chess.lat` (no
+castling or en passant, auto-queen promotion), and every move it returns is
+verified against the Latte rules' `legal` list, so the two implementations
+police each other; the test suite checks it finds mates, takes hanging pieces,
+and never proposes a Latte-illegal move. The Latte-trained linear evaluator
+(`lib/chessml.lat`) remains available as the "play the learned model" mode —
+the documented ML experiment, not the strongest opponent.
+
 ## Honest validation: embargo, costs, HAR-RV, conformal bands
 
 Four methodology upgrades keep the advisor's claims defensible:

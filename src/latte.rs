@@ -774,12 +774,144 @@ pub fn all_libs() -> Vec<String> {
     v.extend(runtime_lib_names());
     v
 }
-/// Resolve a library name to its source: runtime registry first, then the built-ins.
+/// Resolve a library name to its source: the runtime registry first, then the
+/// built-ins, then the user's PACKAGE directory (pkg/<name>.lat). `lib/` holds
+/// the system's libraries; `pkg/` holds yours — a package is nothing but a
+/// Latte source whose `core NAME` names it, compiled into the running system.
 fn resolve_lib(name: &str) -> Option<String> {
     if let Some(s) = runtime_libs().lock().unwrap().get(name) {
         return Some(s.clone());
     }
-    builtin_lib(name).map(|s| s.to_string())
+    if let Some(s) = builtin_lib(name) {
+        return Some(s.to_string());
+    }
+    let p = pkg_dir().join(format!("{}.lat", name));
+    std::fs::read_to_string(p).ok()
+}
+
+/// A conservative source formatter for Latte. It never re-parses your layout
+/// into a canonical form (comments and intentional structure survive); it
+/// normalizes the mechanical things: tabs -> two spaces, trailing whitespace
+/// stripped, 3+ blank lines collapsed, `import`/`core`/`end` at column 0,
+/// top-level arms (`name = …`) at column 2, and single spaces around the `=`
+/// of an arm head and around `->`. The result is compile-checked: if the
+/// formatted text no longer compiles, the original is returned unchanged.
+pub fn format_source(src: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut blank_run = 0usize;
+    let mut in_core = false;
+    for raw in src.lines() {
+        let mut line = raw.replace('\t', "  ");
+        while line.ends_with(' ') {
+            line.pop();
+        }
+        let t = line.trim_start();
+        if t.is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push(String::new());
+            }
+            continue;
+        }
+        blank_run = 0;
+        let formatted = if t.starts_with("import ") || t.starts_with("core ") {
+            if t.starts_with("core ") {
+                in_core = true;
+            }
+            t.to_string()
+        } else if t == "end" && in_core && line.trim() == "end" && leading(&line) <= 2 {
+            in_core = false;
+            "end".to_string()
+        } else if in_core && is_arm_head(t) && leading(&line) <= 8 {
+            format!("  {}", t)
+        } else {
+            // keep the author's indentation and spacing verbatim (alignment is
+            // intentional in Latte sources; a formatter must not flatten it)
+            line.clone()
+        };
+        out.push(formatted);
+    }
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    // safety: a formatter must never break the program
+    if gather(&text).is_err() && gather(src).is_ok() {
+        return src.to_string();
+    }
+    text
+}
+fn leading(l: &str) -> usize {
+    l.len() - l.trim_start().len()
+}
+fn is_arm_head(t: &str) -> bool {
+    // NAME = …  (a top-level arm), but not `==` comparisons or comment lines
+    if t.starts_with("::") {
+        return false;
+    }
+    let mut it = t.splitn(2, '=');
+    match (it.next(), it.next()) {
+        (Some(h), Some(r)) => {
+            !r.starts_with('=')
+                && !h.trim_end().ends_with(['=', '<', '>', '!'])
+                && !h.trim().is_empty()
+                && h.trim().split_whitespace().count() == 1
+                && h.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        }
+        _ => false,
+    }
+}
+
+
+// ---- the package directory: user modules, persisted -------------------------
+static PKG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// Set the package directory once at startup (the CLI uses ./pkg; the server
+/// uses <root>/pkg). First caller wins.
+pub fn set_pkg_dir(p: std::path::PathBuf) {
+    let _ = PKG_DIR.set(p);
+}
+pub fn pkg_dir() -> std::path::PathBuf {
+    PKG_DIR
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("LATTE_PKG").ok().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("pkg"))
+}
+/// Load every package in pkg/ into the running system (called at startup):
+/// each pkg/<name>.lat is compiled and registered exactly as if its source had
+/// been compiled from a GUI frame.
+pub fn load_packages() -> Vec<String> {
+    let mut loaded = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(pkg_dir()) {
+        let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.extension().and_then(|e| e.to_str()) != Some("lat") {
+                continue;
+            }
+            if let Ok(src) = std::fs::read_to_string(&path) {
+                match compile_and_register(&src) {
+                    Ok(_) => {
+                        if let Some(n) = find_core_name(&src) {
+                            loaded.push(n);
+                        }
+                    }
+                    Err(e) => eprintln!("pkg: {} failed to compile: {}", path.display(), e),
+                }
+            }
+        }
+    }
+    loaded
+}
+/// Persist a package source to pkg/<name>.lat (the Store half of the Oberon
+/// compile/store loop). Returns the path written.
+pub fn store_package(src: &str) -> Result<std::path::PathBuf, String> {
+    let name = find_core_name(src).ok_or("source must contain a `core NAME` block")?;
+    let dir = pkg_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let p = dir.join(format!("{}.lat", name));
+    std::fs::write(&p, src.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(p)
 }
 
 /// The fixed set of built-in library names (sorted) — for listing the system's own modules.

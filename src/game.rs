@@ -62,22 +62,386 @@ pub fn board_side(state: &N) -> (Vec<u128>, u128) {
 /// (Minerva); otherwise the fast greedy chooser. `None` = no move (game over). Used by
 /// the GUI's `/api/chess` to play "against the model".
 pub fn ai_move(state: &N, ml: bool) -> Option<N> {
-    // search depth (plies) for the learned machine; 2-ply alpha-beta with a positional
-    // evaluation plays markedly stronger than the old 1-ply greedy chooser.
-    const DEPTH: u128 = 2;
-    let mv = if ml {
+    if ml {
+        // "play the learned model": the Latte ML evaluator at 2-ply (kept as the
+        // documented machine-learning experiment, not the strongest opponent)
         let a = ai()?;
-        a.ml
-            .call("choose_ab", cell(state.clone(), cell(a.weights.clone(), num(DEPTH))))
-            .ok()?
-    } else {
-        rules_engine()?.call("choose", state.clone()).ok()?
-    };
+        let mv = a
+            .ml
+            .call("choose_ab", cell(state.clone(), cell(a.weights.clone(), num(2))))
+            .ok()?;
+        return if mv.as_atom().is_some() { None } else { Some(mv) };
+    }
+    // THE ENGINE: iterative-deepening alpha-beta + quiescence + piece-square
+    // evaluation (src/game.rs above) — the real opponent. Its move is verified
+    // against the Latte rules' legal list, so the two implementations check
+    // each other; on any disagreement we fall back to the Latte chooser.
+    let (board, side) = board_side(state);
+    let legal = legal_moves(state);
+    if let Some((f, t)) = engine_move(&board, side, 5) {
+        if legal.iter().any(|&(lf, lt)| lf == f && lt == t) {
+            return Some(cell(num(f), cell(num(t), num(0))));
+        }
+    }
+    let mv = rules_engine()?.call("choose", state.clone()).ok()?;
     if mv.as_atom().is_some() {
-        None // the chooser returns an atom (0) when there is no legal move
+        None
     } else {
         Some(mv)
     }
+}
+
+// ============================================================================
+// THE ENGINE. A real chess engine: iterative-deepening alpha-beta with
+// quiescence search, MVV-LVA move ordering, and a material + piece-square
+// evaluation — replacing the 1-2 ply greedy/ML choosers as the default
+// opponent. It plays the SAME rules as lib/chess.lat (single/double pawn
+// pushes, diagonal captures, auto-queen promotion, no castling or en passant),
+// and every move it returns is verified against the Latte `legal` list, so the
+// two implementations police each other. The Latte ML evaluator remains
+// available as the "play the learned model" mode.
+// ============================================================================
+
+type Board = [i8; 64]; // 0 empty; White 1..6 = P N B R Q K; Black 7..12
+
+fn b_of(list: &[u128]) -> Board {
+    let mut b = [0i8; 64];
+    for (i, &p) in list.iter().take(64).enumerate() {
+        b[i] = p as i8;
+    }
+    b
+}
+fn color(p: i8) -> i8 {
+    if p == 0 { 0 } else if p < 7 { 1 } else { 2 }
+}
+fn kind(p: i8) -> i8 {
+    if p == 0 { 0 } else if p < 7 { p } else { p - 6 }
+}
+const VAL: [i32; 7] = [0, 100, 320, 330, 500, 900, 20000];
+
+// piece-square tables (White's view; mirrored for Black) — classic midgame sets
+const PST_P: [i32; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50, 50, 50, 50, 50, 50, 10, 10, 20, 30, 30, 20, 10, 10,
+    5, 5, 10, 25, 25, 10, 5, 5, 0, 0, 0, 20, 20, 0, 0, 0, 5, -5, -10, 0, 0, -10, -5, 5,
+    5, 10, 10, -20, -20, 10, 10, 5, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const PST_N: [i32; 64] = [
+    -50, -40, -30, -30, -30, -30, -40, -50, -40, -20, 0, 0, 0, 0, -20, -40,
+    -30, 0, 10, 15, 15, 10, 0, -30, -30, 5, 15, 20, 20, 15, 5, -30,
+    -30, 0, 15, 20, 20, 15, 0, -30, -30, 5, 10, 15, 15, 10, 5, -30,
+    -40, -20, 0, 5, 5, 0, -20, -40, -50, -40, -30, -30, -30, -30, -40, -50,
+];
+const PST_B: [i32; 64] = [
+    -20, -10, -10, -10, -10, -10, -10, -20, -10, 0, 0, 0, 0, 0, 0, -10,
+    -10, 0, 5, 10, 10, 5, 0, -10, -10, 5, 5, 10, 10, 5, 5, -10,
+    -10, 0, 10, 10, 10, 10, 0, -10, -10, 10, 10, 10, 10, 10, 10, -10,
+    -10, 5, 0, 0, 0, 0, 5, -10, -20, -10, -10, -10, -10, -10, -10, -20,
+];
+const PST_R: [i32; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 5, 10, 10, 10, 10, 10, 10, 5, -5, 0, 0, 0, 0, 0, 0, -5,
+    -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5,
+    -5, 0, 0, 0, 0, 0, 0, -5, 0, 0, 0, 5, 5, 0, 0, 0,
+];
+const PST_Q: [i32; 64] = [
+    -20, -10, -10, -5, -5, -10, -10, -20, -10, 0, 0, 0, 0, 0, 0, -10,
+    -10, 0, 5, 5, 5, 5, 0, -10, -5, 0, 5, 5, 5, 5, 0, -5, 0, 0, 5, 5, 5, 5, 0, -5,
+    -10, 5, 5, 5, 5, 5, 0, -10, -10, 0, 5, 0, 0, 0, 0, -10, -20, -10, -10, -5, -5, -10, -10, -20,
+];
+const PST_K: [i32; 64] = [
+    -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50, -40, -40, -30,
+    -20, -30, -30, -40, -40, -30, -30, -20, -10, -20, -20, -20, -20, -20, -20, -10,
+    20, 20, 0, 0, 0, 0, 20, 20, 20, 30, 10, 0, 0, 10, 30, 20,
+];
+
+fn pst(k: i8, sq: usize, white: bool) -> i32 {
+    let i = if white { sq } else { 63 - sq }; // mirror ranks AND files (tables are symmetric enough)
+    match k {
+        1 => PST_P[i],
+        2 => PST_N[i],
+        3 => PST_B[i],
+        4 => PST_R[i],
+        5 => PST_Q[i],
+        6 => PST_K[i],
+        _ => 0,
+    }
+}
+
+/// Static evaluation from WHITE's view (centipawns).
+fn eval(b: &Board) -> i32 {
+    let mut e = 0;
+    for (sq, &p) in b.iter().enumerate() {
+        if p == 0 {
+            continue;
+        }
+        let k = kind(p);
+        let v = VAL[k as usize] + pst(k, sq, color(p) == 1);
+        e += if color(p) == 1 { v } else { -v };
+    }
+    e
+}
+
+/// Is `sq` attacked by `by` (1 white / 2 black)? Mirrors chess.lat geometry.
+fn attacked(b: &Board, sq: usize, by: i8) -> bool {
+    let (r, c) = ((sq / 8) as i32, (sq % 8) as i32);
+    let at = |rr: i32, cc: i32| -> i8 {
+        if (0..8).contains(&rr) && (0..8).contains(&cc) { b[(rr * 8 + cc) as usize] } else { -1 }
+    };
+    // pawns: white pawns attack toward row-1 (up), so a square is attacked by white
+    // pawns sitting at row+1; by black pawns sitting at row-1
+    let pr = if by == 1 { r + 1 } else { r - 1 };
+    for dc in [-1i32, 1] {
+        let p = at(pr, c + dc);
+        if p > 0 && color(p) == by && kind(p) == 1 {
+            return true;
+        }
+    }
+    // knights
+    for (dr, dc) in [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)] {
+        let p = at(r + dr, c + dc);
+        if p > 0 && color(p) == by && kind(p) == 2 {
+            return true;
+        }
+    }
+    // king
+    for dr in -1..=1i32 {
+        for dc in -1..=1i32 {
+            if dr == 0 && dc == 0 {
+                continue;
+            }
+            let p = at(r + dr, c + dc);
+            if p > 0 && color(p) == by && kind(p) == 6 {
+                return true;
+            }
+        }
+    }
+    // sliders
+    for (dr, dc, diag) in [
+        (-1i32, 0i32, false), (1, 0, false), (0, -1, false), (0, 1, false),
+        (-1, -1, true), (-1, 1, true), (1, -1, true), (1, 1, true),
+    ] {
+        let (mut rr, mut cc) = (r + dr, c + dc);
+        while (0..8).contains(&rr) && (0..8).contains(&cc) {
+            let p = b[(rr * 8 + cc) as usize];
+            if p != 0 {
+                if color(p) == by {
+                    let k = kind(p);
+                    if k == 5 || (diag && k == 3) || (!diag && k == 4) {
+                        return true;
+                    }
+                }
+                break;
+            }
+            rr += dr;
+            cc += dc;
+        }
+    }
+    false
+}
+
+fn king_sq(b: &Board, side: i8) -> usize {
+    let kp = if side == 1 { 6 } else { 12 };
+    b.iter().position(|&p| p == kp).unwrap_or(64.min(63))
+}
+fn in_check(b: &Board, side: i8) -> bool {
+    attacked(b, king_sq(b, side), if side == 1 { 2 } else { 1 })
+}
+
+/// Apply (from,to) with auto-queen promotion; returns the new board.
+fn make(b: &Board, from: usize, to: usize) -> Board {
+    let mut nb = *b;
+    let mut p = nb[from];
+    if kind(p) == 1 {
+        let tr = to / 8;
+        if (color(p) == 1 && tr == 0) || (color(p) == 2 && tr == 7) {
+            p = if color(p) == 1 { 5 } else { 11 };
+        }
+    }
+    nb[to] = p;
+    nb[from] = 0;
+    nb
+}
+
+/// Pseudo-legal moves for `side` (chess.lat rules), captures first (MVV-LVA).
+fn gen_moves(b: &Board, side: i8) -> Vec<(usize, usize)> {
+    let mut caps: Vec<(i32, usize, usize)> = Vec::new();
+    let mut quiet: Vec<(usize, usize)> = Vec::new();
+    let mut push = |b: &Board, from: usize, to: usize| {
+        let victim = b[to];
+        if victim != 0 {
+            caps.push((VAL[kind(victim) as usize] * 10 - VAL[kind(b[from]) as usize], from, to));
+        } else {
+            quiet.push((from, to));
+        }
+    };
+    for from in 0..64usize {
+        let p = b[from];
+        if p == 0 || color(p) != side {
+            continue;
+        }
+        let (r, c) = ((from / 8) as i32, (from % 8) as i32);
+        let k = kind(p);
+        let ok = |rr: i32, cc: i32| (0..8).contains(&rr) && (0..8).contains(&cc);
+        match k {
+            1 => {
+                let dir: i32 = if side == 1 { -1 } else { 1 };
+                let start = if side == 1 { 6 } else { 1 };
+                if ok(r + dir, c) && b[((r + dir) * 8 + c) as usize] == 0 {
+                    push(b, from, ((r + dir) * 8 + c) as usize);
+                    if r == start && b[((r + 2 * dir) * 8 + c) as usize] == 0 {
+                        push(b, from, ((r + 2 * dir) * 8 + c) as usize);
+                    }
+                }
+                for dc in [-1i32, 1] {
+                    if ok(r + dir, c + dc) {
+                        let t = ((r + dir) * 8 + c + dc) as usize;
+                        if b[t] != 0 && color(b[t]) != side {
+                            push(b, from, t);
+                        }
+                    }
+                }
+            }
+            2 | 6 => {
+                let deltas: &[(i32, i32)] = if k == 2 {
+                    &[(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+                } else {
+                    &[(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+                };
+                for &(dr, dc) in deltas {
+                    if ok(r + dr, c + dc) {
+                        let t = ((r + dr) * 8 + c + dc) as usize;
+                        if b[t] == 0 || color(b[t]) != side {
+                            push(b, from, t);
+                        }
+                    }
+                }
+            }
+            3 | 4 | 5 => {
+                let dirs: &[(i32, i32)] = match k {
+                    3 => &[(-1, -1), (-1, 1), (1, -1), (1, 1)],
+                    4 => &[(-1, 0), (1, 0), (0, -1), (0, 1)],
+                    _ => &[(-1, -1), (-1, 1), (1, -1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 1)],
+                };
+                for &(dr, dc) in dirs {
+                    let (mut rr, mut cc) = (r + dr, c + dc);
+                    while ok(rr, cc) {
+                        let t = (rr * 8 + cc) as usize;
+                        if b[t] == 0 {
+                            push(b, from, t);
+                        } else {
+                            if color(b[t]) != side {
+                                push(b, from, t);
+                            }
+                            break;
+                        }
+                        rr += dr;
+                        cc += dc;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    caps.sort_by(|a, b2| b2.0.cmp(&a.0));
+    let mut out: Vec<(usize, usize)> = caps.into_iter().map(|(_, f, t)| (f, t)).collect();
+    out.extend(quiet);
+    out
+}
+
+/// Quiescence: stand pat, then captures only (prevents horizon blunders).
+fn qsearch(b: &Board, side: i8, mut alpha: i32, beta: i32, nodes: &mut u64) -> i32 {
+    *nodes += 1;
+    let stand = if side == 1 { eval(b) } else { -eval(b) };
+    if stand >= beta {
+        return beta;
+    }
+    if stand > alpha {
+        alpha = stand;
+    }
+    for (f, t) in gen_moves(b, side) {
+        if b[t] == 0 {
+            break; // captures are ordered first
+        }
+        let nb = make(b, f, t);
+        if in_check(&nb, side) {
+            continue;
+        }
+        let score = -qsearch(&nb, 3 - side, -beta, -alpha, nodes);
+        if score >= beta {
+            return beta;
+        }
+        if score > alpha {
+            alpha = score;
+        }
+    }
+    alpha
+}
+
+fn alphabeta(b: &Board, side: i8, depth: u32, mut alpha: i32, beta: i32, nodes: &mut u64) -> i32 {
+    if depth == 0 {
+        return qsearch(b, side, alpha, beta, nodes);
+    }
+    *nodes += 1;
+    let mut any = false;
+    for (f, t) in gen_moves(b, side) {
+        let nb = make(b, f, t);
+        if in_check(&nb, side) {
+            continue; // own king left in check: illegal
+        }
+        any = true;
+        let score = -alphabeta(&nb, 3 - side, depth - 1, -beta, -alpha, nodes);
+        if score >= beta {
+            return beta;
+        }
+        if score > alpha {
+            alpha = score;
+        }
+    }
+    if !any {
+        // mate or stalemate
+        return if in_check(b, side) { -30000 + (5 - depth as i32) } else { 0 };
+    }
+    alpha
+}
+
+/// The engine's move for `side`: iterative deepening to `max_depth`, stopping
+/// early after ~1.2s. Returns (from, to) or None when no legal move exists.
+pub fn engine_move(board_list: &[u128], side: u128, max_depth: u32) -> Option<(u128, u128)> {
+    let b = b_of(board_list);
+    let side = side as i8;
+    let t0 = std::time::Instant::now();
+    let mut best: Option<(usize, usize)> = None;
+    let mut nodes = 0u64;
+    for depth in 1..=max_depth {
+        let mut alpha = -40000;
+        let beta = 40000;
+        let mut local: Option<(usize, usize)> = None;
+        // try the previous iteration's best move first (cheap PV ordering)
+        let mut moves = gen_moves(&b, side);
+        if let Some(pv) = best {
+            if let Some(pos) = moves.iter().position(|&m| m == pv) {
+                moves.swap(0, pos);
+            }
+        }
+        for (f, t) in moves {
+            let nb = make(&b, f, t);
+            if in_check(&nb, side) {
+                continue;
+            }
+            let score = -alphabeta(&nb, 3 - side, depth - 1, -beta, -alpha, &mut nodes);
+            if score > alpha {
+                alpha = score;
+                local = Some((f, t));
+            }
+        }
+        if local.is_some() {
+            best = local;
+        }
+        if t0.elapsed().as_millis() > 1200 {
+            break;
+        }
+    }
+    best.map(|(f, t)| (f as u128, t as u128))
 }
 
 // ---- noun helpers ----------------------------------------------------------
@@ -448,5 +812,55 @@ mod tests {
         let side2 = latte::run_with_libs("(nth (tail (poke [%move [52 [20 0]]] 0)) 1)", libs)
             .unwrap().as_atom().unwrap().to_u128().unwrap();
         assert_eq!(side2, 1);
+    }
+
+    #[test]
+    fn engine_finds_mate_in_one() {
+        // back-rank: White Ra1, Kg1 vs Black Kg8 (pawns f7 g7 h7) — Ra1-a8#
+        let mut b = vec![0u128; 64];
+        b[6] = 12; // black king g8
+        b[13] = 7; b[14] = 7; b[15] = 7; // f7 g7 h7 black pawns
+        b[56] = 4; // white rook a1
+        b[62] = 6; // white king g1
+        let (f, t) = super::engine_move(&b, 1, 4).expect("a move");
+        assert_eq!((f, t), (56, 0), "expected Ra1-a8 mate, got {} -> {}", f, t);
+    }
+
+    #[test]
+    fn engine_takes_the_hanging_queen() {
+        // White Qd1 can take an undefended Black queen on d8
+        let mut b = vec![0u128; 64];
+        b[3] = 11; // black queen d8
+        b[7] = 12; // black king h8 (NOT defending d8 — the queen truly hangs)
+        b[59] = 5; // white queen d1
+        b[60] = 6; // white king e1
+        b[8] = 7; b[9] = 7; // a7 b7 pawns so it isn't immediately mate-hunting
+        let (f, t) = super::engine_move(&b, 1, 4).expect("a move");
+        assert_eq!((f, t), (59, 3), "expected Qxd8, got {} -> {}", f, t);
+    }
+
+    #[test]
+    fn engine_moves_are_always_latte_legal() {
+        // play the engine against itself from the start; every move must be in
+        // the Latte rules' legal list (the two rule implementations agree)
+        let mut state = super::rules_engine().unwrap().call("initial", crate::knot::num(0)).unwrap();
+        for _ply in 0..12 {
+            let legal = super::legal_moves(&state);
+            if legal.is_empty() {
+                break;
+            }
+            let (board, side) = super::board_side(&state);
+            let (f, t) = super::engine_move(&board, side, 3).expect("engine move");
+            assert!(
+                legal.iter().any(|&(lf, lt)| lf == f && lt == t),
+                "engine move {}->{} not in the Latte legal list",
+                f,
+                t
+            );
+            state = super::rules_engine()
+                .unwrap()
+                .call("apply", crate::knot::cell(crate::knot::num(f), crate::knot::cell(crate::knot::num(t), state.clone())))
+                .unwrap_or(state);
+        }
     }
 }

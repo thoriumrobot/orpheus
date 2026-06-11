@@ -301,8 +301,8 @@ pub struct MarketResult {
     pub nsamples: usize,
     pub iters: u64,
     pub vol: bool,
-    pub d0: &'static str,
-    pub d1: &'static str,
+    pub d0: String,
+    pub d1: String,
 }
 
 /// Run the gold volatility-regime pipeline: build features in the host (data prep),
@@ -315,10 +315,32 @@ pub fn market_eval(iters: u64) -> Result<MarketResult, String> {
 /// Configurable evaluation. `horizon` = forward days for the direction label;
 /// `vol_task` = predict next-day volatility regime instead of direction.
 pub fn market_eval_cfg(iters: u64, horizon: usize, vol_task: bool) -> Result<MarketResult, String> {
-    let libs = ["std", "num", "tensor", "ml", "nn", "fin"];
     let closes: Vec<f64> = crate::marketdata::MARKET_CLOSE_X100.iter().map(|&c| c as f64 / 100.0).collect();
-    let n = closes.len();
     let (d0, d1) = crate::marketdata::MARKET_SPAN;
+    market_eval_on(closes, (d0.to_string(), d1.to_string()), iters, horizon, vol_task)
+}
+
+/// `market_eval_cfg` over any FETCHED market's series (the model trains on that
+/// market's own history; data must be cached by `latte fetch --market <sym>`).
+pub fn market_eval_market(market: &str, iters: u64, horizon: usize, vol_task: bool) -> Result<MarketResult, String> {
+    if market == "btc" {
+        return market_eval_cfg(iters, horizon, vol_task);
+    }
+    let (x100, span, _) = crate::marketdata::closes_market(market, false)?;
+    let closes: Vec<f64> = x100.iter().map(|&c| c as f64 / 100.0).collect();
+    market_eval_on(closes, span, iters, horizon, vol_task)
+}
+
+fn market_eval_on(
+    closes: Vec<f64>,
+    span: (String, String),
+    iters: u64,
+    horizon: usize,
+    vol_task: bool,
+) -> Result<MarketResult, String> {
+    let libs = ["std", "num", "tensor", "ml", "nn", "fin"];
+    let n = closes.len();
+    let (d0, d1) = span;
     let r: Vec<f64> = (1..n).map(|i| 100.0 * (closes[i] - closes[i - 1]) / closes[i - 1]).collect();
     let absr: Vec<f64> = r.iter().map(|x| x.abs()).collect();
     let h = horizon.max(1);
@@ -467,6 +489,26 @@ pub fn cmd_fin(args: &[String]) {
                 let tot = res.buyhold.last().copied().unwrap_or(1.0);
                 let pct = if tot != 0.0 { 100.0 * cap / tot } else { 0.0 };
                 println!("  variance timing     : {:.0}% of test |returns| captured on ~half the days", pct);
+            }
+            // ---- risk statistics over the NET equity curves (5bp/trade charged).
+            // Only the DIRECTION task produces a real P&L curve; the volatility
+            // task's curve is captured-|returns| (non-negative by construction),
+            // on which Sharpe/drawdown would be meaningless — so we say so.
+            if !res.vol {
+                let (ss, sdd, _, _) = curve_stats(&res.strat);
+                let (bs, bdd, _, _) = curve_stats(&res.buyhold);
+                let daily: Vec<f64> = std::iter::once(res.strat.first().copied().unwrap_or(0.0))
+                    .chain(res.strat.windows(2).map(|w| w[1] - w[0]))
+                    .collect();
+                let active: Vec<bool> = daily.iter().map(|d| d.abs() > 1e-12).collect();
+                println!("\n  -- risk statistics (test slice, NET of 5bp per position change) --");
+                println!("  strategy : Sharpe {:+.2}   max drawdown {:.1}%   turnover {:.0} trades/100 days",
+                    ss, sdd, turnover_per_100(&active));
+                println!("  buy&hold : Sharpe {:+.2}   max drawdown {:.1}%", bs, bdd);
+            } else {
+                println!("\n  (risk statistics — Sharpe, drawdown, turnover — are reported for the");
+                println!("   direction task `latte fin --direction`, whose curve is real P&L; the");
+                println!("   variance-timing curve above is non-negative by construction.)");
             }
             println!("\n  Which market & why: this same pipeline is near-chance on gold (price-only),");
             println!("  so the financial-ML approach was moved to CRYPTO, where momentum and");
@@ -810,7 +852,7 @@ pub struct NewsRow {
 }
 
 pub struct TradeAdvice {
-    pub market: &'static str,
+    pub market: String,
     pub last_price: f64,
     pub mom: f64,            // momentum: price/MA10 - 1, in %
     pub direction: &'static str,
@@ -822,6 +864,7 @@ pub struct TradeAdvice {
     pub band90: f64,          // conformal 90% next-day |return| band, %
     pub dir_hitrate: f64,    // out-of-sample momentum hit rate (embargoed walk-forward)
     pub model_acc: f64,      // volatility-model test accuracy
+    pub model_base: f64,     // its majority-class baseline (edge = acc - base)
     pub kelly_full: f64,     // full Kelly fraction from the directional edge
     pub kelly_used: f64,     // fractional-Kelly applied
     pub exposure: f64,       // recommended exposure (fraction of capital, signed)
@@ -834,6 +877,8 @@ pub struct TradeAdvice {
     pub ta_score: i32,             // sum of votes, in [-5, +5]
     pub ta_signal: f64,            // score/5 in [-1, 1]
     pub news: Vec<NewsRow>,        // the scored headlines
+    pub docs: Vec<DocAdvice>,      // the scored DOCUMENTS from news/ (the advice stream)
+    pub docs_sentiment: Option<f64>, // their recency-weighted aggregate
     pub news_sentiment: f64,       // recency-weighted aggregate polarity
     pub combined: f64,             // 0.6*ta_signal + 0.4*news_sentiment
     pub data_note: String,         // where the price series came from
@@ -887,6 +932,82 @@ pub fn ta_votes(closes_x100: &[i64], win: usize) -> Result<(Vec<TaRow>, i32), St
 /// Score a set of dated headlines with the Loughran-McDonald scorer (polarity arithmetic
 /// in lib/sentiment.lat) and aggregate with a 3-day-half-life recency weight relative to
 /// the newest item. Returns (rows, aggregate in [-1,1]).
+/// One scored document in the advice stream.
+pub struct DocAdvice {
+    pub date: String,
+    pub name: String,
+    pub polarity: f64,
+    pub weight: f64,
+    pub evidence: String, // the strongest sentence
+}
+
+/// The news directory: drop reports, articles, or notes here (.txt/.md). Files
+/// named `YYYY-MM-DD-anything.txt` use that date; others use their mtime day.
+pub fn news_dir() -> std::path::PathBuf {
+    std::env::var("ORPHEUS_NEWS").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("news"))
+}
+
+/// THE DOCUMENT ADVICE STREAM: every document in news/ is scored sentence-by-
+/// sentence by the trained classifier (`score_document`), recency-weighted with
+/// a 5-day half-life (documents age slower than headlines), and aggregated into
+/// one signal the advisor blends with the headline corpus. Returns
+/// (rows newest-first, weighted aggregate, or None when the directory is empty).
+pub fn docs_stream() -> Option<(Vec<DocAdvice>, f64)> {
+    let dir = news_dir();
+    let rd = std::fs::read_dir(&dir).ok()?;
+    let mut items: Vec<(i64, String, String, f64, String)> = Vec::new(); // (ord, date, name, pol, evidence)
+    for e in rd.flatten() {
+        let path = e.path();
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if ext != "txt" && ext != "md" {
+            continue;
+        }
+        if path.file_stem().and_then(|x| x.to_str()).map(|s| s.eq_ignore_ascii_case("readme")).unwrap_or(false) {
+            continue; // the directory's own README is not advice
+        }
+        let name = path.file_name().and_then(|x| x.to_str()).unwrap_or("").to_string();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        // date: a YYYY-MM-DD filename prefix, else the file's mtime day
+        let date = name
+            .get(0..10)
+            .filter(|d| crate::dates::date_ordinal(d).is_some())
+            .map(|d| d.to_string())
+            .or_else(|| {
+                e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| {
+                    let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+                    Some(crate::dates::ordinal_date(secs / 86_400))
+                })
+            })
+            .unwrap_or_else(|| "1970-01-01".into());
+        let ord = crate::dates::date_ordinal(&date).unwrap_or(0);
+        let (pol, sents) = crate::sentiment::score_document(&text);
+        let evidence = sents
+            .iter()
+            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .map(|(t, _)| t.clone())
+            .unwrap_or_default();
+        items.push((ord, date, name, pol, evidence));
+    }
+    if items.is_empty() {
+        return None;
+    }
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+    let newest = items[0].0;
+    let mut rows = Vec::new();
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (ord, date, name, pol, evidence) in items {
+        let age = (newest - ord).max(0) as f64;
+        let wgt = 0.5f64.powf(age / 5.0);
+        num += wgt * pol;
+        den += wgt;
+        rows.push(DocAdvice { date, name, polarity: pol, weight: wgt, evidence });
+    }
+    Some((rows, if den > 0.0 { num / den } else { 0.0 }))
+}
+
 pub fn score_news(items: &[(String, String, String)]) -> (Vec<NewsRow>, f64) {
     fn ord(d: &str) -> i64 {
         let mut it = d.split('-');
@@ -930,6 +1051,39 @@ pub fn parse_news_file(text: &str) -> Vec<(String, String, String)> {
 
 /// The volatility model's test accuracy, trained once per process (it is the same
 /// data and configuration every time, so retraining per call was pure waste).
+/// Risk statistics from a CUMULATIVE percent-return curve: (annualized Sharpe,
+/// max drawdown %, daily mean %, daily vol %). Net of whatever costs the curve
+/// already includes (lib/fin.lat charges 5bp per position change).
+pub fn curve_stats(cum: &[f64]) -> (f64, f64, f64, f64) {
+    if cum.len() < 3 {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let daily: Vec<f64> = std::iter::once(cum[0])
+        .chain(cum.windows(2).map(|w| w[1] - w[0]))
+        .collect();
+    let mean = daily.iter().sum::<f64>() / daily.len() as f64;
+    let var = daily.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>() / daily.len() as f64;
+    let vol = var.sqrt();
+    let sharpe = if vol > 1e-9 { mean / vol * (252.0f64).sqrt() } else { 0.0 };
+    let (mut peak, mut mdd) = (f64::NEG_INFINITY, 0.0f64);
+    for &c in cum {
+        peak = peak.max(c);
+        mdd = mdd.max(peak - c);
+    }
+    (sharpe, mdd, mean, vol)
+}
+
+/// Turnover of a position curve implied by a strategy's flat days: counts the
+/// position CHANGES per 100 days from the daily P&L pattern (zero-P&L days are
+/// flat; each flat<->long boundary is one trade, the thing the 5bp cost hits).
+pub fn turnover_per_100(strat_daily_active: &[bool]) -> f64 {
+    if strat_daily_active.len() < 2 {
+        return 0.0;
+    }
+    let flips = strat_daily_active.windows(2).filter(|w| w[0] != w[1]).count();
+    100.0 * flips as f64 / strat_daily_active.len() as f64
+}
+
 /// HAR-RV (Corsi 2009): forecast next-day realized volatility from the daily,
 /// weekly (5d) and monthly (22d) average RVs by least squares — the standard,
 /// hard-to-beat volatility benchmark. Returns (forecast, [c, bd, bw, bm], r2).
@@ -998,8 +1152,58 @@ pub fn conformal_band(rets: &[f64], win: usize, q: f64) -> f64 {
 }
 
 fn vol_model_acc() -> f64 {
-    static ACC: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *ACC.get_or_init(|| market_eval_cfg(60, 1, true).map(|r| r.test).unwrap_or(0.0))
+    vol_model_acc_market("btc")
+}
+
+/// The volatility model's out-of-sample accuracy for a market — trained ONCE per
+/// process per market and recorded in the on-disk model registry
+/// (~/.cache/orpheus/models/<market>.txt), so `latte trade --market eth` after a
+/// fetch trains the eth model and remembers it.
+fn vol_model_acc_market(market: &str) -> f64 {
+    vol_model_stats(market).0
+}
+/// (test accuracy %, baseline accuracy %) of the per-market volatility model —
+/// trained once per process per market and recorded honestly in the registry.
+/// The EDGE is test − baseline; a model below its baseline has none, and the
+/// advisor's report says so instead of calling it dependable.
+pub fn vol_model_stats(market: &str) -> (f64, f64) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static ACC: std::sync::OnceLock<Mutex<HashMap<String, (f64, f64)>>> = std::sync::OnceLock::new();
+    let map = ACC.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = map.lock().unwrap().get(market) {
+        return *v;
+    }
+    let (acc, base) = market_eval_market(market, 60, 1, true)
+        .map(|r| (r.test, r.base))
+        .unwrap_or((0.0, 0.0));
+    map.lock().unwrap().insert(market.to_string(), (acc, base));
+    let dir = model_registry_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join(format!("{}.txt", market)),
+        format!(
+            "market: {} ({})\nmodel: logistic volatility-regime classifier (lib/fin.lat, trained on Loom)\ntest accuracy: {:.1}%\nbaseline (majority class): {:.1}%\nedge over baseline: {:+.1} points{}\n",
+            market,
+            crate::marketdata::market_label(market),
+            acc,
+            base,
+            acc - base,
+            if acc <= base { "  — NO EDGE on this market; the advisor says so" } else { "" }
+        ),
+    );
+    (acc, base)
+}
+pub fn model_registry_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("ORPHEUS_CACHE") {
+        return std::path::PathBuf::from(d).join("models");
+    }
+    let home = std::env::var("HOME").or_else(|_| std::env::var("LOCALAPPDATA")).unwrap_or_else(|_| ".".into());
+    if cfg!(windows) {
+        std::path::PathBuf::from(home).join("orpheus").join("models")
+    } else {
+        std::path::PathBuf::from(home).join(".cache").join("orpheus").join("models")
+    }
 }
 
 /// Compute a trade recommendation by fusing TECHNICAL ANALYSIS (lib/ta.lat: five
@@ -1016,7 +1220,21 @@ pub fn trade_advice(
     live: bool,
     news_text: Option<&str>,
 ) -> Result<TradeAdvice, String> {
-    let (closes_x100, span, data_note) = crate::marketdata::closes(live);
+    trade_advice_market("btc", account, kelly_mult, sentiment_override, live, news_text)
+}
+
+/// `trade_advice` for ANY fetched market: the same pipeline — TA votes, news
+/// sentiment, HAR-RV-targeted Kelly sizing — runs on that market's series, and
+/// the volatility model is trained (and registry-cached) PER MARKET.
+pub fn trade_advice_market(
+    market: &str,
+    account: f64,
+    kelly_mult: f64,
+    sentiment_override: Option<f64>,
+    live: bool,
+    news_text: Option<&str>,
+) -> Result<TradeAdvice, String> {
+    let (closes_x100, span, data_note) = crate::marketdata::closes_market(market, live)?;
     let closes: Vec<f64> = closes_x100.iter().map(|&c| c as f64 / 100.0).collect();
     let n = closes.len();
     if n < 30 {
@@ -1067,7 +1285,7 @@ pub fn trade_advice(
     }
     let dir_hitrate = if tot > 0 { hits as f64 / tot as f64 } else { 0.5 };
     // model (volatility) accuracy for reporting reliability (trained once per process)
-    let model_acc = vol_model_acc();
+    let (model_acc, model_base) = vol_model_stats(market);
 
     // --- TECHNICAL ANALYSIS: lib/ta.lat's five indicators vote, on Loom ----------
     let (ta_rows, ta_score) = ta_votes(&closes_x100, 120)?;
@@ -1082,7 +1300,19 @@ pub fn trade_advice(
             .collect(),
     };
     let (news, news_sentiment) = score_news(&items);
-    let used_sentiment = sentiment_override.unwrap_or(news_sentiment);
+    // the DOCUMENT advice stream: reports dropped in news/ are scored whole
+    // (sentence-level, recency-weighted) and blended with the headline corpus —
+    // headlines 60%, documents 40% when any documents exist
+    let docs_pair = docs_stream();
+    let (docs, docs_sentiment) = match docs_pair {
+        Some((rows, agg)) => (rows, Some(agg)),
+        None => (Vec::new(), None),
+    };
+    let blended = match docs_sentiment {
+        Some(d) => 0.6 * news_sentiment + 0.4 * d,
+        None => news_sentiment,
+    };
+    let used_sentiment = sentiment_override.unwrap_or(blended);
 
     // --- the COMBINED lean: TA carries 60%, news 40% ------------------------------
     let combined = 0.6 * ta_signal + 0.4 * used_sentiment;
@@ -1121,7 +1351,7 @@ pub fn trade_advice(
         format!("LONG {:.1}% of capital (vol-targeted, {:.0}% fractional Kelly)", exposure * 100.0, kelly_mult * 100.0)
     };
     Ok(TradeAdvice {
-        market: crate::marketdata::MARKET_NAME,
+        market: crate::marketdata::market_label(market),
         last_price: last,
         mom,
         direction: if combined > 0.0 { "up" } else { "down" },
@@ -1133,6 +1363,7 @@ pub fn trade_advice(
         band90,
         dir_hitrate: dir_hitrate * 100.0,
         model_acc,
+        model_base,
         kelly_full,
         kelly_used,
         exposure,
@@ -1144,6 +1375,8 @@ pub fn trade_advice(
         ta_score,
         ta_signal,
         news,
+        docs,
+        docs_sentiment,
         news_sentiment,
         combined,
         data_note,
@@ -1159,6 +1392,7 @@ pub fn cmd_trade(args: &[String]) {
     let mut sentiment: Option<f64> = None;
     let mut live = false;
     let mut news_text: Option<String> = None;
+    let mut market = String::from("btc");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1166,6 +1400,7 @@ pub fn cmd_trade(args: &[String]) {
             "--kelly" if i + 1 < args.len() => { kelly = args[i + 1].parse().unwrap_or(kelly); i += 1; }
             "--sentiment" if i + 1 < args.len() => { sentiment = args[i + 1].parse().ok(); i += 1; }
             "--live" | "--fetch" => live = true,
+            "--market" | "-m" if i + 1 < args.len() => { market = args[i + 1].to_lowercase(); i += 1; }
             "--news" if i + 1 < args.len() => {
                 match std::fs::read_to_string(&args[i + 1]) {
                     Ok(t) => news_text = Some(t),
@@ -1178,7 +1413,7 @@ pub fn cmd_trade(args: &[String]) {
         i += 1;
     }
     println!("trade - advisor: technical analysis + news sentiment + the volatility model\n");
-    match trade_advice(account, kelly, sentiment, live, news_text.as_deref()) {
+    match trade_advice_market(&market, account, kelly, sentiment, live, news_text.as_deref()) {
         Ok(a) => {
             println!("  market            : {}   last close ${:.0}", a.market, a.last_price);
             println!("  data              : {}  ({} .. {})", a.data_note, a.span.0, a.span.1);
@@ -1205,6 +1440,18 @@ pub fn cmd_trade(args: &[String]) {
             }
             println!("    recency-weighted sentiment: {:+.2}{}", a.news_sentiment,
                 if a.sentiment != Some(a.news_sentiment) { "  (overridden by --sentiment)" } else { "" });
+            if let Some(ds) = a.docs_sentiment {
+                println!("  -- the DOCUMENT advice stream (news/ — whole reports, scored sentence-by-sentence) --");
+                for d in a.docs.iter().take(5) {
+                    let ev: String = d.evidence.chars().take(70).collect();
+                    println!("    {} [{:+.2} w{:.2}] {} — \"{}{}\"", d.date, d.polarity, d.weight, d.name, ev,
+                        if d.evidence.chars().count() > 70 { "…" } else { "" });
+                }
+                if a.docs.len() > 5 {
+                    println!("    … and {} more documents", a.docs.len() - 5);
+                }
+                println!("    document stream aggregate: {:+.2}  (blended 40% with headlines 60%)", ds);
+            }
             println!("  -- the combined signal --------------------");
             println!("  combined lean     : {:+.2}   (= 0.6*TA {:+.2} + 0.4*news {:+.2}) -> {}",
                 a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction);
@@ -1215,7 +1462,11 @@ pub fn cmd_trade(args: &[String]) {
             println!("  90% next-day band : ±{:.2}%  (split-conformal quantile of the trailing year — distribution-free)", a.band90);
             println!("  -- model reliability ----------------------");
             println!("  momentum hit rate : {:.1}%  (out-of-sample)", a.dir_hitrate);
-            println!("  volatility model  : {:.1}%  test accuracy (the dependable edge)", a.model_acc);
+            if a.model_acc > a.model_base {
+                println!("  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  (+{:.1} pts — a real edge)", a.model_acc, a.model_base, a.model_acc - a.model_base);
+            } else {
+                println!("  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  — NO EDGE on this market", a.model_acc, a.model_base);
+            }
             println!("  -- position sizing ------------------------");
             println!("  full Kelly        : {:+.3}", a.kelly_full);
             println!("  fractional Kelly  : {:.3}", a.kelly_used);
@@ -1225,7 +1476,7 @@ pub fn cmd_trade(args: &[String]) {
             }
             println!("\n  Rationale: five classical indicators vote in Latte (ta.lat) and real, dated");
             println!("  headlines are scored in Latte (sentiment.lat); the leans are fused 60/40 and");
-            println!("  position size is risk-controlled by the volatility model (the dependable edge)");
+            println!("  position size is risk-controlled by HAR-RV volatility targeting");
             println!("  with fractional Kelly. `--live` refreshes prices from Coin Metrics; `--news F`");
             println!("  supplies today's headlines. Research demo, NOT financial advice.");
         }
@@ -1240,20 +1491,25 @@ fn truncate(s: &str, n: usize) -> String {
 /// `latte ta` — standalone technical analysis on the freshest real data
 /// (`--live` fetches Coin Metrics now; otherwise cached fetch > embedded series).
 pub fn cmd_ta(args: &[String]) {
+    let mut market = String::from("btc");
     let mut live = false;
     let mut win = 120usize;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--market" | "-m" if i + 1 < args.len() => { market = args[i + 1].to_lowercase(); i += 1; }
             "--live" | "--fetch" => live = true,
             "--win" | "--window" if i + 1 < args.len() => { win = args[i + 1].parse().unwrap_or(win); i += 1; }
             _ => {}
         }
         i += 1;
     }
-    let (closes, span, note) = crate::marketdata::closes(live);
+    let (closes, span, note) = match crate::marketdata::closes_market(&market, live) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("ta: {}", e); return; }
+    };
     println!("ta - technical analysis (lib/ta.lat, computed on Loom)\n");
-    println!("  market : {}   last close ${:.2}", crate::marketdata::MARKET_NAME, *closes.last().unwrap_or(&0) as f64 / 100.0);
+    println!("  market : {}   last close ${:.2}", crate::marketdata::market_label(&market), *closes.last().unwrap_or(&0) as f64 / 100.0);
     println!("  data   : {}  ({} .. {})", note, span.0, span.1);
     println!("  window : last {} trading days\n", win);
     match ta_votes(&closes, win) {
@@ -1281,17 +1537,77 @@ pub fn cmd_ta(args: &[String]) {
 
 /// `latte fetch` — refresh the market data from the live Coin Metrics file (via curl),
 /// caching it for `trade`/`fin` to use; falls back to the embedded series gracefully.
-pub fn cmd_fetch() {
-    println!("fetch - refresh BTC/USD daily closes from Coin Metrics (community data)\n");
-    match crate::marketdata::fetch_live() {
-        Ok(rows) => {
-            let (f, l) = (rows.first().unwrap(), rows.last().unwrap());
-            println!("  fetched {} daily closes: {} .. {}  (last ${:.2})", rows.len(), f.0, l.0, l.1 as f64 / 100.0);
-            println!("  cached for `latte trade` / `latte fin`. The embedded series still covers");
-            println!("  the freshest press-reported days past the community file's lag.");
+pub fn cmd_fetch(args: &[String]) {
+    let mut markets: Vec<String> = Vec::new();
+    let mut all = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--market" | "-m" if i + 1 < args.len() => {
+                markets.push(args[i + 1].to_lowercase());
+                i += 1;
+            }
+            "--all" => all = true,
+            "--news" if i + 1 < args.len() => {
+                // fetch a document into the news/ advice stream: curl the URL,
+                // strip nothing (plain text/markdown expected), date-prefix the
+                // filename so the stream's recency weighting can see it
+                let url = &args[i + 1];
+                i += 1;
+                let out = std::process::Command::new("curl")
+                    .args(["-sSL", "--max-time", "60", url])
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                        let dir = news_dir();
+                        let _ = std::fs::create_dir_all(&dir);
+                        let stem: String = url
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("fetched")
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+                            .take(48)
+                            .collect();
+                        // date the file by the newest market day we know of
+                        let date = crate::marketdata::MARKET_SPAN.1;
+                        let path = dir.join(format!("{}-{}.txt", date, stem.trim_end_matches(".txt").trim_end_matches(".md")));
+                        let _ = std::fs::write(&path, &o.stdout);
+                        println!("  news: saved {} ({} bytes) into the document advice stream", path.display(), o.stdout.len());
+                        println!("        `latte trade` now scores it sentence-by-sentence and blends it in.");
+                    }
+                    Ok(o) => println!("  news: curl exited {} for {}", o.status, url),
+                    Err(e) => println!("  news: curl not available ({})", e),
+                }
+                return;
+            }
+            _ => {}
         }
-        Err(e) => println!("  {}", e),
+        i += 1;
     }
+    if all {
+        markets = crate::marketdata::MARKETS.iter().map(|(s, _)| s.to_string()).collect();
+    }
+    if markets.is_empty() {
+        markets.push("btc".into());
+    }
+    println!("fetch - daily closes from Coin Metrics community data\n");
+    println!("  known markets: {}   (any other Coin Metrics symbol also works)",
+        crate::marketdata::MARKETS.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(" "));
+    for m in &markets {
+        match crate::marketdata::fetch_live_market(m) {
+            Ok(rows) => {
+                let (f, l) = (rows.first().unwrap(), rows.last().unwrap());
+                println!(
+                    "  {:<5} fetched {} daily closes: {} .. {}  (last ${:.2})",
+                    m, rows.len(), f.0, l.0, l.1 as f64 / 100.0
+                );
+            }
+            Err(e) => println!("  {:<5} {}", m, e),
+        }
+    }
+    println!("\n  cached per market for `latte trade --market <sym>` / `latte ta --market <sym>`.");
+    println!("  For btc the embedded series still covers the freshest press-reported days.");
 }
 
 /// `latte sentiment "<text>"` — score finance text with the Loughran-McDonald method.

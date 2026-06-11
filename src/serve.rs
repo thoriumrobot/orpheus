@@ -421,16 +421,76 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
         },
         // Compile a module's source into the running system and persist it to disk if possible.
         // This is the GUI's edit -> compile -> run loop applied to the system's own modules.
+        // ---- TEXTS: the user's documents-with-objects, saved under <root>/text/ ----
+        // A text is markdown whose ```tool <command>``` fences record embedded
+        // dynamic objects; the GUI re-runs each command on load to rehydrate them.
+        ("GET", "/api/texts") => {
+            let mut names: Vec<String> = Vec::new();
+            if let Some(dir) = text_dir(root) {
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    for e in rd.flatten() {
+                        if let Some(n) = e.file_name().to_str() {
+                            if let Some(stem) = n.strip_suffix(".md") {
+                                names.push(stem.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            names.sort();
+            simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())
+        }
+        ("GET", "/api/text") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let p = text_dir(root).map(|d| d.join(format!("{}.md", name)));
+                match p.and_then(|p| std::fs::read_to_string(p).ok()) {
+                    Some(t) => simple(200, "text/plain; charset=utf-8", t.into_bytes()),
+                    None => simple(404, "text/plain; charset=utf-8", b"no such text".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        ("POST", "/api/text") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
+            Some(name) => {
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                match text_dir(root) {
+                    Some(dir) => {
+                        let _ = std::fs::create_dir_all(&dir);
+                        match std::fs::write(dir.join(format!("{}.md", name)), body.as_bytes()) {
+                            Ok(_) => simple(200, "text/plain; charset=utf-8", b"saved".to_vec()),
+                            Err(e) => simple(500, "text/plain; charset=utf-8", format!("save failed: {}", e).into_bytes()),
+                        }
+                    }
+                    None => simple(500, "text/plain; charset=utf-8", b"no text dir".to_vec()),
+                }
+            }
+            None => simple(400, "text/plain; charset=utf-8", b"bad name".to_vec()),
+        },
+        // format a Latte source (conservative, compile-checked); body in, body out
+        ("POST", "/api/fmt") => {
+            let body = String::from_utf8_lossy(&req.body);
+            simple(200, "text/plain; charset=utf-8", crate::latte::format_source(&body).into_bytes())
+        }
         ("POST", "/api/source") => {
             let body = String::from_utf8_lossy(&req.body).into_owned();
             match crate::latte::compile_and_register(&body) {
                 Ok(mut msg) => {
-                    // best-effort persist to <libdir>/NAME.lat (does not affect the live load)
+                    // persist: SYSTEM libraries (names shipped in lib/) write back to
+                    // lib/<name>.lat; everything else is a USER PACKAGE -> pkg/<name>.lat
                     if let Some(name) = find_core_name(&body) {
-                        if let Some(p) = lib_dir(root).map(|d| d.join(format!("{}.lat", name))) {
-                            match std::fs::write(&p, body.as_bytes()) {
-                                Ok(_) => msg.push_str(" — saved to disk"),
-                                Err(_) => msg.push_str(" — (in-memory only; library dir not writable)"),
+                        let is_system = crate::latte::builtin_lib_names().contains(&name)
+                            || lib_dir(root).map(|d| d.join(format!("{}.lat", name)).exists()).unwrap_or(false);
+                        if is_system {
+                            if let Some(p) = lib_dir(root).map(|d| d.join(format!("{}.lat", name))) {
+                                match std::fs::write(&p, body.as_bytes()) {
+                                    Ok(_) => msg.push_str(" — saved to lib/ (a system library)"),
+                                    Err(_) => msg.push_str(" — (in-memory only; library dir not writable)"),
+                                }
+                            }
+                        } else {
+                            match crate::latte::store_package(&body) {
+                                Ok(p) => msg.push_str(&format!(" — stored as package {}", p.display())),
+                                Err(_) => msg.push_str(" — (in-memory only; pkg dir not writable)"),
                             }
                         }
                     }
@@ -491,6 +551,17 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
         // economic planning: body = "iters demand_steel demand_grain" (demand in thousandths)
         ("POST", "/api/plan") => {
             let body = String::from_utf8_lossy(&req.body);
+            // a body containing `sector` lines is a CUSTOM ECONOMY spec (the full
+            // TNS pipeline: values, gross outputs, market steering, harmony);
+            // `demo3` runs the built-in 3-sector demo; otherwise the classic
+            // two-sector form "iters demand_steel demand_grain".
+            if body.contains("sector ") || body.trim() == "demo3" {
+                let spec = if body.trim() == "demo3" { crate::plan::demo_spec().to_string() } else { body.into_owned() };
+                let out = crate::plan::parse_economy(&spec)
+                    .and_then(|eco| crate::plan::plan_report_custom(&eco, 60))
+                    .unwrap_or_else(|e| format!("plan: {}", e));
+                return simple(200, "text/plain; charset=utf-8", out.into_bytes());
+            }
             let nums: Vec<u128> = body.split_whitespace().filter_map(|t| t.parse().ok()).collect();
             let iters = nums.first().copied().unwrap_or(60) as u64;
             let ds = nums.get(1).copied().unwrap_or(0);
@@ -639,6 +710,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let mut sentiment: Option<f64> = None;
             let mut live = false;
             let mut news_text: Option<String> = None;
+            let mut market = String::from("btc");
             let mut in_news = false;
             let mut news_buf = String::new();
             for line in body.lines() {
@@ -653,6 +725,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                     (Some("kelly"), Some(v)) => kelly = v.trim().parse().unwrap_or(kelly),
                     (Some("sentiment"), Some(v)) => sentiment = v.trim().parse().ok(),
                     (Some("live"), Some(v)) => live = v.trim() == "1" || v.trim() == "true",
+                    (Some("market"), Some(v)) => market = v.trim().to_lowercase(),
                     (Some("news"), _) => in_news = true, // the rest of the body is headlines
                     _ => {}
                 }
@@ -660,7 +733,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             if !news_buf.trim().is_empty() {
                 news_text = Some(news_buf);
             }
-            let html = match crate::numerics::trade_advice(account, kelly, sentiment, live, news_text.as_deref()) {
+            let html = match crate::numerics::trade_advice_market(&market, account, kelly, sentiment, live, news_text.as_deref()) {
                 Ok(a) => {
                     let mut ta = String::from("<table class='m'><tr><td><b>indicator</b></td><td><b>value</b></td><td><b>vote</b></td></tr>");
                     for r in &a.ta_rows {
@@ -695,7 +768,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                          <tr><td>combined lean</td><td><b>{:+.2}</b> = 0.6&middot;TA {:+.2} + 0.4&middot;news {:+.2} &rarr; {}</td></tr>\
                          <tr><td>realized vol/day</td><td>{:.2}% (target {:.2}%) &mdash; predicted {}-vol regime</td></tr>\
                          <tr><td>momentum hit rate</td><td>{:.1}% out-of-sample</td></tr>\
-                         <tr><td>volatility model</td><td>{:.1}% test accuracy (the dependable edge)</td></tr>\
+                         <tr><td>volatility model</td><td>{:.1}% test vs {:.1}% baseline ({})</td></tr>\
                          <tr><td>full / fractional Kelly</td><td>{:+.3} / {:.3}</td></tr>\
                          <tr><td><b>advice</b></td><td><b>{}</b></td></tr>{}\
                          </table>\
@@ -706,7 +779,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                         a.market, a.last_price, html_escape(&a.data_note), a.span.0, a.span.1,
                         a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction,
                         a.realized_vol, a.target_vol, a.vol_regime,
-                        a.dir_hitrate, a.model_acc, a.kelly_full, a.kelly_used, html_escape(&a.action),
+                        a.dir_hitrate, a.model_acc, a.model_base, if a.model_acc > a.model_base { "a real edge" } else { "NO edge here" }, a.kelly_full, a.kelly_used, html_escape(&a.action),
                         if a.exposure > 0.0 { format!("<tr><td>notional</td><td>${:.0} of ${:.0}</td></tr>", a.dollars, a.account) } else { String::new() }
                     )
                 }
@@ -719,21 +792,26 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let body = String::from_utf8_lossy(&req.body);
             let mut live = false;
             let mut win = 120usize;
+            let mut market = String::from("btc");
             for line in body.lines() {
                 let mut it = line.splitn(2, '=');
                 match (it.next(), it.next()) {
                     (Some("live"), Some(v)) => live = v.trim() == "1" || v.trim() == "true",
                     (Some("win"), Some(v)) => win = v.trim().parse().unwrap_or(win),
+                    (Some("market"), Some(v)) => market = v.trim().to_lowercase(),
                     _ => {}
                 }
             }
-            let (closes, span, note) = crate::marketdata::closes(live);
+            let (closes, span, note) = match crate::marketdata::closes_market(&market, live) {
+                Ok(t) => t,
+                Err(e) => return simple(200, "text/html; charset=utf-8", format!("<p class='note'>{}</p>", html_escape(&e)).into_bytes()),
+            };
             let html = match crate::numerics::ta_votes(&closes, win) {
                 Ok((rows, score)) => {
                     let mut t = format!(
                         "<p class='note'>{} &mdash; last ${:.0} &mdash; {} ({} .. {}), window {} days</p>\
                          <table class='m'><tr><td><b>indicator</b></td><td><b>value</b></td><td><b>vote</b></td></tr>",
-                        crate::marketdata::MARKET_NAME,
+                        crate::marketdata::market_label(&market),
                         *closes.last().unwrap_or(&0) as f64 / 100.0,
                         html_escape(&note), span.0, span.1, win
                     );
@@ -762,15 +840,17 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let body = String::from_utf8_lossy(&req.body);
             let mut live = false;
             let mut days = 180usize;
+            let mut market = String::from("btc");
             for line in body.lines() {
                 let mut it = line.splitn(2, '=');
                 match (it.next(), it.next()) {
                     (Some("live"), Some(v)) => live = v.trim() == "1" || v.trim() == "true",
                     (Some("days"), Some(v)) => days = v.trim().parse().unwrap_or(days).clamp(20, 2000),
+                    (Some("market"), Some(v)) => market = v.trim().to_lowercase(),
                     _ => {}
                 }
             }
-            let svg = crate::viz::market_chart(days, live);
+            let svg = crate::viz::market_chart_sym(&market, days, live);
             simple(200, "image/svg+xml; charset=utf-8", svg.into_bytes())
         }
         // the Latte ray tracer: body lines `w=N` `h=N` -> SVG raster + engine caption
@@ -1158,6 +1238,16 @@ fn lib_dir(root: &str) -> Option<std::path::PathBuf> {
 }
 
 /// The documentation directory (`docs/`), a sibling of the library directory.
+/// The user-text directory: <root>/../text (a sibling of lib/site), i.e. the
+/// distribution's text/ folder — documents with embedded objects live here.
+fn text_dir(root: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(root).parent().and_then(|p| p.parent()).map(|p| p.join("text"));
+    match p {
+        Some(d) if !d.as_os_str().is_empty() => Some(d),
+        _ => Some(std::path::PathBuf::from("text")),
+    }
+}
+
 fn docs_dir(root: &str) -> std::path::PathBuf {
     let p = std::path::Path::new(root)
         .parent()

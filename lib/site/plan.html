@@ -46,4 +46,29 @@ function compute(){
 }
 window.addEventListener('load', compute);
 </script>
+
+<div style="max-width:860px;margin:18px auto;padding:14px;border:1px solid #b9b4a2;border-radius:4px;background:#faf8f1">
+  <h3 style="margin:2px 0 8px;font-size:14px">A custom economy (Towards a New Socialism, full pipeline)</h3>
+  <p style="font-size:12px;color:#555;margin:4px 0 8px">
+    <code>sector NAME l=&lt;labour&gt; [GOOD=coef …]</code> per sector ·
+    <code>demand GOOD=qty …</code> ·
+    optional <code>market GOOD=price …</code> (clearing prices steer the plan) ·
+    optional <code>labour BUDGET</code> (harmony balancing when it binds).</p>
+  <textarea id="spec" spellcheck="false" style="width:100%;height:150px;font:13px ui-monospace,Menlo,monospace;padding:8px;border:1px solid #8e8a7a;border-radius:3px;background:#fff">sector steel  l=0.4  steel=0.2 grain=0.1
+sector grain  l=0.3  steel=0.5 grain=0.1
+sector bread  l=0.2  grain=0.6
+demand steel=0 grain=1.0 bread=2.0
+market steel=0.9 grain=1.6 bread=0.8
+labour 1.2</textarea>
+  <div style="margin-top:8px"><button onclick="planSpec()" style="font:13px inherit;padding:6px 16px;cursor:pointer">Plan this economy</button></div>
+  <pre id="specout" style="white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,monospace;background:#fdfcf7;border:1px solid #d6d1bf;border-radius:3px;padding:10px;margin-top:10px;display:none"></pre>
+</div>
+<script>
+function planSpec(){
+  var o=document.getElementById('specout');
+  o.style.display='block'; o.textContent='… planning';
+  fetch('/api/plan',{method:'POST',headers:{'Content-Type':'text/plain'},body:document.getElementById('spec').value})
+    .then(function(r){return r.text();}).then(function(t){ o.textContent=t; });
+}
+</script>
 </body></html>

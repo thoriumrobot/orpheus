@@ -63,4 +63,84 @@ core plan
               if (k == iters) then x
               else again((vadd y (matvec x at)), +(k))
             end
+
+  :: ---- consumer-goods market clearing (TNS ch. 8) --------------------------
+  :: Goods are sold for labour tokens at whatever price clears the market. The
+  :: ratio of market-clearing price to labour value then STEERS the plan: where
+  :: p/v > 1 consumers value the good above its labour cost, so its target
+  :: expands; where p/v < 1 it contracts. One steering step multiplies each
+  :: final-demand entry by its ratio, clamped to [1/2, 2] per period so the
+  :: plan adjusts smoothly rather than oscillating.
+  ratio1 = fn [p v] -> if (v == 0) then 1000 else (div (mul p 1000) v)
+  clamp2 = fn [r] -> if (lt r 500) then 500 else if (lt 2000 r) then 2000 else r
+  ratios = fn [prices values] ->
+             loop with [p = prices, v = values, acc = 0] :
+               if (p == 0) then (reverse acc)
+               else again((tail p), (tail v), [ (ratio1 (head p) (head v)) acc ])
+             end
+  steer = fn [demand prices values] ->
+            loop with [y = demand, r = (ratios prices values), acc = 0] :
+              if (y == 0) then (reverse acc)
+              else again((tail y), (tail r), [ (div (mul (head y) (clamp2 (head r))) 1000) acc ])
+            end
+
+  :: ---- harmony-function plan balancing (TNS pp. 94-99) ----------------------
+  :: When the labour budget L cannot meet every target, allocate it to maximize
+  :: total HARMONY  Σ h(r_i)  with  h(r) = 1 - (1-r)²  (concave: the first units
+  :: toward a target matter most), where r_i = fulfilment of target i and the
+  :: labour to fulfil target i completely is  cost_i = v_i·y_i. The marginal
+  :: harmony per unit of labour is  2(1-r_i)/cost_i ; the optimum equalizes
+  :: marginals, so the algorithm repeatedly moves a small parcel of labour from
+  :: the lowest-marginal good to the highest — Cockshott's marginalist method,
+  :: with the harmony function standing as a social utility function.
+  fulfil = fn [li cost] -> if (cost == 0) then 1000 else let r = (div (mul li 1000) cost) in if (lt 1000 r) then 1000 else r
+  marg1  = fn [li cost] -> if (cost == 0) then 0 else (div (mul (sub 1000 (fulfil li cost)) 2000000) cost)
+  margs  = fn [ls costs] ->
+             loop with [l = ls, c = costs, acc = 0] :
+               if (l == 0) then (reverse acc)
+               else again((tail l), (tail c), [ (marg1 (head l) (head c)) acc ])
+             end
+  idxmax = fn [xs] ->
+             loop with [c = xs, i = 0, bi = 0, bv = 0] :
+               if (c == 0) then bi
+               else if (lt bv (head c)) then again((tail c), +(i), i, (head c))
+               else again((tail c), +(i), bi, bv)
+             end
+  :: index of the smallest marginal among goods that still hold ≥ delta labour
+  idxmin = fn [xs ls delta] ->
+             loop with [c = xs, l = ls, i = 0, bi = 0, bv = 4000000000] :
+               if (c == 0) then bi
+               else if (lt (head c) bv) then
+                 if (lt (head l) delta) then again((tail c), (tail l), +(i), bi, bv)
+                 else again((tail c), (tail l), +(i), i, (head c))
+               else again((tail c), (tail l), +(i), bi, bv)
+             end
+  setn = fn [xs i v] ->
+           loop with [c = xs, k = 0, acc = 0] :
+             if (c == 0) then (reverse acc)
+             else again((tail c), +(k), [ (if (k == i) then v else (head c)) acc ])
+           end
+  :: allocate labour budget L (scaled) over targets with embodied costs `costs`,
+  :: starting pro-rata, transferring parcels of L/200 for `iters` rounds
+  harmony_alloc = fn [costs L iters] ->
+    let total = (foldl (fn [a c] -> (add a c)) 0 costs) in
+    let init = (map (fn [c] -> if (total == 0) then 0 else (div (mul c L) total)) costs) in
+    let delta = (div L 200) in
+    loop with [ls = init, k = 0] :
+      if (k == iters) then ls
+      else
+        let m = (margs ls costs) in
+        let hi = (idxmax m) in
+        let lo = (idxmin m ls delta) in
+        if (hi == lo) then ls
+        else again((setn (setn ls lo (sub (nth ls lo) delta)) hi (add (nth ls hi) delta)), +(k))
+    end
+  :: the harmony actually achieved by an allocation:  Σ 1 - (1-r)²   (scaled)
+  harmony = fn [ls costs] ->
+    loop with [l = ls, c = costs, acc = 0] :
+      if (l == 0) then acc
+      else
+        let u = (sub 1000 (fulfil (head l) (head c))) in
+        again((tail l), (tail c), (add acc (sub 1000 (div (mul u u) 1000))))
+    end
 end

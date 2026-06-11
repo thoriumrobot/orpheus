@@ -179,18 +179,27 @@ latte net --par 4 "<expr>"            # the batch-claimed PARALLEL reducer (a ve
 latte repl                            # interactive
 
 # market tools — all run on REAL data; --live refreshes it from Coin Metrics
-latte fetch                           # refresh + cache the daily close series
-latte ta [--live] [--win N]           # technical analysis (lib/ta.lat, on Loom)
-latte trade [--live] [--news FILE] [--account N] [--kelly F] [--sentiment S]
+latte fetch                           # refresh + cache the BTC daily close series
+latte fetch --market eth              # any Coin Metrics market (eth ltc xrp ada doge sol …)
+latte fetch --all                     # all the curated markets at once
+latte fetch --news <url>              # curl a document into the news/ ADVICE STREAM
+latte ta [--live] [--win N] [--market SYM]    # technical analysis (lib/ta.lat, on Loom)
+latte trade [--live] [--news FILE] [--market SYM] [--account N] [--kelly F] [--sentiment S]
+                                      # the advisor; --market trains + registry-caches that
+                                      # market's volatility model (HONEST edge-vs-baseline);
+                                      # documents in news/ are scored whole and blended in
 latte sentiment "<headline text>"     # trained classifier + LM lexicon + fused score
 latte sentiment --file report.txt     # score a whole DOCUMENT, sentence by sentence
 latte sentiment --doc <name>          # score docs/<name>.md the same way
-latte chart market [--live] [--days N] > market.svg
+latte chart market [--live] [--days N] > market.svg     # real dates on the axis
 latte chart bar 3 1 4 1 5             # bar | line | scatter (layout in lib/plot.lat)
 
 # models and graphics
-latte nn [--epochs N]                 # MLP backprop demo + a seeded transformer block
-latte fin gold                        # the financial-ML pipeline
+latte nn [--epochs N]                 # autodiff-trained stacks + transformer + SSM blocks
+latte fin [--direction] [--iters N]   # the financial-ML pipeline (+ Sharpe/maxDD/turnover
+                                      #   net of 5bp costs on the direction task)
+latte plan [--demo3 | --spec FILE]    # Towards a New Socialism: values, gross outputs,
+                                      #   market steering, harmony balancing (docs/planning.md)
 latte gfx > scene.svg                 # the gfx demo scene (lib/gfx.lat)
 latte trace --w 160 --h 120 > rt.svg  # the RAY TRACER written in Latte (Anvil-compiled)
 
@@ -200,13 +209,16 @@ latte evolve saules bazdā                     # Solar -> Heart Speech
 latte sca kasa k>g s>z/a_a                    # ad-hoc rules
 
 # the system
-latte serve                           # the Oberon-style GUI (resizable frames,
-                                      # embedded objects, Latte-designed panels)
+latte serve                           # the Oberon-style GUI (texts with embedded
+                                      # objects, parallel tools — docs/the-system.md)
+latte fmt <file.lat> [--write]        # the conservative, compile-checked formatter
+latte pkg                             # list system libraries and user packages
 ```
 
-In the GUI: `/` is the System (drag the bars between frames to resize; `gfx`, `chart`, `ta`,
-`trade` embed objects in the Log; `ui Tool.calc` opens a graphical front end whose buttons call
-Latte arms; `net <expr>` runs the interaction-net engine with an interpreter audit), `/docs` is
+In the GUI: `/` is the System — **texts with embedded objects** (run a `chart`/`trace`/`trade`
+line inside a text and the output embeds right there; texts Store to `text/*.md` with their
+objects and rehydrate on load; the header links open editable TOOL TEXTS; see
+**docs/the-system.md** for the full tour), `/docs` is
 the manual shelf (every document editable in place; **＋ New** creates one, with live
 `` ```chart `` figures), `/editor` is the WYSIWYG page editor (find & replace, Ctrl/⌘+S, status
 bar), `/derive` derives Ligurian live (PIE → Solar → Heart, plus the vocabulary generator), and

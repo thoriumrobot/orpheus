@@ -27,6 +27,7 @@ mod mocha;
 mod plan;
 mod jets;
 mod numerics;
+mod dates;
 mod marketdata;
 mod viz;
 mod gfx;
@@ -57,7 +58,9 @@ fn cmd_net(args: &[String]) {
         if a == "--peano" || a == "--unary" {
             peano = true;
         } else if a == "--par" || a == "--threads" {
-            par = args.get(i + 1).and_then(|v| v.parse().ok()).or(Some(4));
+            // default thread count = the machine's parallelism
+            let auto = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            par = args.get(i + 1).and_then(|v| v.parse().ok()).or(Some(auto));
             skip = args.get(i + 1).map(|v| v.parse::<usize>().is_ok()).unwrap_or(false);
         } else {
             rest.push(a.clone());
@@ -71,10 +74,12 @@ fn cmd_net(args: &[String]) {
         return;
     }
     if par.is_some() {
-        eprintln!("note: --par demonstrates batch-claimed parallel rewriting (verified equivalent");
-        eprintln!("to the sequential engine by uniform confluence). It is a correctness demo, not");
-        eprintln!("an optimized runtime: HVM2-class throughput needs lock-free linking and redex");
-        eprintln!("bags (see docs/interaction-nets.md), and this machine reports {} CPU(s).", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+        eprintln!("note: the DEFAULT engine is the best-measured policy on every machine we have");
+        eprintln!("profiled — sequential reduction over native number agents. --par opts into the");
+        eprintln!("batch-claimed parallel reducer: verified equivalent by uniform confluence, but");
+        eprintln!("a correctness demonstration, not an optimized runtime (HVM2-class throughput");
+        eprintln!("needs lock-free linking; see docs/interaction-nets.md). This machine: {} CPU(s).",
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     }
     let res = if let Some(t) = par {
         icomb::run_str_parallel(&src, t)
@@ -225,6 +230,9 @@ fn cmd_rustc(args: &[String]) {
 }
 
 fn main() {
+    // the user package space: ./pkg next to the binary's working directory
+    latte::set_pkg_dir(std::path::PathBuf::from("pkg"));
+    let _ = latte::load_packages();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Starting Orpheus with no command launches the GUI (Hymn + console + editor).
     if args.is_empty() {
@@ -262,8 +270,55 @@ fn main() {
         "nn" => numerics::cmd_nn(&args[1..]),
         "fin" => numerics::cmd_fin(&args[1..]),
         "trade" | "advisor" => numerics::cmd_trade(&args[1..]),
-        "fetch" => numerics::cmd_fetch(),
+        "fetch" => numerics::cmd_fetch(&args[1..]),
         "ta" | "indicators" => numerics::cmd_ta(&args[1..]),
+        "fmt" | "format" => {
+            // `latte fmt <file> [--write]` — format a Latte source (stdout, or in place)
+            let write = args.iter().any(|a| a == "--write" || a == "-w");
+            match args.get(1).filter(|a| !a.starts_with('-')) {
+                Some(path) => match std::fs::read_to_string(path) {
+                    Ok(src) => {
+                        let f = latte::format_source(&src);
+                        if write {
+                            if f != src {
+                                std::fs::write(path, f.as_bytes()).expect("write");
+                                println!("formatted {}", path);
+                            } else {
+                                println!("{} already formatted", path);
+                            }
+                        } else {
+                            print!("{}", f);
+                        }
+                    }
+                    Err(e) => eprintln!("fmt: {}: {}", path, e),
+                },
+                None => eprintln!("usage: latte fmt <file.lat> [--write]"),
+            }
+        }
+        "pkg" | "packages" => {
+            // the package inventory: system libraries (lib/) vs user packages (pkg/)
+            println!("packages — a package is a Latte source whose `core NAME` names it;");
+            println!("compile one in the GUI (Compiler.Compile) and it is immediately part of");
+            println!("the system; Store persists user modules to pkg/<name>.lat, which load");
+            println!("automatically at startup.\n");
+            println!("  system libraries (built in, sources in lib/):");
+            let mut names = latte::all_libs();
+            names.sort();
+            names.dedup();
+            let runtime = latte::runtime_lib_names();
+            for n in &names {
+                if !runtime.contains(n) {
+                    print!("    {}", n);
+                }
+            }
+            println!("\n\n  user packages (pkg/{{name}}.lat, loaded at startup):");
+            if runtime.is_empty() {
+                println!("    (none — Store a module from the GUI, or drop a .lat file in pkg/)");
+            }
+            for n in &runtime {
+                println!("    {}  (pkg/{}.lat)", n, n);
+            }
+        }
         "trace" | "raytrace" => viz::cmd_trace(&args[1..]),
         "sentiment" | "news" => numerics::cmd_sentiment(&args[1..]),
         "gfx" | "draw" => numerics::cmd_gfx(&args[1..]),
