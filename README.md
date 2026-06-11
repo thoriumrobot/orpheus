@@ -407,8 +407,12 @@ rulesets as ordinary `.sca` files plus phonologies as `.phon` files that any
 tool can parse; the Draw editor designs covers and posters (canvas presets,
 backgrounds, font control, stars, snap, centering). Tool texts and System.Tool
 persist your stored versions across runs, and every command's output — your
-own packages' arms included — embeds as an object in texts, so **new tools are
-creatable wholly inside the GUI** (the recipe is in docs/the-system.md).
+own packages' arms included — embeds as an object in texts. Texts also embed
+live **buttons and fields** (`[Label](run: cmd)`, `[field: name=value]`, with
+`$name` substitution) — the shipped tool texts are working panels in the ETH
+Oberon style, documents render formatted by default (Syntax opens the raw
+markdown), and System.Tool carries the live documentation index. **New tools
+are creatable wholly inside the GUI** (the recipe is in docs/the-system.md).
 
 ## The GUI — a WYSIWYG Facet editor
 

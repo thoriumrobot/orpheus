@@ -104,7 +104,7 @@
 Stored drawings embed in System texts with the <b>drawing &lt;name&gt;</b> command — a tool calling a tool.</div>
 <script>
 "use strict";
-var svg=document.getElementById('canvas'), tool='rect', drawing=null, selected=null, history=[];
+var svg=document.getElementById('canvas'), tool='rect', drawing=null, selected=null, hist=[];
 var fillI=document.getElementById('fill'), strokeI=document.getElementById('stroke'),
     widthI=document.getElementById('width'), opI=document.getElementById('opacity');
 function setTool(t){
@@ -167,8 +167,8 @@ function styled(el){
             opacity: (opI.value/100), 'stroke-linecap':'round', 'stroke-linejoin':'round'});
   return el;
 }
-function snapshot(){ history.push(svg.innerHTML); if(history.length>80) history.shift(); }
-function undo(){ if(history.length){ select(null); svg.innerHTML=history.pop(); rebind(); } }
+function snapshot(){ hist.push(svg.innerHTML); if(hist.length>80) hist.shift(); }
+function undo(){ if(hist.length){ select(null); svg.innerHTML=hist.pop(); rebind(); } }
 function rebind(){ Array.prototype.forEach.call(svg.children, function(c){ if(c.id!=='bgrect' && !c.classList.contains('sel-outline') && !c.classList.contains('handle')) bindShape(c); }); }
 
 /* ---- creation ---- */
@@ -188,7 +188,7 @@ svg.addEventListener('mousedown', function(e){
     drawing.dataset.cx=p.x; drawing.dataset.cy=p.y;
   }
   else if(tool==='text'){
-    var t=prompt('Text:'); if(!t){ history.pop(); return; }
+    var t=prompt('Text:'); if(!t){ hist.pop(); return; }
     var n=styled(attrs(mk('text'),{x:p.x,y:p.y,
       'font-size':document.getElementById('fsize').value,
       'font-family':document.getElementById('font').value}));

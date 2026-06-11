@@ -63,6 +63,19 @@
  .richtext b{color:#1c1c30}
  .richtext code{background:#efecdd;border:1px solid #ddd8c4;border-radius:3px;padding:0 4px;font-size:12px}
  .richtext .cmdline{color:var(--cmd)}
+ .richtext .h3{font-size:13px;font-weight:700;color:#44486e;margin:4px 0 1px}
+ .richtext .li{padding-left:14px}
+ .richtext .fence{background:#1c1c26;color:#d8d8e8;font-size:12px;padding:0 10px;white-space:pre}
+ .richtext .fence:first-of-type{border-radius:4px 4px 0 0}
+ .richtext .tbl{background:#f3f0e3;font-size:12px;white-space:pre}
+ .richtext .quote{border-left:3px solid #c9c4b4;padding-left:10px;color:#56533f}
+ .richtext button.runbtn{font:12px inherit;border:1px solid #6e6a8e;border-radius:3px;cursor:pointer;
+   padding:2px 11px;margin:1px 3px 1px 0;background:linear-gradient(#f2efe4,#e2ddc9);color:#1d2a6e;
+   box-shadow:0 1px 2px #00000022;vertical-align:baseline}
+ .richtext button.runbtn:hover{background:linear-gradient(#fff,#ece8d8);box-shadow:0 1px 3px #00000033}
+ .richtext button.runbtn:active{transform:translateY(1px);box-shadow:none}
+ .richtext input.runfld{font:12px inherit;border:1px solid #8e8a7a;border-radius:3px;padding:1px 6px;
+   margin:0 3px;background:#fff;color:#22222e;width:86px;vertical-align:baseline}
  .richtext .obj{margin:7px 0 9px 14px;padding:6px;border:1px solid #cdc7b4;border-radius:3px;
                 background:var(--obj);display:block;max-width:calc(100% - 28px);overflow:auto;
                 box-shadow:0 1px 2px #00000014;user-select:none;white-space:normal}
@@ -257,6 +270,14 @@ function execText(v, lineText){
    serializes to markdown (```tool <cmd>``` fences) and rehydrates on load. */
 function wireRichText(rt, v){
   rt.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
+  rt.addEventListener('click', function(e){
+    var b=e.target.closest ? e.target.closest('button.runbtn') : null;
+    if(!b) return;
+    e.preventDefault();
+    var line=lineNodeAt(rt, b);
+    var cmd=substFields(rt, b.dataset.cmd||'');
+    if(line && cmd){ mark(v); exec(cmd, v, {textViewer:v, afterNode:line}); }
+  });
   rt.addEventListener('auxclick', function(e){
     if(e.button!==1) return;
     e.preventDefault();
@@ -281,6 +302,13 @@ function wireRichText(rt, v){
       }
     }
   });
+}
+/* $name in a button's command takes the value of the [field: name=…] inputs
+   anywhere in the same text — the panel's wiring, declared in plain text */
+function substFields(rt, cmd){
+  var vals={};
+  rt.querySelectorAll('input.runfld').forEach(function(f){ vals[f.dataset.name]=f.value.trim(); });
+  return cmd.replace(/\$([A-Za-z0-9_]+)/g, function(_,n){ return (n in vals)?vals[n]:('$'+n); });
 }
 function closestObj(rt, n){
   while(n && n!==rt){ if(n.classList && n.classList.contains('obj')) return n; n=n.parentNode; }
@@ -324,11 +352,26 @@ function insertObjAt(v, afterNode, cmd, html){
 /* a line of md -> a DOM line: # / ## headings, **bold**, *italic*, `code`. The
    raw syntax is reachable through Edit.Syntax (a linked source view). */
 function parseInline(text, into){
-  var re=/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g, last=0, m;
+  // inline elements, ETH-Oberon style: [Label](run: cmd) is an EMBEDDED
+  // BUTTON that executes its command in place; [field: name=value] is an
+  // EMBEDDED INPUT whose value buttons reference as $name
+  var re=/(\[[^\]]+\]\(run:\s*[^)]+\)|\[field:\s*[^\]]+\]|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g, last=0, m;
   while((m=re.exec(text))){
     if(m.index>last) into.appendChild(document.createTextNode(text.slice(last,m.index)));
-    var t=m[0];
-    if(t.charAt(0)==='`'){ var c=el('code',null,t.slice(1,-1)); into.appendChild(c); }
+    var t=m[0], bm, fm;
+    if((bm=t.match(/^\[([^\]]+)\]\(run:\s*([^)]+)\)$/))){
+      var b=el('button','runbtn',bm[1]);
+      b.contentEditable='false';
+      b.dataset.cmd=bm[2].trim();
+      b.title=bm[2].trim();
+      into.appendChild(b);
+    } else if((fm=t.match(/^\[field:\s*([A-Za-z0-9_]+)=([^\]]*)\]$/))){
+      var f=document.createElement('input');
+      f.className='runfld'; f.dataset.name=fm[1]; f.value=fm[2];
+      f.contentEditable='false';
+      into.appendChild(f);
+    }
+    else if(t.charAt(0)==='`'){ var c=el('code',null,t.slice(1,-1)); into.appendChild(c); }
     else if(t.slice(0,2)==='**'){ into.appendChild(el('b',null,t.slice(2,-2))); }
     else { into.appendChild(el('i',null,t.slice(1,-1))); }
     last=m.index+t.length;
@@ -337,8 +380,12 @@ function parseInline(text, into){
 }
 function renderLine(text){
   var d;
-  if(/^##\s+/.test(text)){ d=el('div','h2'); parseInline(text.replace(/^##\s+/,''), d); }
+  if(/^###+\s+/.test(text)){ d=el('div','h3'); parseInline(text.replace(/^###+\s+/,''), d); }
+  else if(/^##\s+/.test(text)){ d=el('div','h2'); parseInline(text.replace(/^##\s+/,''), d); }
   else if(/^#\s+/.test(text)){ d=el('div','h1'); parseInline(text.replace(/^#\s+/,''), d); }
+  else if(/^\s*[-*]\s+/.test(text)){ d=el('div','li'); parseInline(text.replace(/^(\s*)[-*]\s+/,'$1\u2022 '), d); }
+  else if(/^>\s?/.test(text)){ d=el('div','quote'); parseInline(text.replace(/^>\s?/,''), d); }
+  else if(/^\|/.test(text)){ d=el('div','tbl',text); }
   else if(text===''){ d=el('div',null,'\u200b'); }
   else { d=el('div'); parseInline(text, d); if(looksLikeCommand(text)) d.classList.add('cmdline'); }
   return d;
@@ -348,20 +395,35 @@ function looksLikeCommand(t){
 }
 /* serialize ONE rendered line back to markdown */
 function lineToMarkdown(node){
+  if(node.classList&&(node.classList.contains('fence')||node.classList.contains('tbl'))){
+    return (node.textContent||'').replace(/\u200b/g,''); // verbatim lines
+  }
+  if(node.classList&&node.classList.contains('li')){
+    return (node.textContent||'').replace(/\u2022 /,'- ').replace(/\u200b/g,'');
+  }
+  if(node.classList&&node.classList.contains('quote')){
+    var t=lineInline(node); return '> '+t;
+  }
   var prefix = node.classList&&node.classList.contains('h1') ? '# '
-             : node.classList&&node.classList.contains('h2') ? '## ' : '';
+             : node.classList&&node.classList.contains('h2') ? '## '
+             : node.classList&&node.classList.contains('h3') ? '### ' : '';
+  return prefix + lineInline(node);
+}
+function lineInline(node){
   var out='';
   (function walk(n){
     n.childNodes.forEach(function(c){
       if(c.nodeType===3){ out+=c.textContent; return; }
       var tag=(c.tagName||'').toLowerCase();
-      if(tag==='b'||tag==='strong'){ out+='**'; walk(c); out+='**'; }
+      if(tag==='button' && c.classList.contains('runbtn')){ out+='['+c.textContent+'](run: '+(c.dataset.cmd||'')+')'; }
+      else if(tag==='input' && c.classList.contains('runfld')){ out+='[field: '+(c.dataset.name||'x')+'='+(c.value||'')+']'; }
+      else if(tag==='b'||tag==='strong'){ out+='**'; walk(c); out+='**'; }
       else if(tag==='i'||tag==='em'){ out+='*'; walk(c); out+='*'; }
       else if(tag==='code'){ out+='`'; walk(c); out+='`'; }
       else walk(c);
     });
   })(node);
-  return prefix + out.replace(/\u200b/g,'');
+  return out.replace(/\u200b/g,'');
 }
 
 /* serialize a text frame to markdown: objects become ```tool <cmd>``` fences */
@@ -382,7 +444,15 @@ function setTextContent(v, md){
   v.rich.innerHTML='';
   var lines = md.replace(/\n$/,'').split('\n');
   var i=0;
+  var inFence=false;
   while(i<lines.length){
+    if(inFence || /^```(?!tool )/.test(lines[i])){
+      var f=el('div','fence', lines[i]===''?'\u200b':lines[i]);
+      v.rich.appendChild(f);
+      if(/^```/.test(lines[i])) inFence=!inFence;
+      i++;
+      continue;
+    }
     var m = lines[i].match(/^```tool (.+)$/);
     if(m){
       var cmd=m[1].trim();
@@ -531,16 +601,20 @@ function runInto(name, line, fire){
 
 /* ---- documents as frames ---------------------------------------------------- */
 function openDoc(name){
+  // documents open RENDERED (headings, emphasis, fences, bullets — the
+  // formatted view); Edit.Syntax in the menu shows the raw markdown
   fetch('/api/doc?name='+encodeURIComponent(name)).then(function(r){return r.text();}).then(function(md){
-    var v = makeViewer({name:name+'.md', track:'user', kind:'frame', content:md, menu:docMenu,
-      foot:'editing docs/'+name+'.md — Edit.Save writes it back; open as many documents as you like'});
+    var v = makeViewer({name:name+'.md', track:'user', kind:'text', content:md, menu:docMenu,
+      foot:'docs/'+name+'.md, rendered — edit in place; Save writes it back; Syntax shows the raw markdown'});
     v.docname = name;
     mark(v);
   });
 }
 function saveDoc(v){
-  if(!v||!v.docname||!v.textarea){ logOut('Edit.Save: mark a document frame first', true); return; }
-  fetch('/api/doc?name='+encodeURIComponent(v.docname),{method:'POST',body:v.textarea.value})
+  if(!v||!v.docname){ logOut('Edit.Save: mark a document frame first', true); return; }
+  var body = v.kind==='text' ? textToMarkdown(v) : (v.textarea ? v.textarea.value : null);
+  if(body==null){ logOut('Edit.Save: nothing to save here', true); return; }
+  fetch('/api/doc?name='+encodeURIComponent(v.docname),{method:'POST',body:body})
     .then(function(r){return r.text();})
     .then(function(msg){ logOut(msg==='saved' ? 'saved docs/'+v.docname+'.md' : msg, msg!=='saved'); });
 }
@@ -940,6 +1014,24 @@ function newModuleViewer(name){
   mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
     foot:'a new module — Compile, then Store writes pkg/'+name+'.lat (a user package, loaded at every startup)'}));
 }
+/* System.Tool's documentation index: replace the marker line with one
+   rendered button-line per manual page (Oberon's System.Tool, but live) */
+function fillDocIndex(st){
+  fetch('/api/docs').then(function(r){return r.text();}).then(function(t){
+    var names=t.split('\n').filter(Boolean);
+    var marker=null;
+    st.rich.childNodes.forEach(function(n){
+      if((n.textContent||'').indexOf('(the index of docs/ loads here)')>=0) marker=n;
+    });
+    if(!marker) return;
+    names.forEach(function(n){
+      var line=renderLine('[\u25b8 '+n.replace(/-/g,' ')+'](run: System.Edit '+n+')');
+      st.rich.insertBefore(line, marker);
+    });
+    marker.remove();
+  });
+}
+
 /* the opening table of contents: documentation + tools, one click each */
 function buildContents(){
   var v = makeViewer({name:'Contents', track:'sys', kind:'mods', menu:[{cmd:'System.Docs',label:'All docs'}],
@@ -1001,7 +1093,10 @@ var textMenu=[
   {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var toolMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Close *',label:'Close'}];
 var outMenu=[{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
-var docMenu=[{cmd:'Edit.Save *',label:'Save'},{cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
+var docMenu=[{cmd:'Edit.Save *',label:'Save'},
+  {cmd:'Edit.Bold',label:'Bold'},{cmd:'Edit.Italic',label:'Italic'},
+  {cmd:'Edit.Syntax *',label:'Syntax'},
+  {cmd:'System.Grow *',label:'Grow'},{cmd:'System.Copy *',label:'Copy'},{cmd:'System.Close *',label:'Close'}];
 var modsMenu=[{cmd:'System.Modules',label:'Refresh'}];
 var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Grow'}];
 
@@ -1010,115 +1105,104 @@ var logMenu =[{cmd:'System.Clear',label:'Clear'},{cmd:'System.Grow *',label:'Gro
    run, and extend; outputs embed inline in the text. */
 var TOOLS = {
  Trade:
-'# Trade.Tool — the advisor: technical analysis × news sentiment × HAR-RV sizing.\n'+
-'# Middle-click a line; the report embeds below it. Edit arguments freely.\n'+
-'trade account=10000\n'+
-'trade account=10000 live=1\n'+
-'trade account=25000 kelly=0.5\n'+
-'#\n'+
-'# OTHER MARKETS: fetch once (CLI: latte fetch --market eth — or --all), then\n'+
-'# every tool takes market=…  (eth ltc xrp ada doge sol, or any Coin Metrics\n'+
-'# symbol). The volatility model trains per market and the registry records\n'+
-'# its edge HONESTLY (test vs baseline) in ~/.cache/orpheus/models/.\n'+
-'trade market=eth account=10000\n'+
-'ta market=eth\n'+
-'chart market market=eth days=180\n'+
-'#\n'+
-'ta\n'+
-'ta live=1 win=200\n'+
-'chart market days=180\n'+
-'# score text or a whole document with the trained classifier:\n'+
-'System.Sentiment etf outflows eased as the market stabilized\n'+
-'Doc.Score visualization-and-ml\n',
+'# Trade.Tool — the trading advisor\n'+
+'TA votes \u00d7 news sentiment \u00d7 HAR-RV volatility-targeted Kelly sizing. Reports embed below.\n'+
+'\n'+
+'account [field: account=10000]  kelly [field: kelly=1.0]  market [field: market=btc]\n'+
+'[Advise](run: trade account=$account kelly=$kelly market=$market) [Advise live](run: trade account=$account kelly=$kelly market=$market live=1) [Technical analysis](run: ta market=$market) [Chart 180d](run: chart market market=$market days=180)\n'+
+'\n'+
+'## Other markets\n'+
+'Fetch once from the CLI (`latte fetch --market eth`, or `--all`); then set the market field above\n'+
+'(eth ltc xrp ada doge sol \u2026). Each market trains its own volatility model, and the registry\n'+
+'records its edge honestly (~/.cache/orpheus/models/).\n'+
+'\n'+
+'## Score text and documents\n'+
+'headline [field: headline=etf outflows eased as markets steadied]\n'+
+'[Score headline](run: System.Sentiment $headline) [Score the ML doc](run: Doc.Score visualization-and-ml)\n'+
+'\n'+
+'Or type any command line and middle-click it:\n'+
+'trade account=25000 kelly=0.5\n',
  Chart:
-'# Chart.Tool — the visualization engine (layout computed in lib/plot.lat).\n'+
-'chart bar 3 1 4 1 5 9 2 6\n'+
-'chart line 10 12 9 14 17 13 18\n'+
-'chart scatter 3 7 1 9 4 6 8 2\n'+
-'chart market days=120\n'+
-'chart market days=365 live=1\n'+
-'chart market market=eth days=180\n'+
-'gfx (demo 0)\n'+
-'gfx Tool.rings 6\n',
+'# Chart.Tool — visualization\n'+
+'Layout computed in lib/plot.lat on Loom; charts embed where you run them.\n'+
+'\n'+
+'days [field: days=120]  market [field: market=btc]\n'+
+'[Market chart](run: chart market market=$market days=$days) [Live](run: chart market market=$market days=$days live=1)\n'+
+'\n'+
+'[Bar demo](run: chart bar 3 1 4 1 5 9 2 6) [Line demo](run: chart line 10 12 9 14 17 13 18) [Scatter demo](run: chart scatter 3 7 1 9 4 6 8 2) [Rings](run: gfx Tool.rings 6)\n'+
+'\n'+
+'chart bar 2 7 1 8 2 8\n',
  Fin:
-'# Fin.Tool — the financial-ML pipeline (logistic model, equity net of costs).\n'+
-'fin 80\n'+
-'fin 200\n'+
-'trade account=10000\n',
+'# Fin.Tool — the financial-ML pipeline\n'+
+'A logistic model on real market data; equity NET of 5bp costs; honest baselines throughout.\n'+
+'\n'+
+'iters [field: iters=80]\n'+
+'[Volatility task](run: fin $iters) [Direction task + risk stats](run: fin --direction $iters) [The advisor](run: trade account=10000)\n',
  Plan:
-'# Plan.Tool — economic planning after Cockshott & Cottrell, *Towards a New\n'+
-'# Socialism*: labour values (v = l + vA), Leontief gross outputs (x = y + Ax),\n'+
-'# labour-token accounting, consumer-goods market clearing steering the plan\n'+
-'# (price/labour-value ratios, TNS ch. 8), and harmony-function balancing when\n'+
-'# the labour budget binds (TNS pp. 94-99). All arithmetic in lib/plan.lat.\n'+
-'plan demo3\n'+
-'plan 40 0 1000\n'+
-'#\n'+
-'# CUSTOM ECONOMIES: write a spec in a text (System.NewText economy), Store it,\n'+
-'# and plan it from the page form (/plan), or POST it to /api/plan. Spec lines:\n'+
-'#   sector steel  l=0.4  steel=0.2 grain=0.1\n'+
-'#   sector grain  l=0.3  steel=0.5 grain=0.1\n'+
-'#   demand steel=0 grain=1.0\n'+
-'#   market grain=1.4          # observed clearing prices (labour tokens)\n'+
-'#   labour 1.2                # the labour budget\n'+
-'# the manual (incl. the calculation-debate criticisms):\n'+
-'System.Edit planning\n',
+'# Plan.Tool — economic planning\n'+
+'*Towards a New Socialism* (Cockshott & Cottrell): labour values (v = l + vA), Leontief gross\n'+
+'outputs, labour-token accounting, market-clearing steering, harmony balancing. All arithmetic\n'+
+'in lib/plan.lat.\n'+
+'\n'+
+'[The 3-sector demo](run: plan demo3) [Two-sector classic](run: plan 40 0 1000) [Open the manual](run: System.Edit planning)\n'+
+'\n'+
+'## Custom economies\n'+
+'Write a spec (sector/demand/market/labour lines) in the /plan page form, or POST it to\n'+
+'/api/plan \u2014 the format is in the manual above.\n',
  Trace:
-'# Trace.Tool — the ray tracer written in Latte (Anvil-compiled): checkered\n'+
-'# ground, sky, key + fill lights, shadows, speculars, graded reflections.\n'+
-'trace\n'+
-'trace w=160 h=120\n'+
-'#\n'+
-'# THE SCENE IS LATTE DATA: a list of [center [radius [color [refl 0]]]]\n'+
-'# (v3 makes vectors; signed nums are [sign mag]\u00d71000; refl 0..1000):\n'+
-'trace w=96 h=72 scene=[ [ (v3 [0 0] [0 800] [0 500]) [ [0 800] [ (v3 [0 950] [0 300] [0 300]) [ 700 0 ] ] ] ] [ [ (v3 [1 900] [0 500] [1 300]) [ [0 500] [ (v3 [0 300] [0 500] [0 950]) [ 0 0 ] ] ] ] 0 ] ]\n'+
-'#\n'+
-'# or edit the built-in scene (the spheres arm), Compile, and re-run:\n'+
-'System.Open trace\n',
- Derive:
-'# Derive.Tool — Ligurian, live: PIE -> Solar -> Heart by SCArs.\n'+
-'derive pie dʰeh₁s mr̥to ǵʰel gʷih₃w nokʷt srew h₂stér sāwel weseti\n'+
-'derive solar liga nivo mazda saules bazdā serdā\n'+
-'derive gen n=12 seed=42\n'+
-'sca liga nivo mazda\n',
+'# Trace.Tool — the ray tracer\n'+
+'Written in Latte, Anvil-compiled: checkered ground, sky, key + fill lights, shadows,\n'+
+'speculars, graded reflections.\n'+
+'\n'+
+'w [field: w=96]  h [field: h=72]\n'+
+'[Render](run: trace w=$w h=$h) [Render large](run: trace w=160 h=120)\n'+
+'\n'+
+'## The scene is Latte data\n'+
+'A list of [center [radius [color [refl 0]]]] (v3 makes vectors; signed nums [sign mag]\u00d71000;\n'+
+'refl 0..1000):\n'+
+'[One red mirror sphere](run: trace w=$w h=$h scene=[ [ (v3 [0 0] [0 800] [0 500]) [ [0 800] [ (v3 [0 950] [0 300] [0 300]) [ 700 0 ] ] ] ] 0 ])\n'+
+'\n'+
+'Or edit the built-in scene (the spheres arm), Compile, re-render:\n'+
+'[Open lib/trace.lat](run: System.Open trace)\n',
  Debug:
-'# Debug.Tool — the Loom call tracer: every arm call with its arguments and\n'+
-'# result, as an expandable tree. Click a call in the output to STEP into it;\n'+
-'# break=ARM keeps only subtrees rooted at that arm (the breakpoint).\n'+
-'debug (fib 6)\n'+
-'debug break=dec (fib 5)\n'+
-'debug (primes 20)\n'+
-'debug break=nadd (harmony_alloc [400 [1200 [400 0]]] 1000 40)\n'+
-'# note: jetted arms (fast %name) run natively — the tracer shows the call,\n'+
-'# not their inner reductions. CLI form:  latte debug --break ARM "<expr>"\n',
+'# Debug.Tool — the Loom call tracer\n'+
+'Every arm call with its arguments and result, as an expandable tree. Click a call in the\n'+
+'output to STEP into it; the break field keeps only subtrees rooted at that arm.\n'+
+'\n'+
+'expr [field: expr=(fib 6)]  break [field: brk=dec]\n'+
+'[Trace it](run: debug $expr) [Trace with breakpoint](run: debug break=$brk $expr)\n'+
+'\n'+
+'[Example: primes](run: debug (primes 20)) [Example: harmony parcels](run: debug break=nadd (harmony_alloc [400 [1200 [400 0]]] 1000 40))\n'+
+'\n'+
+'Jetted arms (fast %name) run natively \u2014 the tracer shows the call, not their inner\n'+
+'reductions. CLI form: `latte debug --break ARM "<expr>"`.\n',
+ Derive:
+'# Derive.Tool — Ligurian, live\n'+
+'PIE \u2192 Solar \u2192 Heart Speech by SCArs (the original conlang pipeline).\n'+
+'\n'+
+'[PIE roots](run: derive pie d\u02b0eh\u2081s mr\u0325to \u01f5\u02b0el g\u02b7ih\u2083w nok\u02b7t srew h\u2082st\u00e9r) [Solar words](run: derive solar liga nivo mazda saules bazd\u0101 serd\u0101) [Generate 12](run: derive gen n=12 seed=42) [Evolve](run: sca liga nivo mazda)\n',
  Conlang:
-'# Conlang.Tool — the conlanging suite. Four modular tools in one chain:\n'+
-'# phonology builder \u2192 word generator \u2192 sound-change library \u2192 SCArs.\n'+
-'#\n'+
-'## The sound-change library (20 attested changes, with provenance)\n'+
-'soundlib grimm1 verner words=pater bhrater\n'+
-'soundlib lenition apocope finaldevoice words=lupo skola amigod\n'+
-'#\n'+
-'## The phonology builder (presets: polynesian pie semitic sinitic)\n'+
-'phono preset=polynesian n=10 seed=7\n'+
-'phono preset=pie n=12 seed=42 changes=grimm1,verner,apocope\n'+
-'phono consonants=p t k s m n l vowels=a i u patterns=CVC,CV n=8 seed=3\n'+
-'#\n'+
-'# FILES: rulesets store as ordinary SCArs files (sca/<name>.sca, with the\n'+
-'# selection recorded in a :: changes: header), phonologies as .phon files\n'+
-'# (phonology/<name>.phon) — both pages have Store/Load; SCArs reads them\n'+
-'# directly:  latte sca --file sca/germanic.sca pater\n'+
-'soundlib file=germanic words=pater bhrater\n'+
-'#\n'+
-'# Full front ends: /soundlib (ordered selection, store, download) and\n'+
-'# /phono (inventory design + the BELIEVABILITY report: typological checks\n'+
-'# against the cross-linguistic record). Ligurian lives in Derive.Tool.\n'+
-'derive pie dʰeh₁s mr̥to ǵʰel\n'+
-'sca liga nivo mazda\n',
+'# Conlang.Tool — the conlanging suite\n'+
+'Four modular tools in one chain: phonology builder \u2192 word generator \u2192 sound-change\n'+
+'library \u2192 SCArs. Full manual: [open it](run: System.Edit conlang-tools)\n'+
+'\n'+
+'## The sound-change library (42 attested changes)\n'+
+'words [field: words=pater bhrater lupo skola]\n'+
+'[Grimm + Verner](run: soundlib grimm1 verner words=$words) [Romance lenition chain](run: soundlib lenition apocope finaldevoice words=$words) [English reductions](run: soundlib knloss wrloss ghloss nonrhotic words=$words)\n'+
+'\n'+
+'## The phonology builder (+ believability report)\n'+
+'preset [field: preset=pie]  n [field: n=12]  seed [field: seed=42]\n'+
+'[Generate](run: phono preset=$preset n=$n seed=$seed) [Generate + Grimm](run: phono preset=$preset n=$n seed=$seed changes=grimm1,verner,apocope)\n'+
+'\n'+
+'## Stored files\n'+
+'Rulesets persist as ordinary SCArs files (sca/*.sca), phonologies as phonology/*.phon \u2014\n'+
+'the /soundlib and /phono pages Store and reopen them; SCArs loads them directly.\n'+
+'soundlib file=germanic words=pater bhrater\n',
  Gpu:
-'# Gpu.Tool — the data-parallel device demo (matmul + Mandelbrot).\n'+
-'gpu\n'
+'# Gpu.Tool — data-parallel compute\n'+
+'[Run the device demo](run: gpu)\n'
 };
+
 function openTool(name){
   var existing = viewers.find(function(v){ return v.kind==='text' && v.name===name+'.Tool'; });
   if(existing){ mark(existing); return; }
@@ -1151,22 +1235,27 @@ function openDocsTool(){
 
 /* ---- the default desktop ------------------------------------------------- */
 var SYSTEM_TOOL =
-'# System.Tool — this is a TEXT: characters plus embedded objects. Middle-click\n'+
-'# any command line to run it (caret + Ctrl/⌘+Enter also works). Object-producing\n'+
-'# commands embed their output RIGHT HERE, under the line you ran:\n'+
-'chart market days=120\n'+
-'trace w=96 h=72\n'+
-'#\n'+
-'# The CONTENTS viewer (right) is the table of contents: every document and\n'+
-'# tool, one click. Tool texts hold each tool\'s worked examples; the manual\n'+
-'# pages carry runnable command examples in their relevant sections — open\n'+
-'# docs/the-system.md for the full tour of texts, objects, Store and load:\n'+
-'System.Edit the-system\n'+
-'#\n'+
-'# Texts: System.NewText notes · System.Texts · Edit.StoreText (menu: Store)\n'+
-'# Packages: edit hello.Mod below, Compile (menu), then:\n'+
+'# System.Tool\n'+
+'This is a TEXT: characters plus embedded objects and controls. Middle-click any\n'+
+'command line to run it; click a button; object-producing commands embed their\n'+
+'output right here, under the line you ran.\n'+
+'\n'+
+'[Chart](run: chart market days=120) [Ray-trace](run: trace w=96 h=72) [Trace a call tree](run: debug (fib 6))\n'+
+'\n'+
+'## DOCUMENTATION\n'+
+'(the index of docs/ loads here)\n'+
+'\n'+
+'## TOOLS\n'+
+'Every tool text is one click away in the header or the Contents viewer (right):\n'+
+'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu — plus the Draw\n'+
+'editor, the chess and xiangqi boards, and the Facet page editor as pages.\n'+
+'\n'+
+'## YOURS\n'+
+'Texts: System.NewText notes \u00b7 System.Texts \u00b7 Store is in each text\'s menu, and\n'+
+'stored tool texts override these defaults next run. Packages: edit hello.Mod\n'+
+'below, Compile (menu), then:\n'+
 'hello.fib 20\n'+
-'# Quit is in the header (or run System.Quit).\n';
+'Quit is in the header (or run System.Quit).\n';
 
 var HELLO_MOD =
 'import std\n'+
@@ -1185,7 +1274,7 @@ window.addEventListener('load', function(){
   fetch('/api/text?name=system-tool')
     .then(function(r){ if(!r.ok) throw 0; return r.text(); })
     .then(function(md){ setTextContent(st, md); st.box.querySelector('.foot').textContent='your stored System.Tool (text/system-tool.md) — Store keeps changes'; })
-    .catch(function(){});
+    .catch(function(){ fillDocIndex(st); });
   var h=makeViewer({name:'hello.Mod', track:'user', kind:'frame', content:HELLO_MOD, menu:sourceMenu,
     foot:'module `hello` — Compile loads it into the running system; Store writes pkg/hello.lat'});
   buildContents();

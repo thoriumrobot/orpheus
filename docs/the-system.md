@@ -89,6 +89,34 @@ any line to re-run it) and the Modules index. `System.Sentiment <text>` scores
 text in place with the trained classifier; `Doc.Score <name>` scores a whole
 document into its evidence table.
 
+## Controls in texts — buttons and fields
+
+Texts can embed live CONTROLS, declared in plain markdown (the ETH Oberon for
+Windows idea: panels are documents):
+
+- `[Label](run: command)` renders as an **embedded button**; clicking it runs
+  the command, and the output embeds under the button's line like any other
+  object.
+- `[field: name=value]` renders as an **embedded input**; button commands
+  reference fields anywhere in the same text as `$name` — so
+  `account [field: account=10000]` followed by
+  `[Advise](run: trade account=$account)` is a working trading panel in two
+  lines of text.
+
+Every shipped tool text is built this way — open Trade.Tool and click — and
+Store serializes the controls back to the same syntax, so your panels persist
+and stay editable as ordinary text.
+
+## Documents render formatted
+
+Texts — including the manual pages — display RENDERED by default: headings,
+**bold**, *italic*, `code`, bullets, quotes, fenced code blocks, and tables
+(the last two shown verbatim in monospace, so saving never reflows them).
+`System.Edit <doc>` opens the formatted view; the **Syntax** menu entry opens
+the raw markdown beside it (Apply re-renders), and **Save** writes the
+document back. System.Tool's DOCUMENTATION section is the live index: one
+button per manual page, Oberon-style.
+
 ## Creating a tool — wholly inside the GUI
 
 A tool is a TEXT plus, when it needs new verbs, a PACKAGE. The whole loop runs
