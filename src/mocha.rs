@@ -66,18 +66,29 @@ impl Mocha {
 /// Turn a shell line ("add buy milk") into an action noun [tag arg]. For the lexicon's
 /// `add`, the host derives the Heart form with SCArs and stores [solar heart].
 fn parse_cmd(app: &str, line: &str) -> Option<N> {
-    let mut words = line.split_whitespace();
-    let tag = words.next()?;
-    let rest: String = words.collect::<Vec<_>>().join(" ");
+    // split off the tag only: the argument keeps its whitespace verbatim
+    // (a forge snippet's formatting is part of the snippet)
+    let line = line.trim_start();
+    let (tag, rest) = match line.split_once(char::is_whitespace) {
+        Some((t, r)) => (t, r.trim_start()),
+        None => (line, ""),
+    };
+    if tag.is_empty() {
+        return None;
+    }
+    let rest = rest.to_string();
     let arg = if app == "lexicon" && tag == "add" {
         let heart = sca::evolve(&rest).unwrap_or_else(|_| rest.clone());
         cell(cord(&rest), cord(&heart))
     } else if app == "forge" && tag == "add" {
-        // "add <author> <snippet...>" -> [author snippet]
-        let mut w = rest.splitn(2, ' ');
+        // "add <author> <name> <code...>" -> [author [name code]]
+        let mut w = rest.splitn(3, char::is_whitespace);
         let author = w.next().unwrap_or("anon");
-        let snippet = w.next().unwrap_or("");
-        cell(cord(author), cord(snippet))
+        let name = w.next().unwrap_or("snippet");
+        let code = w.next().unwrap_or("");
+        cell(cord(author), cell(cord(name), cord(code)))
+    } else if app == "forge" && tag == "del" {
+        cord(&rest)
     } else if rest.is_empty() {
         num(0)
     } else {
@@ -99,7 +110,24 @@ fn render_elem(n: &N) -> String {
         Knot::Atom(a) => cord_or_num(a),
         Knot::Cell(h, t) => match (h.as_atom(), t.as_atom()) {
             (Some(a), Some(b)) => format!("{} → {}", cord_or_num(a), cord_or_num(b)),
-            _ => "[…]".into(),
+            _ => {
+                // a forge entry [author [name code]]: "name (author): code"
+                if let (Knot::Atom(a), Knot::Cell(nm, code)) = (&**h, &**t) {
+                    if let (Some(nm), Some(code)) = (nm.as_atom(), code.as_atom()) {
+                        let c = code.as_text().unwrap_or_else(|| cord_or_num(&code));
+                        let first = c.lines().next().unwrap_or("").to_string();
+                        let more = c.lines().count().saturating_sub(1);
+                        return format!(
+                            "{} ({}): {}{}",
+                            cord_or_num(&nm),
+                            cord_or_num(a),
+                            first,
+                            if more > 0 { format!("  …+{} lines", more) } else { String::new() }
+                        );
+                    }
+                }
+                "[…]".into()
+            }
         },
     }
 }
@@ -116,7 +144,7 @@ fn render_list(mut n: N) -> Vec<String> {
 fn render_peek(tag: &str, v: &N) -> String {
     match tag {
         "count" => v.as_atom().and_then(|a| a.to_u128()).map(|n| n.to_string()).unwrap_or_else(|| "0".into()),
-        "list" | "all" => {
+        "list" | "all" | "names" | "by" => {
             let items = render_list(v.clone());
             if items.is_empty() {
                 "(empty)".into()
@@ -127,6 +155,18 @@ fn render_peek(tag: &str, v: &N) -> String {
         "has" => match v.as_atom().and_then(|a| a.to_u128()) {
             Some(0) => "yes".into(),
             _ => "no".into(),
+        },
+        // a forge `get`: print the snippet's CODE verbatim (ready to compile)
+        "get" => match &**v {
+            Knot::Atom(a) if a.is_zero() => "(not found)".into(),
+            Knot::Cell(_, t) => match &**t {
+                Knot::Cell(_, code) => code
+                    .as_atom()
+                    .and_then(|a| a.as_text())
+                    .unwrap_or_else(|| render_elem(v)),
+                _ => render_elem(v),
+            },
+            _ => render_elem(v),
         },
         "heart" => match &**v {
             Knot::Atom(a) if a.is_zero() => "(none)".into(),
@@ -235,14 +275,19 @@ pub fn cmd_mocha(args: &[String]) {
 /// across every peer. This is a thin front-end over `mocha --app forge`.
 pub fn cmd_team(args: &[String]) {
     let mut who = String::from("anon");
+    let mut name = String::from("snippet");
     let mut q: Vec<String> = vec!["--app".into(), "forge".into()];
-    let mut shares: Vec<String> = Vec::new();
+    let mut shares: Vec<(String, String)> = Vec::new();
     let mut show = false;
+    let mut get: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--as" => { i += 1; who = args.get(i).cloned().unwrap_or(who); }
-            "--share" => { i += 1; if let Some(c) = args.get(i) { shares.push(c.clone()); } }
+            "--name" => { i += 1; name = args.get(i).cloned().unwrap_or(name); }
+            "--share" => { i += 1; if let Some(c) = args.get(i) { shares.push((name.clone(), c.clone())); } }
+            "--get" => { i += 1; get = args.get(i).cloned(); }
+            "--names" => { q.push("--peek".into()); q.push("names".into()); }
             "--show" => { show = true; }
             // pass networking/store flags straight through to the Mocha runner
             "--listen" | "--peer" | "--store" | "--id" | "--run-secs" => {
@@ -255,11 +300,15 @@ pub fn cmd_team(args: &[String]) {
         }
         i += 1;
     }
-    for c in &shares {
+    for (nm, c) in &shares {
         q.push("--poke".into());
-        q.push(format!("add {} {}", who, c));
+        q.push(format!("add {} {} {}", who, nm, c));
     }
-    if show || shares.is_empty() {
+    if let Some(nm) = &get {
+        q.push("--peek".into());
+        q.push(format!("get {}", nm));
+    }
+    if show || (shares.is_empty() && get.is_none() && !q.contains(&"--peek".to_string())) {
         q.push("--peek".into());
         q.push("all".into());
     }

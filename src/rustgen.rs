@@ -38,6 +38,29 @@ fn prim_arity(name: &str) -> Option<usize> {
     }
 }
 
+/// True when the AST ever BINDS one of the primitive names (a gate parameter,
+/// a let, or a loop variable named add/sub/mul/div/mod/lt/dec). The native
+/// backend emits those names as Rust primitives and const-folds them with no
+/// scope information, so such a program must run on the interpreter — where
+/// lexical shadowing is honored — and Anvil declines it.
+fn shadows_prim(ast: &Ast) -> bool {
+    let binds = |n: &str| prim_arity(n).is_some();
+    match ast {
+        Ast::Gate(params, body) => params.iter().any(|p| binds(p)) || shadows_prim(body),
+        Ast::Let(n, v, b) => binds(n) || shadows_prim(v) || shadows_prim(b),
+        Ast::Loop(bindings, body) => {
+            bindings.iter().any(|(n, v)| binds(n) || shadows_prim(v)) || shadows_prim(body)
+        }
+        Ast::Inc(e) | Ast::Head(e) | Ast::Tail(e) | Ast::IsCell(e) | Ast::Fast(_, e) => shadows_prim(e),
+        Ast::Eq(a, b) => shadows_prim(a) || shadows_prim(b),
+        Ast::If(c, a, b) => shadows_prim(c) || shadows_prim(a) || shadows_prim(b),
+        Ast::Case(s, arms) => shadows_prim(s) || arms.iter().any(|(_, e)| shadows_prim(e)),
+        Ast::Tuple(xs) | Ast::Again(xs) => xs.iter().any(shadows_prim),
+        Ast::Call(_, args) => args.iter().any(shadows_prim),
+        Ast::Lit(_) | Ast::Tag(_) | Ast::Text(_) | Ast::Nil | Ast::Var(_) => false,
+    }
+}
+
 fn sanitize(name: &str) -> String {
     let mut s = String::new();
     for c in name.chars() {
@@ -236,6 +259,7 @@ fn emit(ast: &Ast, c: &mut Ctx) -> Result<String, String> {
         Ast::Lit(n) => format!("V::A({}u128)", n),
         Ast::Nil => "V::A(0u128)".to_string(),
         Ast::Tag(t) => format!("V::A({}u128)", cord_to_u128(t)?),
+        Ast::Text(t) => format!("V::A({}u128)", cord_to_u128(t)?),
         Ast::Var(n) => {
             if c.bound.contains(n) {
                 format!("{}.clone()", sanitize(n))
@@ -464,6 +488,13 @@ fn vrender(v: &V) -> String {
 /// Compile a Latte expression (with its library closure) to a standalone Rust program.
 pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> {
     let program = latte::gather_program(expr_src, libs)?;
+    // lexical shadowing of a primitive name is interpreter territory: decline
+    // BEFORE const-folding, which would rewrite the shadowed name blindly
+    for (n, _, b) in &program {
+        if shadows_prim(b) {
+            return Err(format!("arm '{}' locally binds a primitive name; running interpreted", n));
+        }
+    }
     // fold constants in every arm
     let program: Vec<Arm> = program
         .into_iter()
@@ -773,31 +804,42 @@ mod tests {
 
     #[test]
     fn boundary_failure_modes_match() {
-        // Anvil must agree with the interpreter on *which* inputs fail and the values when they
-        // succeed: overflow, underflow, divide/mod by zero, dec(0), and the u128 boundary itself.
-        let cases = [
-            "(mul 65536 65536)",                                       // ok
-            "(div 100 7)",                                             // ok
-            "(add 340282366920938463463374607431768211454 1)",        // == u128::MAX, ok
-            "(add 340282366920938463463374607431768211455 1)",        // u128::MAX + 1, fail
-            "(mul 18446744073709551616 18446744073709551616)",        // overflow, fail
-            "(sub 3 5)",                                               // underflow, fail
-            "(div 5 0)",                                               // div by zero, fail
-            "(dec 0)",                                                 // dec(0), fail
+        // Anvil must agree with the interpreter on values whenever BOTH succeed,
+        // and must never silently wrap: past the u128 boundary the native
+        // backend DECLINES (None -> interpreter fallback) while the interpreter's
+        // big-number jets carry on. Domain errors (underflow, divide by zero,
+        // dec(0)) must fail on both.
+        let cases: &[(&str, Expect)] = &[
+            ("(mul 65536 65536)", Expect::BothOk),
+            ("(div 100 7)", Expect::BothOk),
+            ("(add 340282366920938463463374607431768211454 1)", Expect::BothOk), // == u128::MAX
+            ("(add 340282366920938463463374607431768211455 1)", Expect::InterpOnly), // big jets carry on
+            ("(mul 18446744073709551616 18446744073709551616)", Expect::InterpOnly),
+            ("(sub 3 5)", Expect::BothFail),
+            ("(div 5 0)", Expect::BothFail),
+            ("(dec 0)", Expect::BothFail),
         ];
-        for (i, e) in cases.iter().enumerate() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Expect {
+            BothOk,
+            BothFail,
+            InterpOnly, // interpreter succeeds (arbitrary precision); native declines
+        }
+        for (i, (e, expect)) in cases.iter().enumerate() {
             let iv = interp_opt(e);
             let nv = native_opt(e, i);
-            assert_eq!(
-                iv.is_some(),
-                nv.is_some(),
-                "success/failure disagreement on {}: interp={:?} native={:?}",
-                e,
-                iv,
-                nv
-            );
-            if let (Some(a), Some(b)) = (&iv, &nv) {
-                assert_eq!(a, b, "value disagreement on {}", e);
+            match expect {
+                Expect::BothOk => {
+                    assert!(iv.is_some() && nv.is_some(), "{} should succeed on both: interp={:?} native={:?}", e, iv, nv);
+                    assert_eq!(iv, nv, "value disagreement on {}", e);
+                }
+                Expect::BothFail => {
+                    assert!(iv.is_none() && nv.is_none(), "{} should fail on both: interp={:?} native={:?}", e, iv, nv);
+                }
+                Expect::InterpOnly => {
+                    assert!(iv.is_some(), "{} should succeed on the interpreter (big jets)", e);
+                    assert!(nv.is_none(), "{} must DECLINE on the u128-bound native backend, not wrap", e);
+                }
             }
         }
     }

@@ -14,6 +14,7 @@ mod atom;
 mod knot;
 mod sha3;
 mod loom;
+mod fmt;
 mod latte;
 mod agent;
 mod net;

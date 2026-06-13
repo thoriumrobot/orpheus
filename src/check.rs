@@ -58,7 +58,7 @@ pub fn check(ast: &Ast) -> Result<Ty, String> {
 
 fn infer(ast: &Ast, env: &Env) -> Result<Ty, String> {
     Ok(match ast {
-        Ast::Lit(_) | Ast::Tag(_) | Ast::Nil => Ty::Atom,
+        Ast::Lit(_) | Ast::Tag(_) | Ast::Text(_) | Ast::Nil => Ty::Atom,
 
         Ast::Var(name) => env.get(name).cloned().unwrap_or(Ty::Noun),
 

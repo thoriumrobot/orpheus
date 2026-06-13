@@ -57,8 +57,53 @@ Documents under `docs/` open as plain editable frames with `System.Edit <name>`
 ## Tools are texts
 
 The header links (Trade, Charts, Finance, Plan, Trace, Derive, Debug, Conlang,
-GPU, Net, News, Docs) open **tool texts** — editable command sheets, exactly
-Oberon's `Draw.Tool` idea.
+GPU, Net, News, Forge, Format, Docs) open **tool texts** — editable command
+sheets, exactly Oberon's `Draw.Tool` idea.
+
+## Tools in pure Latte — Rust is not required
+
+New tools are written, formatted, compiled, run, shared, and persisted without
+leaving the GUI. The pieces that make this real: Latte has **string literals**
+(`"text"`, with `\"` `\\` `\n` `\t` escapes) alongside `%tags`; `std` carries
+the cord toolkit (`cat`, `catall`, `joincords`, `numtext`, `fixtext`,
+`bytelen`, `pow`); and the arithmetic jets are **arbitrary-precision**, so
+building a kilobyte of markup multiplies kilobyte-sized atoms natively instead
+of crashing at the u128 boundary (the native Anvil backend declines past that
+boundary and the interpreter's big jets carry on — never a silent wrap).
+
+A tool *renders* by returning a tagged cord: `[%svg <cord>]` or
+`[%html <cord>]` from any arm embeds as a live object exactly where the
+command ran — the same way chart and gfx output embeds. `hello.Mod`, compiled
+at boot, demonstrates the whole pattern: `hello.badge 9` (live HTML) and
+`hello.spark [3 [9 [5 [12 [7 0]]]]]` (an SVG bar chart built character by
+character in Latte). `ui Tool.arm` makes interactive panels. The loop is:
+System.New → write → Format → Compile → run from any text → Store (pkg/) →
+Forge.Share.
+
+## Forge — team coding
+
+The forge is a shared snippet log on the Mocha runtime: every share is a
+durable, gossiped event, so the log survives restarts and converges across
+linked machines. In the GUI: `Forge.As <you>` sets your author name,
+`Forge.Share [name]` shares the marked source frame, `Forge.List` prints one
+**runnable** `Forge.Open <name>` line per snippet (middle-click it in the Log
+— the Oberon move), and `Forge.Open` lands the code in a fresh source frame
+where Compile makes it live in *your* system. `Forge.By <author>`,
+`Forge.Del <name>`, `Forge.Names`, `Forge.Count`, `Forge.Clear` complete the
+set. The GUI's node persists under `forge/`; `latte team --as ada --name fib
+--share "<code>"` (with `--listen`/`--peer` to gossip, `--get`, `--names`) is
+the CLI bridge.
+
+## Format — the Latte formatter
+
+`Edit.Format *` (and the Format button on every source frame) formats the
+marked frame canonically: structural indentation (arms at two spaces, bodies
+one step in, `loop`/`case` bodies one step past their opener with `end`
+aligned under it, flat let-chains), canonical spacing (tight brackets, spaced
+`=`/`==`/`->`, tight `again(`), author line breaks and all comments preserved.
+Formatting is **proven** meaning-preserving: the result must re-parse to the
+identical AST, arm for arm, or the original is returned untouched. The same
+engine is `latte fmt <file> [--write]` and `/api/fmt`.
 Edit the arguments, run lines, embed outputs, Store your customized tool. The
 small ↗ beside each link opens the corresponding full page when you want one.
 

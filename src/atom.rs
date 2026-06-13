@@ -67,6 +67,96 @@ impl Atom {
         Atom::from_bytes_le(out)
     }
 
+    /// Compare magnitudes (arbitrary precision).
+    pub fn cmp_big(&self, other: &Atom) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match self.0.len().cmp(&other.0.len()) {
+            Ordering::Equal => {
+                for i in (0..self.0.len()).rev() {
+                    match self.0[i].cmp(&other.0[i]) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    }
+                }
+                Ordering::Equal
+            }
+            ord => ord,
+        }
+    }
+
+    /// Arbitrary-precision subtraction; None on underflow (naturals only).
+    pub fn sub_big(&self, other: &Atom) -> Option<Atom> {
+        if self.cmp_big(other) == std::cmp::Ordering::Less {
+            return None;
+        }
+        let mut out = Vec::with_capacity(self.0.len());
+        let mut borrow = 0i16;
+        for i in 0..self.0.len() {
+            let x = self.0[i] as i16;
+            let y = *other.0.get(i).unwrap_or(&0) as i16;
+            let mut d = x - y - borrow;
+            if d < 0 {
+                d += 256;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            out.push(d as u8);
+        }
+        Some(Atom::from_bytes_le(out))
+    }
+
+    /// Arbitrary-precision multiplication (schoolbook; operands are cords and
+    /// counters, kilobytes at most).
+    pub fn mul_big(&self, other: &Atom) -> Atom {
+        if self.0.is_empty() || other.0.is_empty() {
+            return Atom::from_u128(0);
+        }
+        let mut out = vec![0u16; self.0.len() + other.0.len()];
+        for (i, &x) in self.0.iter().enumerate() {
+            let mut carry = 0u32;
+            for (j, &y) in other.0.iter().enumerate() {
+                let t = out[i + j] as u32 + (x as u32) * (y as u32) + carry;
+                out[i + j] = (t & 0xff) as u16;
+                carry = t >> 8;
+            }
+            let mut k = i + other.0.len();
+            while carry > 0 {
+                let t = out[k] as u32 + carry;
+                out[k] = (t & 0xff) as u16;
+                carry = t >> 8;
+                k += 1;
+            }
+        }
+        Atom::from_bytes_le(out.into_iter().map(|b| b as u8).collect())
+    }
+
+    /// Arbitrary-precision division with remainder (binary long division);
+    /// None when dividing by zero.
+    pub fn divmod_big(&self, other: &Atom) -> Option<(Atom, Atom)> {
+        if other.0.is_empty() {
+            return None;
+        }
+        if self.cmp_big(other) == std::cmp::Ordering::Less {
+            return Some((Atom::from_u128(0), self.clone()));
+        }
+        let bits = self.0.len() * 8;
+        let mut q = vec![0u8; self.0.len()];
+        let mut rem = Atom::from_u128(0);
+        for k in (0..bits).rev() {
+            // rem = rem*2 + bit_k(self)
+            rem = rem.mul_big(&Atom::from_u128(2));
+            if (self.0[k / 8] >> (k % 8)) & 1 == 1 {
+                rem = rem.add(&Atom::from_u128(1));
+            }
+            if rem.cmp_big(other) != std::cmp::Ordering::Less {
+                rem = rem.sub_big(other).unwrap();
+                q[k / 8] |= 1 << (k % 8);
+            }
+        }
+        Some((Atom::from_bytes_le(q), rem))
+    }
+
     /// Increment by one (the only native arithmetic in Loom: rule SUCC).
     pub fn inc(&self) -> Atom {
         let mut v = self.0.clone();
@@ -105,6 +195,21 @@ impl Atom {
         }
         match std::str::from_utf8(&self.0) {
             Ok(s) if s.chars().all(|c| !c.is_control()) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Interpret the bytes as UTF-8 TEXT: like `as_cord`, but newlines and
+    /// tabs are welcome — multi-line cords carry source code, documents, and
+    /// markup throughout the system.
+    pub fn as_text(&self) -> Option<String> {
+        if self.0.is_empty() {
+            return None;
+        }
+        match std::str::from_utf8(&self.0) {
+            Ok(s) if s.chars().all(|c| !c.is_control() || c == '\n' || c == '\t' || c == '\r') => {
+                Some(s.to_string())
+            }
             _ => None,
         }
     }

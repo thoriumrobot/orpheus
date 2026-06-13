@@ -260,14 +260,19 @@ ligā → liɣō
 ## Team coding across connected machines
 
 `latte team` is collaborative coding built on the **Forge** Mocha app: a shared,
-append-only log of `[author snippet]` entries. Because each share is a durable, gossiped
-event, every teammate's node converges on the same codebase — across the room or across
-the Internet.
+append-only log of `[author [name code]]` snippet entries. Because each share is a
+durable, gossiped event, every teammate's node converges on the same codebase — across
+the room or across the Internet — and the GUI hosts a persistent node of its own
+(`/api/forge`, the log under `forge/`). In the System: mark a source frame,
+`Forge.Share` — a teammate runs `Forge.List`, middle-clicks the listed
+`Forge.Open <name>` line, presses Compile, and the code is live in *their* system.
 
 ```sh
-latte team --as alice --listen HOST:PORT --share "double = fn [x] -> (add x x)" --run-secs 6
+latte team --as alice --name double --listen HOST:PORT --share "core m  double = fn [x] -> (add x x) end" --run-secs 6
 latte team --as bob   --listen HOST:PORT --peer ALICE_HOST:PORT \
-        --share "square = fn [x] -> (mul x x)" --show     # sees both authors' snippets
+        --name square --share "core m  square = fn [x] -> (mul x x) end" --show
+latte team --get double                                   # print a snippet's code
+latte team --names                                        # every snippet name
 ```
 
 ## Planning — *Towards a New Socialism*
@@ -278,10 +283,12 @@ step in `lib/plan.lat` on Loom: iterative **labour values** (v = l + vA),
 **consumer-goods market clearing** (price/labour-value ratios steer the next
 period's targets, TNS ch. 8), and **harmony-function balancing** (the concave
 social-utility maximization by marginal-equalizing transfers, TNS pp. 94-99)
-when the labour budget binds. `--demo3` shows the whole pipeline;
+when the labour budget binds. Bare `latte plan` runs the whole pipeline (the
+3-sector demo); `--demo2` shows just the labour-value and gross-output tables;
 `--spec FILE` plans **your** economy from a five-line spec (`sector`/`demand`/
-`market`/`labour`); the `/plan` page has a form, and `plan demo3` embeds the
-report in any GUI text. `docs/planning.md` documents the algorithms *and* the
+`market`/`labour`). In the GUI, Plan.Tool has an in-place custom-economy
+editor, the `/plan` page has a full form, and `plan demo3` embeds the report in
+any text. `docs/planning.md` documents the algorithms *and* the
 calculation-debate criticisms (Hayek's information argument, Shalizi's
 "Jacobi solvers" critique, and the replies) — a contested proposal, presented
 with its contest.

@@ -344,18 +344,25 @@ fn market_eval_on(
     let r: Vec<f64> = (1..n).map(|i| 100.0 * (closes[i] - closes[i - 1]) / closes[i - 1]).collect();
     let absr: Vec<f64> = r.iter().map(|x| x.abs()).collect();
     let h = horizon.max(1);
-    // ---- momentum + trend features (the documented crypto edge) ------------
-    let nf = 6usize;
-    let mut xs: Vec<[f64; 6]> = Vec::new();
+    // ---- momentum + trend + volatility-memory features ----------------------
+    // ROC 1/3/5/10 and price/MA10 carry the documented crypto momentum edge;
+    // vol5 and vol22 are the HAR-RV weekly and monthly realized-vol components
+    // (Corsi 2009) — volatility clustering is the strongest signal here — and
+    // lag1 (the latest realized return, signed) adds short-horizon reversal
+    // information. All features use data up to and including day t: no leakage.
+    let nf = 8usize;
+    let mut xs: Vec<[f64; 8]> = Vec::new();
     let mut fwd: Vec<f64> = Vec::new();    // forward h-day return (direction label)
     let mut absnext: Vec<f64> = Vec::new(); // next-day |return| (volatility label)
     let mut nextret: Vec<f64> = Vec::new(); // next-day return (equity)
-    let mut t = 10usize;
+    let mut t = 22usize;
     while t + h < n {
         let roc = |m: usize| 100.0 * (closes[t] - closes[t - m]) / closes[t - m];
         let ma10: f64 = closes[t - 9..=t].iter().sum::<f64>() / 10.0;
         let vol5: f64 = absr[t - 5..t].iter().sum::<f64>() / 5.0;
-        xs.push([roc(1), roc(3), roc(5), roc(10), 100.0 * (closes[t] / ma10 - 1.0), vol5]);
+        let vol22: f64 = absr[t - 22..t].iter().sum::<f64>() / 22.0;
+        let lag1: f64 = r[t - 1];
+        xs.push([roc(1), roc(3), roc(5), roc(10), 100.0 * (closes[t] / ma10 - 1.0), vol5, vol22, lag1]);
         fwd.push(100.0 * (closes[t + h] - closes[t]) / closes[t]);
         nextret.push(100.0 * (closes[t + 1] - closes[t]) / closes[t]);
         absnext.push(absr[t]); // |return| at t; label uses next-day below
@@ -377,8 +384,8 @@ fn market_eval_on(
     } else {
         nextret.clone()
     };
-    let mut mean = [0.0f64; 6];
-    let mut sd = [0.0f64; 6];
+    let mut mean = [0.0f64; 8];
+    let mut sd = [0.0f64; 8];
     for j in 0..nf {
         let m: f64 = xs[..split].iter().map(|r| r[j]).sum::<f64>() / split as f64;
         let v: f64 = xs[..split].iter().map(|r| (r[j] - m) * (r[j] - m)).sum::<f64>() / split as f64;
@@ -474,7 +481,7 @@ pub fn cmd_fin(args: &[String]) {
             let task = if res.vol { "next-day VOLATILITY regime (high vs low)" } else { "next-day direction (up / down)" };
             println!("  market   : {} - {} daily closes, {} -> {}", crate::marketdata::MARKET_NAME, res.n, res.d0, res.d1);
             println!("  task     : predict {}", task);
-            println!("  features : multi-horizon momentum (ROC 1/3/5/10), price/MA10, realized vol");
+            println!("  features : momentum (ROC 1/3/5/10), price/MA10, HAR realized vol (5d, 22d), last return");
             println!("  rationale: crypto has the strongest documented momentum AND volatility");
             println!("             clustering of any liquid market (Moskowitz 2012; Shen 2022; Katsiampa 2017)");
             println!("  model    : logistic regression in Latte, {} epochs of gradient descent", res.iters);
@@ -866,8 +873,9 @@ pub struct TradeAdvice {
     pub dir_hitrate: f64,    // out-of-sample momentum hit rate (embargoed walk-forward)
     pub model_acc: f64,      // volatility-model test accuracy
     pub model_base: f64,     // its majority-class baseline (edge = acc - base)
-    pub kelly_full: f64,     // full Kelly fraction from the directional edge
-    pub kelly_used: f64,     // fractional-Kelly applied
+    pub kelly_full: f64,     // full Kelly fraction from the directional edge (binary payoff)
+    pub kelly_mv: Option<f64>, // mean-variance Kelly mu/sigma^2, measured out-of-sample
+    pub kelly_used: f64,     // fractional-Kelly applied (of the conservative min)
     pub exposure: f64,       // recommended exposure (fraction of capital, signed)
     pub dollars: f64,        // recommended notional
     pub account: f64,
@@ -1357,6 +1365,9 @@ pub fn trade_advice_market(
     let split = (n * 7) / 10;
     let embargo = 10usize;
     let (mut hits, mut tot) = (0usize, 0usize);
+    // the long-when-momentum-positive strategy's daily returns over the same
+    // embargoed slice (fractions): the sample behind the mean-variance Kelly
+    let mut strat_rets: Vec<f64> = Vec::new();
     for t in (split + embargo)..n - 1 {
         if t < 10 {
             continue;
@@ -1370,8 +1381,21 @@ pub fn trade_advice_market(
                 hits += 1;
             }
         }
+        if sig > 0.0 {
+            strat_rets.push((closes[t + 1] - closes[t]) / closes[t]);
+        }
     }
     let dir_hitrate = if tot > 0 { hits as f64 / tot as f64 } else { 0.5 };
+    // CONTINUOUS Kelly, mu/sigma^2, measured on the out-of-sample slice: the
+    // binary-payoff Kelly (2w-1) overstates the safe fraction when returns are
+    // fat-tailed, so the advisor sizes with the SMALLER of the two estimates.
+    let kelly_mv: Option<f64> = if strat_rets.len() >= 20 {
+        let m = strat_rets.iter().sum::<f64>() / strat_rets.len() as f64;
+        let v = strat_rets.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / strat_rets.len() as f64;
+        if v > 1e-12 { Some((m / v).clamp(-1.0, 4.0)) } else { None }
+    } else {
+        None
+    };
     // model (volatility) accuracy for reporting reliability (trained once per process)
     let (model_acc, model_base) = vol_model_stats(market);
 
@@ -1415,7 +1439,12 @@ pub fn trade_advice_market(
     let mut w = 0.5 + if mom_agrees { edge } else { edge * 0.5 };
     w += 0.03 * used_sentiment;
     let kelly_full = (2.0 * w - 1.0).clamp(-1.0, 1.0);
-    let kelly_used = (kelly_mult * kelly_full).max(0.0); // never go short in this demo
+    // the conservative effective Kelly: min(binary edge, measured mu/sigma^2)
+    let kelly_eff = match kelly_mv {
+        Some(k) if kelly_full > 0.0 => kelly_full.min(k.max(0.0)),
+        _ => kelly_full,
+    };
+    let kelly_used = (kelly_mult * kelly_eff).max(0.0); // never go short in this demo
     // volatility targeting against the HAR-RV forecast (falling back to the
     // regime heuristic only if the regression is unavailable)
     let fc_vol = match har_vol {
@@ -1454,6 +1483,7 @@ pub fn trade_advice_market(
         model_acc,
         model_base,
         kelly_full,
+        kelly_mv,
         kelly_used,
         exposure,
         dollars: account * exposure,
@@ -1562,8 +1592,12 @@ pub fn cmd_trade(args: &[String]) {
                 println!("  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  — NO EDGE on this market", a.model_acc, a.model_base);
             }
             println!("  -- position sizing ------------------------");
-            println!("  full Kelly        : {:+.3}", a.kelly_full);
-            println!("  fractional Kelly  : {:.3}", a.kelly_used);
+            println!("  Kelly (binary)    : {:+.3}", a.kelly_full);
+            match a.kelly_mv {
+                Some(k) => println!("  Kelly (mu/sigma^2) : {:+.3}   (out-of-sample; the advisor sizes on the smaller)", k),
+                None => println!("  Kelly (mu/sigma^2) : n/a (test slice too short)"),
+            }
+            println!("  Kelly (applied)   : {:.3}   (fractional, of the smaller estimate)", a.kelly_used);
             println!("\n  >> ADVICE: {}", a.action);
             if a.exposure > 0.0 {
                 println!("            notional ~ ${:.0} of a ${:.0} account", a.dollars, a.account);

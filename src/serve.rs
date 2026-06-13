@@ -792,6 +792,15 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let body = String::from_utf8_lossy(&req.body);
             simple(200, "text/plain; charset=utf-8", crate::latte::format_source(&body).into_bytes())
         }
+        // ---- Forge: the team-coding log (a persistent local Mocha node; link
+        // machines with `latte team --listen/--peer`). Commands, one per request:
+        //   share <author> <name>\n<code…>   add a snippet (code = rest of body)
+        //   list | names | count | last      views over the shared log
+        //   get <name> | by <author> | del <name> | clear
+        ("POST", "/api/forge") => {
+            let body = String::from_utf8_lossy(&req.body).into_owned();
+            simple(200, "text/plain; charset=utf-8", forge_command(&body).into_bytes())
+        }
         ("POST", "/api/source") => {
             let body = String::from_utf8_lossy(&req.body).into_owned();
             match crate::latte::compile_and_register(&body) {
@@ -931,7 +940,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                         "<table class='m'>\
                          <tr><td>market</td><td>{} &mdash; {} daily closes, {} &rarr; {}</td></tr>\
                          <tr><td>task</td><td>{}</td></tr>\
-                         <tr><td>features</td><td>momentum (ROC 1/3/5/10) + price/MA10 + realized vol</td></tr>\
+                         <tr><td>features</td><td>momentum (ROC 1/3/5/10) + price/MA10 + HAR realized vol (5d, 22d) + last return</td></tr>\
                          <tr><td>validation</td><td>walk-forward &mdash; {} train, {} unseen test days</td></tr>\
                          <tr><td>training acc.</td><td>{:.1}% (in-sample)</td></tr>\
                          <tr><td><b>TEST acc.</b></td><td><b>{:.1}%</b> (out-of-sample)</td></tr>\
@@ -1110,7 +1119,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                          <tr><td>realized vol/day</td><td>{:.2}% (target {:.2}%) &mdash; predicted {}-vol regime</td></tr>\
                          <tr><td>momentum hit rate</td><td>{:.1}% out-of-sample</td></tr>\
                          <tr><td>volatility model</td><td>{:.1}% test vs {:.1}% baseline ({})</td></tr>\
-                         <tr><td>full / fractional Kelly</td><td>{:+.3} / {:.3}</td></tr>\
+                         <tr><td>Kelly: binary / &mu;&#47;&sigma;&sup2; / applied</td><td>{:+.3} / {} / {:.3}  (sized on the smaller estimate)</td></tr>\
                          <tr><td><b>advice</b></td><td><b>{}</b></td></tr>{}\
                          </table>\
                          <p class='note'>Five classical indicators vote in Latte and real, dated headlines are scored in \
@@ -1120,7 +1129,8 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                         a.market, a.last_price, html_escape(&a.data_note), a.span.0, a.span.1,
                         a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction,
                         a.realized_vol, a.target_vol, a.vol_regime,
-                        a.dir_hitrate, a.model_acc, a.model_base, if a.model_acc > a.model_base { "a real edge" } else { "NO edge here" }, a.kelly_full, a.kelly_used, html_escape(&a.action),
+                        a.dir_hitrate, a.model_acc, a.model_base, if a.model_acc > a.model_base { "a real edge" } else { "NO edge here" }, a.kelly_full,
+                        a.kelly_mv.map(|k| format!("{:+.3}", k)).unwrap_or_else(|| "n/a".into()), a.kelly_used, html_escape(&a.action),
                         if a.exposure > 0.0 { format!("<tr><td>notional</td><td>${:.0} of ${:.0}</td></tr>", a.dollars, a.account) } else { String::new() }
                     )
                 }
@@ -1522,12 +1532,180 @@ fn eval_expr(expr: &str) -> String {
     let libs: Vec<String> = crate::latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
     if let Some(n) = crate::rustgen::run_native_noun(expr, &refs) {
-        return render_noun(&n);
+        return render_result(&n);
     }
     match latte::run_with_libs(expr, &refs) {
-        Ok(v) => render_noun(&v),
+        Ok(v) => render_result(&v),
         Err(e) => format!("error: {}", e),
     }
+}
+
+// ---- Forge: the team-coding state, hosted in this process -------------------
+struct ForgeState {
+    node: crate::net::Node,
+    q: crate::mocha::Mocha,
+}
+fn forge_state() -> &'static std::sync::Mutex<Option<ForgeState>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<Option<ForgeState>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::sync::Mutex::new(None))
+}
+fn forge_init(slot: &mut Option<ForgeState>) -> Result<(), String> {
+    if slot.is_some() {
+        return Ok(());
+    }
+    let src = crate::mocha::FORGE_LAT;
+    let agent = crate::agent::Agent::from_source(src, "forge").map_err(|e| e.to_string())?;
+    let q = crate::mocha::Mocha::load(src)?;
+    // the log persists beside the package directory: pkg/ and forge/ are siblings
+    let dir = crate::latte::pkg_dir().with_file_name("forge");
+    let node = match crate::net::Node::open(1, agent, dir.to_string_lossy().as_ref(), 0) {
+        Ok(n) => n,
+        Err(_) => {
+            let agent2 = crate::agent::Agent::from_source(src, "forge").map_err(|e| e.to_string())?;
+            crate::net::Node::new(1, agent2) // in-memory fallback
+        }
+    };
+    *slot = Some(ForgeState { node, q });
+    Ok(())
+}
+
+/// One forge command -> a plain-text reply. The List view prints each snippet
+/// as a runnable `Forge.Open <name>` line, so the System's middle-click opens
+/// it straight from the Log (the Oberon move).
+fn forge_command(body: &str) -> String {
+    let mut guard = forge_state().lock().unwrap();
+    if let Err(e) = forge_init(&mut guard) {
+        return format!("forge error: {}", e);
+    }
+    let st = guard.as_mut().unwrap();
+    let (line, code) = match body.split_once('\n') {
+        Some((l, c)) => (l.trim(), c),
+        None => (body.trim(), ""),
+    };
+    let mut w = line.split_whitespace();
+    let verb = w.next().unwrap_or("");
+    let args: Vec<&str> = w.collect();
+    use crate::knot::{cell, cord, num, Knot};
+    let peek = |st: &ForgeState, tag: &str, arg: &str| -> Result<crate::knot::N, String> {
+        let state = st.node.state().map_err(|e| format!("{:?}", e))?;
+        let q_arg = if arg.is_empty() { num(0) } else { cord(arg) };
+        st.q.peek(&cell(cord(tag), q_arg), &state).map_err(|e| format!("{:?}", e))
+    };
+    match verb {
+        "share" => {
+            let author = args.first().copied().unwrap_or("anon");
+            let name = args.get(1).copied().unwrap_or("snippet");
+            if code.trim().is_empty() {
+                return "forge share: no code (the body's remaining lines are the snippet)".into();
+            }
+            let act = cell(cord("add"), cell(cord(author), cell(cord(name), cord(code))));
+            st.node.local_action(act);
+            let n = peek(st, "count", "")
+                .ok()
+                .and_then(|v| v.as_atom().and_then(|a| a.to_u128()))
+                .unwrap_or(0);
+            format!("shared '{}' as {} — {} snippet(s) on the forge", name, author, n)
+        }
+        "del" => match args.first() {
+            Some(nm) => {
+                st.node.local_action(cell(cord("del"), cord(nm)));
+                format!("retired every '{}' snippet", nm)
+            }
+            None => "forge del: name a snippet".into(),
+        },
+        "clear" => {
+            st.node.local_action(cell(cord("clear"), num(0)));
+            "the forge is empty".into()
+        }
+        "get" => match args.first() {
+            Some(nm) => match peek(st, "get", nm) {
+                Ok(v) => match &*v {
+                    Knot::Atom(a) if a.is_zero() => format!("(no snippet named '{}')", nm),
+                    Knot::Cell(_, t) => match &**t {
+                        Knot::Cell(_, code) => code
+                            .as_atom()
+                            .and_then(|a| a.as_text())
+                            .unwrap_or_else(|| "(unreadable)".into()),
+                        _ => "(unreadable)".into(),
+                    },
+                    _ => "(unreadable)".into(),
+                },
+                Err(e) => format!("forge error: {}", e),
+            },
+            None => "forge get: name a snippet".into(),
+        },
+        "list" | "" | "all" | "by" => {
+            let (tag, arg) = if verb == "by" {
+                ("by", args.first().copied().unwrap_or(""))
+            } else {
+                ("all", "")
+            };
+            match peek(st, tag, arg) {
+                Ok(mut v) => {
+                    let mut out = Vec::new();
+                    while let Knot::Cell(h, t) = &*v.clone() {
+                        if let Knot::Cell(author, nt) = &**h {
+                            if let Knot::Cell(name, code) = &**nt {
+                                let nm = name.as_atom().and_then(|a| a.as_cord()).unwrap_or_default();
+                                let au = author.as_atom().and_then(|a| a.as_cord()).unwrap_or_default();
+                                let lines = code
+                                    .as_atom()
+                                    .and_then(|a| a.as_text())
+                                    .map(|c| c.lines().count())
+                                    .unwrap_or(0);
+                                out.push(format!("Forge.Open {}   :: by {} — {} line(s)", nm, au, lines));
+                            }
+                        }
+                        v = t.clone();
+                    }
+                    if out.is_empty() {
+                        "the forge is empty — share the marked frame with Forge.Share".into()
+                    } else {
+                        out.join("\n")
+                    }
+                }
+                Err(e) => format!("forge error: {}", e),
+            }
+        }
+        "names" => match peek(st, "names", "") {
+            Ok(mut v) => {
+                let mut out = Vec::new();
+                while let Knot::Cell(h, t) = &*v.clone() {
+                    if let Some(s) = h.as_atom().and_then(|a| a.as_cord()) {
+                        out.push(s);
+                    }
+                    v = t.clone();
+                }
+                if out.is_empty() { "(none)".into() } else { out.join(" ") }
+            }
+            Err(e) => format!("forge error: {}", e),
+        },
+        "count" => peek(st, "count", "")
+            .ok()
+            .and_then(|v| v.as_atom().and_then(|a| a.to_u128()))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "0".into()),
+        other => format!("forge: unknown verb '{}' (share · list · names · get · by · del · clear · count)", other),
+    }
+}
+
+/// Render an eval result. A cell tagged [%svg cord] or [%html cord] is a RENDER
+/// OBJECT: a pure-Latte tool's way to return live markup. The payload is sent
+/// behind a \u{1}kind\u{1} marker; the System embeds it as an object (the same
+/// way chart/gfx output embeds), so text-producing tools need no Rust at all.
+fn render_result(n: &N) -> String {
+    if let Knot::Cell(h, t) = &**n {
+        if let (Knot::Atom(tag), Knot::Atom(payload)) = (&**h, &**t) {
+            if let Some(kind) = tag.as_cord() {
+                if kind == "svg" || kind == "html" {
+                    if let Some(s) = payload.as_text() {
+                        return format!("\u{1}{}\u{1}{}", kind, s);
+                    }
+                }
+            }
+        }
+    }
+    render_noun(n)
 }
 
 /// Render a noun for display: small atoms as decimals, multi-byte printable atoms as text

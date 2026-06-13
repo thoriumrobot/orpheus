@@ -276,7 +276,7 @@ pub fn plan_report_custom(eco: &Economy, iters: u64) -> Result<String, String> {
     let need: u128 = values
         .iter()
         .zip(&eco.demand)
-        .map(|(v, y)| v * y / 1000)
+        .map(|(v, y)| (v * y + 500) / 1000) // round to nearest, like the Latte side
         .sum();
     out.push_str(&format!(
         "\nlabour accounting: this plan costs {} hours of social labour\n  (Σ v·y; labour tokens issued for work done buy exactly this product — TNS ch. 2, 5)\n",
@@ -332,7 +332,7 @@ pub fn plan_report_custom(eco: &Economy, iters: u64) -> Result<String, String> {
         let costs: Vec<u128> = values
             .iter()
             .zip(&eco.demand)
-            .map(|(v, y)| v * y / 1000)
+            .map(|(v, y)| (v * y + 500) / 1000) // round to nearest, like the Latte side
             .collect();
         let total: u128 = costs.iter().sum();
         if budget < total {
@@ -388,7 +388,7 @@ pub fn demo_spec() -> &'static str {
 pub fn cmd_plan(args: &[String]) {
     let mut iters: u64 = 60;
     let mut spec_path: Option<String> = None;
-    let mut demo = false;
+    let mut demo = true; // bare `latte plan` runs the full 3-sector flagship demo
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -405,11 +405,12 @@ pub fn cmd_plan(args: &[String]) {
                 }
             }
             "--demo3" | "--demo" => demo = true,
+            "--demo2" | "--two" => demo = false, // the bare two-sector tables only
             other => {
                 eprintln!("plan: unknown arg {}", other);
-                eprintln!("usage: latte plan [--iters N] [--spec FILE | --demo3]");
+                eprintln!("usage: latte plan [--iters N] [--spec FILE | --demo2]");
                 eprintln!("  --spec FILE   plan a CUSTOM economy (sector/demand/market/labour lines)");
-                eprintln!("  --demo3       the 3-sector demo with market steering and a labour budget");
+                eprintln!("  --demo2       just the 2-sector labour-value + gross-output tables");
                 return;
             }
         }

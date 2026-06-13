@@ -14,6 +14,9 @@
 :: ===========================================================================
 import std
 core plan
+  :: every rescale below rounds to NEAREST (+scale/2 before the divide):
+  :: floor-division biases the iterated fixed points low by ~1 ulp, which an
+  :: exact-rational check makes visible in the third decimal place
   scale = fn [_] -> 1000
 
   :: Σ_i a_i b_i over two equal-length fixed-point vectors (scaled² result)
@@ -34,7 +37,7 @@ core plan
   matvec = fn [v recipes] ->
              loop with [r = recipes, acc = 0] :
                if (r == 0) then (reverse acc)
-               else again((tail r), [ (div (dot v (head r)) (scale 0)) acc ])
+               else again((tail r), [ (div (add (dot v (head r)) 500) (scale 0)) acc ])
              end
 
   :: one Cockshott iteration of the labour-value recurrence
@@ -71,7 +74,7 @@ core plan
   :: expands; where p/v < 1 it contracts. One steering step multiplies each
   :: final-demand entry by its ratio, clamped to [1/2, 2] per period so the
   :: plan adjusts smoothly rather than oscillating.
-  ratio1 = fn [p v] -> if (v == 0) then 1000 else (div (mul p 1000) v)
+  ratio1 = fn [p v] -> if (v == 0) then 1000 else (div (add (mul p 1000) (div v 2)) v)
   clamp2 = fn [r] -> if (lt r 500) then 500 else if (lt 2000 r) then 2000 else r
   ratios = fn [prices values] ->
              loop with [p = prices, v = values, acc = 0] :
@@ -81,7 +84,7 @@ core plan
   steer = fn [demand prices values] ->
             loop with [y = demand, r = (ratios prices values), acc = 0] :
               if (y == 0) then (reverse acc)
-              else again((tail y), (tail r), [ (div (mul (head y) (clamp2 (head r))) 1000) acc ])
+              else again((tail y), (tail r), [ (div (add (mul (head y) (clamp2 (head r))) 500) 1000) acc ])
             end
 
   :: ---- harmony-function plan balancing (TNS pp. 94-99) ----------------------
@@ -93,8 +96,8 @@ core plan
   :: marginals, so the algorithm repeatedly moves a small parcel of labour from
   :: the lowest-marginal good to the highest — Cockshott's marginalist method,
   :: with the harmony function standing as a social utility function.
-  fulfil = fn [li cost] -> if (cost == 0) then 1000 else let r = (div (mul li 1000) cost) in if (lt 1000 r) then 1000 else r
-  marg1  = fn [li cost] -> if (cost == 0) then 0 else (div (mul (sub 1000 (fulfil li cost)) 2000000) cost)
+  fulfil = fn [li cost] -> if (cost == 0) then 1000 else let r = (div (add (mul li 1000) (div cost 2)) cost) in if (lt 1000 r) then 1000 else r
+  marg1  = fn [li cost] -> if (cost == 0) then 0 else (div (add (mul (sub 1000 (fulfil li cost)) 2000000) (div cost 2)) cost)
   margs  = fn [ls costs] ->
              loop with [l = ls, c = costs, acc = 0] :
                if (l == 0) then (reverse acc)
@@ -141,6 +144,6 @@ core plan
       if (l == 0) then acc
       else
         let u = (sub 1000 (fulfil (head l) (head c))) in
-        again((tail l), (tail c), (add acc (sub 1000 (div (mul u u) 1000))))
+        again((tail l), (tail c), (add acc (sub 1000 (div (add (mul u u) 500) 1000))))
     end
 end

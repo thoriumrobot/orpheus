@@ -1,24 +1,78 @@
-:: Forge — a Mocha app for team coding across connected machines. State is a shared,
-:: append-only log of [author snippet] entries. Because every poke is a gossiped,
-:: durable event, all teammates' nodes converge on the same codebase log.
+:: ===========================================================================
+:: Forge — team coding on the Mocha runtime.
+::
+:: The shared state is a log of SNIPPETS, newest first: each entry is
+:: [author [name code]] (all cords). Because every poke is a durable, gossiped
+:: event, every teammate's node converges on the same codebase log: share a
+:: module from your System, and a teammate opens it, compiles it, and has it
+:: live — `latte team --listen/--peer` links machines; the GUI's /api/forge
+:: hosts a persistent local node.
+::
+:: pokes:  %add [author [name code]]   share a snippet (newest wins a name)
+:: %del name                   retire every snippet with that name
+:: %clear                      empty the forge
+:: peeks:  %count · %all · %last · %get name · %names · %by author
+:: ===========================================================================
 import std
 import mocha
 core forge
+  entry_author = fn [e] -> head e
+  entry_name = fn [e] -> head (tail e)
+  entry_code = fn [e] -> tail (tail e)
+
+  :: the newest entry carrying a name (the log is newest-first), or 0
+  find = fn [nm state] ->
+    loop with [c = state] :
+      if (c == 0) then 0
+      else if ((entry_name (head c)) == nm) then (head c)
+      else again((tail c))
+    end
+
+  :: every distinct name, newest first
+  names = fn [state] ->
+    loop with [c = state, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else
+        let nm = (entry_name (head c)) in
+        if ((member nm acc) == 0) then again((tail c), acc)
+        else again((tail c), [nm acc])
+    end
+
+  :: every entry by one author, newest first
+  by = fn [who state] ->
+    loop with [c = state, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else if ((entry_author (head c)) == who) then again((tail c), [(head c) acc])
+      else again((tail c), acc)
+    end
+
+  drop_name = fn [nm state] ->
+    loop with [c = state, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else if ((entry_name (head c)) == nm) then again((tail c), acc)
+      else again((tail c), [(head c) acc])
+    end
+
   poke = fn [action state] ->
-           let tag = head action in
-           let arg = tail action in
-           case tag of
-             %add   -> (ok [ arg state ]) ;   :: arg = [author snippet]
-             %clear -> (ok 0) ;
-             _      -> (ok state)
-           end
+    let tag = head action in
+    let arg = tail action in
+    case tag of
+      %add -> (ok [arg state]); :: arg = [author [name code]]
+      %del -> (ok (drop_name arg state));
+      %clear -> (ok 0);
+      _ -> (ok state)
+    end
+
   peek = fn [query state] ->
-           let tag = head query in
-           let arg = tail query in
-           case tag of
-             %count -> (len state) ;
-             %all   -> state ;
-             %last  -> (head state) ;
-             _      -> 0
-           end
+    let tag = head query in
+    let arg = tail query in
+    case tag of
+      %count -> (len state);
+      %all -> state;
+      %last -> (head state);
+      %get -> (find arg state);
+      %names -> (names state);
+      %by -> (by arg state);
+      _ -> 0
+    end
 end

@@ -140,6 +140,8 @@
     <a href="#" onclick="openTool('Gpu');return false" title="GPU tool text">GPU</a><a class="pg" href="/gpu" target="_blank">↗</a>
     <a href="#" onclick="openTool('Net');return false" title="interaction-net tool text">Net</a>
     <a href="#" onclick="openTool('News');return false" title="news-sentiment tool text">News</a>
+    <a href="#" onclick="openTool('Forge');return false" title="team coding — the shared snippet log">Forge</a>
+    <a href="#" onclick="openTool('Format');return false" title="the Latte code formatter">Format</a>
     <a href="#" onclick="openDocsTool();return false" title="documentation index">Docs</a><a class="pg" href="/docs" target="_blank">↗</a>
     <a href="#" onclick="openPage('Grammar','/grammar');return false" title="the Ligurian grammar">Grammar</a>
     <a href="#" onclick="openPage('Chess','/chess');return false" title="the chess board">Chess</a>
@@ -615,7 +617,7 @@ function renderLine(text){
   return d;
 }
 function looksLikeCommand(t){
-  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|hello\.|libs)/.test(t.trim());
+  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
 }
 /* serialize ONE rendered line back to markdown */
 function lineToMarkdown(node){
@@ -984,7 +986,10 @@ function runObjectCommand(line, done){
         .catch(function(e){ done(String(e),true,true); });
       return true;
     case 'plan':
-      post('/api/plan', rest||'demo3', function(out){
+      // a spec uses `;` to separate sector/demand/market/labour sections
+      // (newlines can't survive a one-line run button); restore them here
+      var planbody = (rest||'demo3').indexOf(';')>=0 ? rest.split(';').map(function(s){return s.trim();}).join('\n') : (rest||'demo3');
+      post('/api/plan', planbody, function(out){
         done('<pre style="margin:0;font:12px/1.5 inherit;white-space:pre-wrap">'+esc(out)+'</pre>', false);
       });
       return true;
@@ -1030,6 +1035,49 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.Clear'){ clearLog(); return; }
   if(headTok==='System.Modules'||headTok==='System.Sources'){ logEcho(line); refreshModules(); return; }
   if(headTok==='System.OpenTrack'){ logEcho(line); openTrackCol(); return; }
+  // ---- Forge.* : team coding (the shared snippet log; /api/forge) ----
+  if(headTok==='Forge.As'){
+    logEcho(line);
+    if(rest){ forgeAs = rest.split(/\s+/)[0]; logOut('sharing as '+forgeAs); }
+    else logOut('you are '+forgeAs+' — Forge.As <name> to change');
+    return;
+  }
+  if(headTok==='Forge.Share'){
+    logEcho(line);
+    var fv = marked || fromViewer;
+    if(!fv || !fv.textarea){ logOut('Forge.Share: mark a source frame first (its code is what you share)', true); return; }
+    var src = fv.textarea.value;
+    var nm = rest.split(/\s+/)[0] || (src.match(/^\s*core\s+([A-Za-z0-9_-]+)/m)||[])[1] || fv.name.replace(/\.Mod$/,'');
+    post('/api/forge', 'share '+forgeAs+' '+nm+'\n'+src, function(out){ logOut(out, /error/i.test(out)); });
+    return;
+  }
+  if(headTok==='Forge.Open'){
+    logEcho(line);
+    var onm = rest.split(/\s+/)[0];
+    if(!onm){ logOut('Forge.Open: name a snippet (Forge.List shows them)', true); return; }
+    post('/api/forge', 'get '+onm, function(out){
+      if(/^\(no snippet|^forge error/.test(out)){ logOut(out, true); return; }
+      openSourceFrame(onm+'.Mod', out);
+      logOut('opened \u2014 Compile makes it live in YOUR system');
+    });
+    return;
+  }
+  if(headTok==='Forge.List'||headTok==='Forge.Names'||headTok==='Forge.Count'){
+    logEcho(line);
+    var fverb = headTok==='Forge.List' ? 'list' : headTok==='Forge.Names' ? 'names' : 'count';
+    post('/api/forge', fverb + (rest?' '+rest:''), function(out){ logOut(out, /error/i.test(out)); });
+    return;
+  }
+  if(headTok==='Forge.By'){
+    logEcho(line);
+    post('/api/forge', 'by '+rest, function(out){ logOut(out, /error/i.test(out)); });
+    return;
+  }
+  if(headTok==='Forge.Del'||headTok==='Forge.Clear'){
+    logEcho(line);
+    post('/api/forge', headTok==='Forge.Del' ? 'del '+rest : 'clear', function(out){ logOut(out, /error/i.test(out)); });
+    return;
+  }
   if(headTok==='System.CloseTrack'){ logEcho(line); var ctv=targetViewer(rest, fromViewer); closeTrackCol(ctv && rest ? ctv.box.parentElement : null); return; }
   if(headTok==='System.Move'){ logEcho(line); moveViewerNextTrack(targetViewer(rest, fromViewer)); return; }
   if(headTok==='System.New'){ logEcho(line); newModuleViewer(rest||'mymod'); return; }
@@ -1208,20 +1256,33 @@ function exec(line, fromViewer, ctx){
   if(sink){
     var ph2 = sink.afterNode;
     post('/api/run', resolveArgs(line), function(out){
+      var r = richOut(out);
+      if(r){ insertObjAt(sink.textViewer, ph2, line, r.body); return; }
       var isErr=/^!|error/i.test(out);
       insertObjAt(sink.textViewer, ph2, line,
         '<pre style="margin:0;font:12px/1.5 inherit;white-space:pre-wrap'+(isErr?';color:#8d1f1f':'')+'">'+esc(out)+'</pre>');
     });
     return;
   }
-  post('/api/run', resolveArgs(line), function(out){ logOut(out, /^!|error/i.test(out)); });
+  post('/api/run', resolveArgs(line), function(out){
+    var r = richOut(out);
+    if(r){ logObj(r.body); return; }
+    logOut(out, /^!|error/i.test(out));
+  });
+}
+
+/* a render object from a pure-Latte tool: the server marks results tagged
+   [%svg cord] / [%html cord] with \u0001kind\u0001 so they embed live */
+function richOut(out){
+  var m = /^\u0001(svg|html)\u0001([\s\S]*)$/.exec(out);
+  return m ? {kind:m[1], body:m[2]} : null;
 }
 
 function formatFrame(v){
   if(!v||!v.textarea){ logOut('Edit.Format: mark a source frame first', true); return; }
   post('/api/fmt', v.textarea.value, function(out){
-    if(out && out !== v.textarea.value){ v.textarea.value = out; logOut('formatted (conservative; compile-checked)'); }
-    else logOut('already formatted');
+    if(out && out !== v.textarea.value){ v.textarea.value = out; logOut('formatted — canonical indentation and spacing (meaning-preservation proven by AST equality)'); }
+    else logOut('already canonical');
   });
 }
 
@@ -1278,6 +1339,12 @@ function openModule(name){
     mark(makeViewer({name:name+'.Mod', track:'user', kind:'frame', content:src, menu:sourceMenu,
       foot:'module `'+name+'` — Compile loads it into the running system; Store persists it (system libs to lib/, your packages to pkg/)'}));
   });
+}
+/* a source frame around given code (Forge.Open and friends) */
+var forgeAs = 'anon';
+function openSourceFrame(name, src){
+  mark(makeViewer({name:name, track:'user', kind:'frame', content:src, menu:sourceMenu,
+    foot:'from the forge — Compile loads it into YOUR running system; Format tidies it; Forge.Share sends your edits back'}));
 }
 function newModuleViewer(name){
   var src='import std\ncore '+name+'\n  greet = fn [_] -> %hello\nend\n';
@@ -1462,9 +1529,15 @@ var TOOLS = {
 '\n'+
 '[The 3-sector demo](run: plan demo3) [Two-sector classic](run: plan 40 0 1000) [Open the manual](run: System.Edit planning)\n'+
 '\n'+
-'## Custom economies\n'+
-'Write a spec (sector/demand/market/labour lines) in the /plan page form, or POST it to\n'+
-'/api/plan \u2014 the format is in the manual above.\n',
+'## A custom economy, in place\n'+
+'Edit the spec and run it — values, gross outputs, steering, and harmony all\n'+
+'compute here. Sections are separated by `;` (sector / demand / market /\n'+
+'labour, in natural units):\n'+
+'[field: spec=sector steel l=0.4 steel=0.2 grain=0.1 ; sector grain l=0.3 steel=0.5 grain=0.1 ; demand steel=0 grain=1.5 ; market steel=0.9 grain=1.7 ; labour 0.8]\n'+
+'[Plan this economy](run: plan $spec)\n'+
+'\n'+
+'For a larger or saved economy, the /plan page has a full editor; the spec\n'+
+'format and the calculation debate are in the manual above.\n',
  Trace:
 '# Trace.Tool — the ray tracer\n'+
 'Written in Latte, Anvil-compiled: checkered ground, sky, key + fill lights, shadows,\n'+
@@ -1562,7 +1635,46 @@ var TOOLS = {
 '[Advise with sentiment](run: trade account=$account sentiment=$s)\n'+
 '\n'+
 'CLI: `latte fetch --news <url>` curls a document into news/; `latte trade\n'+
-'--news FILE` scores it whole and blends it in; `latte sentiment --file f.txt`.\n'
+'--news FILE` scores it whole and blends it in; `latte sentiment --file f.txt`.\n',
+ Forge:
+'# Forge.Tool — team coding\n'+
+'A shared, append-only SNIPPET LOG on the Mocha runtime: every share is a\n'+
+'durable event, so the log survives restarts and converges across linked\n'+
+'machines (`latte team --listen/--peer`; the GUI hosts a persistent node).\n'+
+'\n'+
+'## The loop\n'+
+'1. Write a module in a source frame (System.New, or open one from Modules).\n'+
+'2. Mark it and share it:\n'+
+'your name [field: who=anon]\n'+
+'[Set name](run: Forge.As $who) [Share the marked frame](run: Forge.Share)\n'+
+'3. A teammate lists and opens — every listed line is itself runnable:\n'+
+'[List the forge](run: Forge.List) [Names only](run: Forge.Names) [Count](run: Forge.Count)\n'+
+'4. They middle-click `Forge.Open <name>` in the Log, press Compile, and your\n'+
+'code is live in THEIR system. Edits go back with Forge.Share.\n'+
+'\n'+
+'## Direct commands\n'+
+'snippet [field: nm=fib]  author [field: by=alice]\n'+
+'[Open](run: Forge.Open $nm) [By author](run: Forge.By $by) [Retire](run: Forge.Del $nm)\n'+
+'\n'+
+'CLI bridge: `latte team --as ada --name fib --share "<code>" --show`,\n'+
+'`latte team --get fib`, `latte team --names`; add `--listen/--peer` to gossip\n'+
+'between machines, `--store DIR` for a durable CLI log.\n',
+ Format:
+'# Format.Tool — the Latte code formatter\n'+
+'Canonical indentation and spacing for any Latte source, with the author\u2019s\n'+
+'line breaks and every comment preserved. Formatting is PROVEN safe: the\n'+
+'result must re-parse to the identical AST (arm for arm) or the source is\n'+
+'returned untouched.\n'+
+'\n'+
+'[Format the marked frame](run: Edit.Format *)\n'+
+'\n'+
+'Format also sits in every source frame\u2019s menu, next to Compile and Store —\n'+
+'the loop is: write, Format, Compile, Store, Forge.Share.\n'+
+'\n'+
+'The canon, at a glance: arms at two spaces; bodies one step in; `loop`/`case`\n'+
+'bodies one step past their opener with `end` aligned under it; let-chains\n'+
+'flat; tight brackets `[a b c]`; spaced `=`, `==`, `->`; `again(` tight.\n'+
+'CLI: `latte fmt <file.lat> [--write]`.\n'
 };
 
 function openTool(name){
@@ -1617,9 +1729,25 @@ var SYSTEM_TOOL =
 '\n'+
 '## TOOLS\n'+
 'Every tool text is one click away in the header or the Contents viewer (right):\n'+
-'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu, Net, News — plus\n'+
+'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu, Net, News,\n'+
+'Forge (team coding), Format (the Latte formatter) — plus\n'+
 'the Draw editor, the soundlib/phono conlang pages, the chess and xiangqi\n'+
 'boards, and the Facet page editor as pages (all listed under Contents).\n'+
+'\n'+
+'## TOOLS IN PURE LATTE — never leave the GUI\n'+
+'New tools need no Rust and no terminal. The whole loop lives here:\n'+
+'1. System.New <name> opens a fresh module frame; write arms in Latte.\n'+
+'2. Latte has STRING LITERALS ("text", with \\" \\n escapes) and std has the\n'+
+'cord toolkit: cat, catall, joincords, numtext, fixtext, bytelen — arithmetic\n'+
+'jets are arbitrary-precision, so cords of any length compute natively.\n'+
+'3. Return [%html <cord>] or [%svg <cord>] from an arm and the result EMBEDS\n'+
+'as a live object where you ran it; plain values print; `ui Tool.arm` makes\n'+
+'panels. Try it (hello.Mod below is compiled at boot):\n'+
+'hello.badge 9\n'+
+'hello.spark [3 [9 [5 [12 [7 0]]]]]\n'+
+'4. Format (menu) keeps the source canonical; Compile makes it live;\n'+
+'Store persists it to pkg/ (reloaded every start); Forge.Share sends it to\n'+
+'the team. The system\u2019s command set is just your Latte source.\n'+
 '\n'+
 '## VIEWER HANDLING (the Oberon gestures)\n'+
 'Drag a title bar up/down to resize the viewer. Inter-click the MIDDLE button\n'+
@@ -1644,6 +1772,16 @@ var HELLO_MOD =
 '                      if (i == 0) then a else again(b, (add a b), (dec i))\n'+
 '                    end\n'+
 '  shout = fn [_] -> %hey\n'+
+'\n'+
+'  :: tools render: tag a cord %html or %svg and it embeds as a LIVE OBJECT.\n'+
+'  :: try  hello.badge 9  and  hello.spark [3 [9 [5 [12 [7 0]]]]]  in a text\n'+
+'  badge = fn [n] ->\n'+
+'    [%html (catall ["<b style=\\"color:#5059c8\\">fib(" [(numtext n) [") = " [(numtext (fib n)) ["</b>" 0]]]]])]\n'+
+'  bar   = fn [i v] ->\n'+
+'    (catall ["<rect x=\\"" [(numtext (mul i 14)) ["\\" y=\\"" [(numtext (sub 48 (min 48 (mul v 3)))) ["\\" width=\\"12\\" height=\\"" [(numtext (min 48 (mul v 3))) ["\\"/>" 0]]]]]]])\n'+
+'  spark = fn [xs] ->\n'+
+'    let bars = (catall (map (fn [p] -> (bar (head p) (tail p))) (enumerate xs))) in\n'+
+'    [%svg (catall ["<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"" [(numtext (mul (len xs) 14)) ["\\" height=\\"48\\" fill=\\"#5059c8\\">" [bars ["</svg>" 0]]]]])]\n'+
 'end\n';
 
 window.addEventListener('load', function(){

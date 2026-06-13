@@ -16,45 +16,88 @@ fn operands(subject: &N) -> Result<(u128, u128), Crash> {
     Ok((a, b))
 }
 
+/// The operands as full atoms — the BIG path. Cords are atoms, so a string-
+/// building program multiplies and divides numbers far beyond u128; every
+/// arithmetic jet falls back to arbitrary-precision host arithmetic instead
+/// of crashing (a crash here would send the interpreter into a unary loop of
+/// astronomic length).
+fn big_operands(subject: &N) -> Result<(Atom, Atom), Crash> {
+    let s = slot(&Atom::from_u128(3), subject)?;
+    let (a, b) = s.as_cell().ok_or_else(|| Crash::Bottom("arith jet: sample not [a b]".into()))?;
+    let a = a.as_atom().ok_or_else(|| Crash::Bottom("arith jet: a not an atom".into()))?;
+    let b = b.as_atom().ok_or_else(|| Crash::Bottom("arith jet: b not an atom".into()))?;
+    Ok((a.clone(), b.clone()))
+}
+fn atom_n(a: Atom) -> N {
+    std::sync::Arc::new(crate::knot::Knot::Atom(a))
+}
+
 fn jet_add(s: &N) -> Eval {
-    let (a, b) = operands(s)?;
-    a.checked_add(b).map(num).ok_or_else(|| Crash::Bottom("add jet overflow".into()))
+    if let Ok((a, b)) = operands(s) {
+        if let Some(v) = a.checked_add(b) {
+            return Ok(num(v));
+        }
+    }
+    let (a, b) = big_operands(s)?;
+    Ok(atom_n(a.add(&b)))
 }
 fn jet_sub(s: &N) -> Eval {
-    let (a, b) = operands(s)?;
-    // pure `sub` diverges if b > a; the jet reports a clean domain error instead
-    a.checked_sub(b).map(num).ok_or_else(|| Crash::Bottom("sub jet: underflow".into()))
+    if let Ok((a, b)) = operands(s) {
+        // pure `sub` diverges if b > a; the jet reports a clean domain error instead
+        return a.checked_sub(b).map(num).ok_or_else(|| Crash::Bottom("sub jet: underflow".into()));
+    }
+    let (a, b) = big_operands(s)?;
+    a.sub_big(&b).map(atom_n).ok_or_else(|| Crash::Bottom("sub jet: underflow".into()))
 }
 fn jet_mul(s: &N) -> Eval {
-    let (a, b) = operands(s)?;
-    a.checked_mul(b).map(num).ok_or_else(|| Crash::Bottom("mul jet overflow".into()))
+    if let Ok((a, b)) = operands(s) {
+        if let Some(v) = a.checked_mul(b) {
+            return Ok(num(v));
+        }
+    }
+    let (a, b) = big_operands(s)?;
+    Ok(atom_n(a.mul_big(&b)))
 }
 fn jet_div(s: &N) -> Eval {
-    let (a, b) = operands(s)?;
-    if b == 0 {
-        return Err(Crash::Bottom("div jet: divide by zero".into()));
+    if let Ok((a, b)) = operands(s) {
+        if b == 0 {
+            return Err(Crash::Bottom("div jet: divide by zero".into()));
+        }
+        return Ok(num(a / b));
     }
-    Ok(num(a / b))
+    let (a, b) = big_operands(s)?;
+    let (q, _) = a.divmod_big(&b).ok_or_else(|| Crash::Bottom("div jet: divide by zero".into()))?;
+    Ok(atom_n(q))
 }
 fn jet_mod(s: &N) -> Eval {
-    let (a, b) = operands(s)?;
-    if b == 0 {
-        return Err(Crash::Bottom("mod jet: divide by zero".into()));
+    if let Ok((a, b)) = operands(s) {
+        if b == 0 {
+            return Err(Crash::Bottom("mod jet: divide by zero".into()));
+        }
+        return Ok(num(a % b));
     }
-    Ok(num(a % b))
+    let (a, b) = big_operands(s)?;
+    let (_, r) = a.divmod_big(&b).ok_or_else(|| Crash::Bottom("mod jet: divide by zero".into()))?;
+    Ok(atom_n(r))
 }
 
 fn jet_lt(s: &N) -> Eval {
-    let (a, b) = operands(s)?;
-    Ok(num(if a < b { 0 } else { 1 })) // loobean: 0 = true
+    if let Ok((a, b)) = operands(s) {
+        return Ok(num(if a < b { 0 } else { 1 })); // loobean: 0 = true
+    }
+    let (a, b) = big_operands(s)?;
+    Ok(num(if a.cmp_big(&b) == std::cmp::Ordering::Less { 0 } else { 1 }))
 }
 fn jet_dec(s: &N) -> Eval {
     let n = slot(&Atom::from_u128(3), s)?;
-    let v = n.as_atom().and_then(|x| x.to_u128()).ok_or_else(|| Crash::Bottom("dec jet: not a small atom".into()))?;
-    if v == 0 {
-        return Err(Crash::Bottom("dec jet: dec(0)".into()));
+    if let Some(v) = n.as_atom().and_then(|x| x.to_u128()) {
+        if v == 0 {
+            return Err(Crash::Bottom("dec jet: dec(0)".into()));
+        }
+        return Ok(num(v - 1));
     }
-    Ok(num(v - 1))
+    let a = n.as_atom().ok_or_else(|| Crash::Bottom("dec jet: not an atom".into()))?;
+    a.sub_big(&Atom::from_u128(1)).map(atom_n).ok_or_else(|| Crash::Bottom("dec jet: dec(0)".into()))
 }
 
 // ============================================================================

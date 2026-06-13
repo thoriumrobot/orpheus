@@ -24,10 +24,11 @@ use crate::knot::{cell, cord, num, N};
 use crate::loom::{f_axis, f_quote, peg};
 
 // ----------------------------- AST ------------------------------------------
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ast {
     Lit(u128),
     Tag(String),
+    Text(String), // "a string literal" — a cord atom; unlike %tags it admits any character
     Nil,
     Var(String),
     Tuple(Vec<Ast>),
@@ -51,6 +52,7 @@ pub enum Ast {
 enum Tok {
     Num(u128),
     Tag(String),   // %ident
+    Str(String),   // "quoted text" with \" \\ \n \t escapes
     Ident(String), // includes keywords
     LBrack,
     RBrack,
@@ -108,6 +110,41 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>, String> {
         }
         let start = i;
         match c {
+            '"' => {
+                // "string literal" -> a cord atom; escapes: \" \\ \n \t
+                let mut s = String::new();
+                let mut j = i + 1;
+                loop {
+                    if j >= b.len() || b[j] == b'\n' {
+                        let (l, co) = line_col(src, start);
+                        return Err(format!("line {}, col {}: unterminated string literal", l, co));
+                    }
+                    match b[j] {
+                        b'"' => { j += 1; break; }
+                        b'\\' if j + 1 < b.len() => {
+                            match b[j + 1] {
+                                b'"' => s.push('"'),
+                                b'\\' => s.push('\\'),
+                                b'n' => s.push('\n'),
+                                b't' => s.push('\t'),
+                                other => {
+                                    let (l, co) = line_col(src, j);
+                                    return Err(format!("line {}, col {}: unknown escape '\\{}'", l, co, other as char));
+                                }
+                            }
+                            j += 2;
+                        }
+                        _ => {
+                            // copy the full UTF-8 character
+                            let ch_len = src[j..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+                            s.push_str(&src[j..j + ch_len]);
+                            j += ch_len;
+                        }
+                    }
+                }
+                push!(Tok::Str(s), start);
+                i = j;
+            }
             '[' => { push!(Tok::LBrack, start); i += 1; }
             ']' => { push!(Tok::RBrack, start); i += 1; }
             '(' => { push!(Tok::LParen, start); i += 1; }
@@ -410,6 +447,10 @@ impl Parser {
                 self.next();
                 Ok(Ast::Tag(t))
             }
+            Some(Tok::Str(s)) => {
+                self.next();
+                Ok(Ast::Text(s))
+            }
             Some(Tok::Plus) => {
                 self.next();
                 self.eat(&Tok::LParen)?;
@@ -525,6 +566,29 @@ pub fn parse(src: &str) -> Result<Ast, String> {
         return Err(p.err("unexpected trailing input"));
     }
     Ok(e)
+}
+
+/// A parsed program for structural comparison — the formatter's proof that a
+/// reformat preserved meaning: a module's imports and named arm ASTs, or a
+/// bare expression's AST. Derived equality is exact AST equality.
+#[derive(Debug, PartialEq)]
+pub enum Program {
+    Module(Vec<String>, Vec<(String, Vec<String>, Ast)>),
+    Expr(Ast),
+}
+
+pub fn parse_program(src: &str) -> Result<Program, String> {
+    let has_core = src.lines().any(|l| {
+        let t = l.trim_start();
+        t == "core" || t.starts_with("core ")
+    });
+    if has_core {
+        let (imports, body) = split_imports(src);
+        let arms = parse_module(&body)?;
+        Ok(Program::Module(imports, arms))
+    } else {
+        Ok(Program::Expr(parse(src)?))
+    }
 }
 
 /// Parse a module: `core [name] arm = fn [..] -> .. ; arm2 = .. end`.
@@ -801,50 +865,9 @@ fn resolve_lib(name: &str) -> Option<String> {
 /// of an arm head and around `->`. The result is compile-checked: if the
 /// formatted text no longer compiles, the original is returned unchanged.
 pub fn format_source(src: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut blank_run = 0usize;
-    let mut in_core = false;
-    for raw in src.lines() {
-        let mut line = raw.replace('\t', "  ");
-        while line.ends_with(' ') {
-            line.pop();
-        }
-        let t = line.trim_start();
-        if t.is_empty() {
-            blank_run += 1;
-            if blank_run <= 1 {
-                out.push(String::new());
-            }
-            continue;
-        }
-        blank_run = 0;
-        let formatted = if t.starts_with("import ") || t.starts_with("core ") {
-            if t.starts_with("core ") {
-                in_core = true;
-            }
-            t.to_string()
-        } else if t == "end" && in_core && line.trim() == "end" && leading(&line) <= 2 {
-            in_core = false;
-            "end".to_string()
-        } else if in_core && is_arm_head(t) && leading(&line) <= 8 {
-            format!("  {}", t)
-        } else {
-            // keep the author's indentation and spacing verbatim (alignment is
-            // intentional in Latte sources; a formatter must not flatten it)
-            line.clone()
-        };
-        out.push(formatted);
-    }
-    let mut text = out.join("\n");
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    // safety: a formatter must never break the program
-    if gather(&text).is_err() && gather(src).is_ok() {
-        return src.to_string();
-    }
-    text
+    crate::fmt::format_checked(src)
 }
+
 fn leading(l: &str) -> usize {
     l.len() - l.trim_start().len()
 }
@@ -1277,6 +1300,7 @@ fn gen(ast: &Ast, env: &Env) -> Result<N, String> {
         Ast::Lit(n) => Ok(f_quote(num(*n))),
         Ast::Nil => Ok(f_quote(num(0))),
         Ast::Tag(t) => Ok(f_quote(cord(t))),
+        Ast::Text(t) => Ok(f_quote(cord(t))),
         Ast::Var(name) => match env.lookup(name) {
             Some(axis) => Ok(f_axis(axis)),
             None => Err(format!("unbound face '{}'", name)),
@@ -1327,7 +1351,18 @@ fn gen(ast: &Ast, env: &Env) -> Result<N, String> {
         Ast::Loop(binds, body) => gen_loop(binds, body, env),
         Ast::Again(args) => gen_again(args, env),
         Ast::Call(name, args) => {
-            // 1) a sibling module arm (static by-name call)
+            // 1) a LOCAL face holding a first-class gate value (a parameter, a
+            //    let, a loop variable): lexical scope shadows module arms — an
+            //    arm named `f` must never capture `map`'s parameter `f`
+            if let Some(face_axis) = env.lookup(name) {
+                if args.is_empty() {
+                    return Err(format!("gate '{}' applied to no arguments", name));
+                }
+                let sample = build_sample(args, env)?;
+                let edit = cell(num(10), cell(cell(num(6), sample), f_axis(face_axis)));
+                return Ok(cell(num(9), cell(num(2), edit)));
+            }
+            // 2) a sibling module arm (static by-name call)
             if let Some((arm_axis, arity)) = env.lookup_func(name) {
                 if args.len() != arity {
                     return Err(format!(
@@ -1343,15 +1378,6 @@ fn gen(ast: &Ast, env: &Env) -> Result<N, String> {
                 let sample = build_sample(args, env)?;
                 let edit = cell(num(10), cell(cell(num(3), sample), f_axis(mc)));
                 return Ok(cell(num(9), cell(num(arm_axis), edit)));
-            }
-            // 2) a face holding a first-class gate value: set its sample, invoke arm 2
-            if let Some(face_axis) = env.lookup(name) {
-                if args.is_empty() {
-                    return Err(format!("gate '{}' applied to no arguments", name));
-                }
-                let sample = build_sample(args, env)?;
-                let edit = cell(num(10), cell(cell(num(6), sample), f_axis(face_axis)));
-                return Ok(cell(num(9), cell(num(2), edit)));
             }
             Err(format!("unknown function or gate '{}'", name))
         }
@@ -1461,6 +1487,26 @@ mod tests {
     use super::*;
     use crate::knot::{cell, num};
     use crate::loom::tar;
+
+    #[test]
+    fn local_faces_shadow_module_arms() {
+        // A user arm named `f` must NOT capture a parameter named `f`: lexical
+        // scope wins over sibling arms. (Regression: the resolver once tried
+        // arms first, which broke std.map for any module defining an arm `f`.)
+        // run_module_expr wraps these defs in a core, so they're raw arms.
+        let m = "  f = fn [x] -> (mul x x)\n  apply = fn [f v] -> (f v)";
+        // apply's parameter `f` is the passed gate (y+100 at 5 = 105), not arm f (would be 25)
+        assert_eq!(run_module_expr(m, "(apply (fn [y] -> (add y 100)) 5)").unwrap(), num(105));
+
+        // std.map works under a module that also defines an arm `f`
+        let m2 = "  f = fn [x] -> (mul x 2)";
+        let want = run_with_libs("[2 [3 [4 0]]]", &["std"]).unwrap();
+        assert_eq!(run_module_expr(m2, "(map (fn [x] -> (add x 1)) [1 [2 [3 0]]])").unwrap(), want);
+
+        // a sibling arm IS still reachable when no local face shadows it
+        let m3 = "  dbl = fn [x] -> (mul x 2)";
+        assert_eq!(run_module_expr(m3, "(dbl 21)").unwrap(), num(42));
+    }
 
     #[test]
     fn tool_library_is_a_default_command_module() {
