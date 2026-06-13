@@ -1,0 +1,53 @@
+:: ===========================================================================
+:: mvcc.lat — multi-version concurrency control & snapshot isolation
+:: (DDIA, Ch. 7, pp. 237-242).
+::
+:: Every write creates a NEW version stamped with its commit timestamp; it never
+:: overwrites. A transaction reads against a SNAPSHOT (its start timestamp): for
+:: each key it sees the newest version committed at or before it started, so
+:: readers never block writers and a transaction sees a consistent point-in-time
+:: view (repeatable read). On commit, a write-write check rejects a transaction
+:: whose keys were committed by someone else since it began (first-committer-wins).
+:: Arms prefixed `mvcc_`.
+::
+:: store = list of [key versions];  versions = newest-first list of [ts value].
+:: ===========================================================================
+import std
+core mvcc
+  mvcc_new      = fn [_] -> 0
+  mvcc_versions = fn [store k] ->
+    loop with [c = store] :
+      if (c == 0) then 0
+      else if ((head (head c)) == k) then (tail (head c))
+      else again((tail c))
+    end
+  :: install a committed version of k at commit timestamp ts (newest in front)
+  mvcc_commit = fn [store k v ts] ->
+    [ [k [ [ts v] (mvcc_versions store k) ]]
+      (filter (fn [e] -> (not ((head e) == k))) store) ]
+
+  :: SNAPSHOT READ: newest version with commit-ts <= snapts; %absent if none.
+  :: A version committed AFTER the snapshot is invisible — that's repeatable read.
+  mvcc_visible = fn [versions snapts] ->
+    loop with [c = versions] :
+      if (c == 0) then %absent
+      else if (lte (head (head c)) snapts) then [ %val (tail (head c)) ]
+      else again((tail c))
+    end
+  mvcc_read = fn [store k snapts] -> (mvcc_visible (mvcc_versions store k) snapts)
+
+  :: WRITE-WRITE CONFLICT: 0 if some key in `writeset` got a committed version in
+  :: (startts, committs] — i.e. another transaction touched it since we began, so
+  :: we must abort (first committer wins). 1 if the commit is safe.
+  mvcc_keyconflict = fn [versions lo hi] ->
+    (any (fn [ver] -> (and (gt (head ver) lo) (lte (head ver) hi))) versions)
+  mvcc_wconflict = fn [store writeset startts committs] ->
+    (any (fn [k] -> (mvcc_keyconflict (mvcc_versions store k) startts committs)) writeset)
+
+  :: attempt to commit a transaction's buffered writes (list of [key value]) at
+  :: committs, given its snapshot startts: [%commit store'] or [%abort store]
+  mvcc_try = fn [store writes startts committs] ->
+    if ((mvcc_wconflict store (map (fn [w] -> (head w)) writes) startts committs) == 0)
+    then [ %abort store ]
+    else [ %commit (foldl (fn [s w] -> (mvcc_commit s (head w) (tail w) committs)) store writes) ]
+end

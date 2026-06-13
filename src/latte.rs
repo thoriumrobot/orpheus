@@ -759,6 +759,16 @@ pub const WIRE_LAT: &str = include_str!("../lib/wire.lat");
 pub const MAPRED_LAT: &str = include_str!("../lib/mapred.lat");
 /// Merkle trees for anti-entropy (DDIA Ch.5), via `import merkle`.
 pub const MERKLE_LAT: &str = include_str!("../lib/merkle.lat");
+/// MVCC / snapshot isolation (DDIA Ch.7), via `import mvcc`.
+pub const MVCC_LAT: &str = include_str!("../lib/mvcc.lat");
+/// HyperLogLog cardinality estimation (DDIA analytics), via `import hll`.
+pub const HLL_LAT: &str = include_str!("../lib/hll.lat");
+/// Count-Min Sketch frequency estimation (DDIA analytics), via `import cms`.
+pub const CMS_LAT: &str = include_str!("../lib/cms.lat");
+/// Windowed stream processing (DDIA Ch.11), via `import stream`.
+pub const STREAM_LAT: &str = include_str!("../lib/stream.lat");
+/// Raft consensus core (DDIA Ch.9), via `import raft`.
+pub const RAFT_LAT: &str = include_str!("../lib/raft.lat");
 
 
 fn builtin_lib(name: &str) -> Option<&'static str> {
@@ -798,6 +808,11 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "wire" => Some(WIRE_LAT),
         "mapred" => Some(MAPRED_LAT),
         "merkle" => Some(MERKLE_LAT),
+        "mvcc" => Some(MVCC_LAT),
+        "hll" => Some(HLL_LAT),
+        "cms" => Some(CMS_LAT),
+        "stream" => Some(STREAM_LAT),
+        "raft" => Some(RAFT_LAT),
         _ => None,
     }
 }
@@ -875,6 +890,7 @@ pub fn all_libs() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
+        "mvcc", "hll", "cms", "stream", "raft",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -987,6 +1003,7 @@ pub fn builtin_lib_names() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
+        "mvcc", "hll", "cms", "stream", "raft",
     ]
     .iter()
     .map(|s| s.to_string())

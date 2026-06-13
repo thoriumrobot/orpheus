@@ -1,0 +1,57 @@
+:: ===========================================================================
+:: raft.lat — the safety core of Raft consensus (DDIA, Ch. 9, pp. 364-368).
+::
+:: Consensus is how a replicated log agrees on one order of operations despite
+:: failures. Raft's safety rests on three rules, captured here as pure functions:
+::   1. ELECTION RESTRICTION — a server only votes for a candidate whose log is at
+::      least as up-to-date as its own, so a leader never lacks committed entries.
+::   2. LOG MATCHING — AppendEntries is rejected unless the entry before the new
+::      ones matches in index AND term; on accept, conflicting suffixes are
+::      replaced. This keeps all logs prefix-consistent.
+::   3. COMMIT RULE — an entry is committed once it is stored on a MAJORITY.
+:: Arms prefixed `raft_`.   log = list of [term command], index 1-based.
+:: ===========================================================================
+import std
+core raft
+  raft_lastidx  = fn [log] -> (len log)
+  raft_logterm  = fn [log idx] ->
+    if (idx == 0) then 0
+    else if (gt idx (len log)) then 0
+    else (head (nth log (sub idx 1)))
+  raft_lastterm = fn [log] -> (raft_logterm log (len log))
+
+  :: ELECTION RESTRICTION: is a candidate's log at least as up-to-date as mine?
+  :: Higher last term wins; same term, longer-or-equal log wins. Loobean 0 = yes.
+  raft_uptodate = fn [candTerm candIdx myTerm myIdx] ->
+    if (gt candTerm myTerm) then 0
+    else if (lt candTerm myTerm) then 1
+    else (gte candIdx myIdx)
+
+  :: should I grant a vote? 0 = grant. Needs: candidate term not stale, I haven't
+  :: voted for someone else this term, and the candidate's log is up-to-date.
+  raft_grantvote = fn [myTerm myVotedFor candId candTerm candLastTerm candLastIdx myLastTerm myLastIdx] ->
+    (and (gte candTerm myTerm)
+         (and (or (myVotedFor == %none) (myVotedFor == candId))
+              (raft_uptodate candLastTerm candLastIdx myLastTerm myLastIdx)))
+
+  :: LOG MATCHING: append `entries` after position prevIdx iff the entry at
+  :: prevIdx has term prevTerm (or prevIdx is 0). On success the log is truncated
+  :: to prevIdx and the entries appended (replacing any conflicting suffix).
+  :: Returns [%ok newLog] or [%reject 0].
+  raft_append = fn [log prevIdx prevTerm entries] ->
+    if (or (prevIdx == 0) ((raft_logterm log prevIdx) == prevTerm))
+    then [ %ok (append (take prevIdx log) entries) ]
+    else [ %reject 0 ]
+
+  :: COMMIT RULE: given each server's highest replicated index (matchIndex,
+  :: including the leader), the commit index is the highest entry stored on a
+  :: majority of the n servers.
+  raft_majority = fn [n] -> +((div n 2))
+  raft_commit = fn [matchIdx n] ->
+    let maj = (raft_majority n) in
+    loop with [idx = (maximum matchIdx)] :
+      if (idx == 0) then 0
+      else if ((gte (count (fn [m] -> (gte m idx)) matchIdx) maj) == 0) then idx
+      else again((dec idx))
+    end
+end

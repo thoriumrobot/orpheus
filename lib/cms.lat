@@ -1,0 +1,40 @@
+:: ===========================================================================
+:: cms.lat — Count-Min Sketch: frequency estimation in sublinear space.
+::
+:: Where HyperLogLog answers "how many DISTINCT?", a Count-Min Sketch answers
+:: "how OFTEN did key k appear?" using d rows of w counters and d hash functions.
+:: Adding k increments one counter per row; the estimate is the MINIMUM of those
+:: counters. Hash collisions can only ADD to a counter, so the sketch never
+:: under-counts — it gives an upper bound, tight for heavy hitters. Used for
+:: streaming top-k, network flow accounting, and cache admission.   Arms `cms_`.
+::
+:: sketch = [ d [ w counters ] ];  counters is a flat list of length d*w.
+:: ===========================================================================
+import std
+import dhash
+core cms
+  cms_new    = fn [d w] -> [ d [ w (replicate (mul d w) 0) ] ]
+  cms_d      = fn [s] -> (head s)
+  cms_w      = fn [s] -> (head (tail s))
+  cms_counts = fn [s] -> (tail (tail s))
+
+  :: flat index of row r's counter for key k (each row uses a different hash seed)
+  cms_idx = fn [k r w] -> (add (mul r w) (dh_idx (dh_h1 (cat k (numtext r))) w))
+  cms_incnth = fn [cs i] -> (append (take i cs) [ +((nth cs i)) (drop +(i) cs) ])
+
+  :: increment k's counter in every row
+  cms_add = fn [s k] ->
+    let d = (cms_d s) in let w = (cms_w s) in
+    [ d [ w (loop with [r = 0, cs = (cms_counts s)] :
+              if (r == d) then cs else again(+(r), (cms_incnth cs (cms_idx k r w)))
+            end) ] ]
+  cms_addall = fn [s ks] -> (foldl (fn [acc k] -> (cms_add acc k)) s ks)
+
+  :: estimate of k's count = min across rows (never an under-estimate)
+  cms_count = fn [s k] ->
+    let d = (cms_d s) in let w = (cms_w s) in
+    loop with [r = 1, best = (nth (cms_counts s) (cms_idx k 0 w))] :
+      if (r == d) then best
+      else again(+(r), (min best (nth (cms_counts s) (cms_idx k r w))))
+    end
+end

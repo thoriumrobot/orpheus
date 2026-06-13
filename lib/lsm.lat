@@ -81,4 +81,25 @@ core lsm
 
   :: how many immutable segments exist (read amplification)
   lsm_nsegs = fn [s] -> (len (lsm_segs s))
+
+  :: the merged LIVE view: fold every layer newest-first so the newest write of
+  :: each key wins (the logical state the engine presents over its segments)
+  lsm_view = fn [s] ->
+    let layers = [ (lsm_mem s) (lsm_segs s) ] in
+    (foldl (fn [acc seg] -> (lsm_merge acc seg)) (head layers) (tail layers))
+  :: present key/value pairs (tombstones dropped), sorted by key
+  lsm_live = fn [s] -> (filter (fn [e] -> (head (tail e))) (lsm_view s))
+  lsm_keys = fn [s] -> (map (fn [e] -> (head e)) (lsm_live s))
+
+  :: RANGE SCAN [lo, hi] — a sorted-merge across memtable + segments, the query an
+  :: SSTable's sorted order makes cheap (and a B-tree does too)
+  lsm_range = fn [s lo hi] ->
+    (filter (fn [e] -> (and (not (dh_klt (head e) lo)) (not (dh_klt hi (head e)))))
+            (lsm_live s))
+
+  :: ZONE MAP / sparse index: per segment, [minKey [maxKey count]]. A read or range
+  :: skips any segment whose [min,max] cannot contain the key — the cheap filter
+  :: that, with a per-segment Bloom filter, keeps LSM reads from touching every run.
+  lsm_segmeta = fn [s] ->
+    (map (fn [seg] -> [ (head (head seg)) [ (head (last seg)) (len seg) ] ]) (lsm_segs s))
 end

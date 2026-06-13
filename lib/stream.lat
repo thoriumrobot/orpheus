@@ -1,0 +1,54 @@
+:: ===========================================================================
+:: stream.lat — windowed stream processing (DDIA, Ch. 11, pp. 466-475).
+::
+:: An unbounded stream is cut into WINDOWS so aggregates are well-defined. A
+:: TUMBLING window of size s assigns event time t to window floor(t/s); values in
+:: a window are aggregated (count, sum). Because events arrive out of order, a
+:: WATERMARK marks "event time up to here has probably arrived" — events older
+:: than the watermark are LATE and are dropped (or sent to a side output). This is
+:: the event-time model behind Flink, Beam, and Kafka Streams.   Arms `stream_`.
+::
+:: event = [time value];  windowed result = list of [windowId aggregate].
+:: ===========================================================================
+import std
+core stream
+  :: tumbling window id of an event time
+  stream_win = fn [t size] -> (div t size)
+
+  :: group events into [windowId values] buckets (out-of-order safe)
+  stream_addpair = fn [groups k v] ->
+    loop with [c = groups, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ [k [v 0]] 0 ])
+      else if ((head (head c)) == k) then
+        (append (reverse acc) [ [k [v (tail (head c))]] (tail c) ])
+      else again((tail c), [ (head c) acc ])
+    end
+  stream_tumble = fn [events size] ->
+    (foldl (fn [g e] -> (stream_addpair g (stream_win (head e) size) (tail e))) 0 events)
+
+  :: per-window count and sum
+  stream_counts = fn [events size] ->
+    (map (fn [g] -> [ (head g) (len (tail g)) ]) (stream_tumble events size))
+  stream_sums = fn [events size] ->
+    (map (fn [g] -> [ (head g) (sum (tail g)) ]) (stream_tumble events size))
+
+  :: WATERMARK: split a stream into on-time and late events relative to wm
+  :: (on-time = event time >= wm). Late events are what a watermark lets you drop.
+  stream_ontime = fn [events wm] -> (filter (fn [e] -> (gte (head e) wm)) events)
+  stream_late   = fn [events wm] -> (filter (fn [e] -> (lt (head e) wm)) events)
+  stream_nlate  = fn [events wm] -> (len (stream_late events wm))
+
+  :: SLIDING window: a window of `size` every `step`; an event at t belongs to
+  :: every window [s, s+size) with s a multiple of step and s <= t < s+size.
+  :: Returns [windowStart sum].
+  stream_slide_sum = fn [events size step] ->
+    (map (fn [grp] -> [ (head grp) (sum (tail grp)) ])
+         (foldl (fn [g e] ->
+                   loop with [s = 0, acc = g] :
+                     if (gt s (head e)) then acc
+                     else if (lt (head e) (add s size)) then
+                       again((add s step), (stream_addpair acc s (tail e)))
+                     else again((add s step), acc)
+                   end)
+                0 events))
+end

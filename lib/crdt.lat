@@ -5,10 +5,13 @@
 :: and idempotent (a join on a lattice), so replicas that see the same set of
 :: updates in any order reach the same state — strong eventual consistency. This
 :: is exactly the convergence Orpheus's own gossip layer relies on.
-:: Four classics:  G-Counter, PN-Counter, G-Set, LWW-Register.
-:: Arms prefixed `gc_` / `pn_` / `gs_` / `lww_`.
+:: Classics:  G-Counter, PN-Counter, G-Set, LWW-Register — plus the causal ones
+:: that actually handle concurrent add/remove and concurrent writes correctly:
+:: an OBSERVED-REMOVE SET and a MULTI-VALUE REGISTER (the Dynamo "siblings" model).
+:: Arms prefixed `gc_` / `pn_` / `gs_` / `lww_` / `or_` / `mv_`.
 :: ===========================================================================
 import std
+import vclock
 core crdt
   :: ---- G-Counter: grow-only counter, per-node sub-counts -------------------
   :: state = list of [node count]; merge = pointwise max; value = sum
@@ -52,4 +55,46 @@ core crdt
     else if (gt (lww_ts b) (lww_ts a)) then b
     else if (gte (lww_node a) (lww_node b)) then a
     else b
+
+  :: ---- OR-Set: observed-remove set (concurrent add/remove done right) -------
+  :: Each add stamps the element with a UNIQUE tag (a dot, e.g. [node seq]); a
+  :: remove tombstones exactly the tags it has OBSERVED. An element is present if
+  :: some add-tag survives. So a concurrent add wins over a remove that never saw
+  :: it — the behaviour a naive 2P-set gets wrong. state = [adds removes], each a
+  :: set of [elem tag] pairs.
+  or_ins     = fn [s x] -> if ((member x s) == 0) then s else [ x s ]
+  or_union   = fn [a b] -> (foldl (fn [s x] -> (or_ins s x)) a b)
+  or_new     = fn [_] -> [ 0 0 ]
+  or_adds    = fn [s] -> (head s)
+  or_removes = fn [s] -> (tail s)
+  or_add     = fn [s e tag] -> [ (or_ins (or_adds s) [e tag]) (or_removes s) ]
+  :: remove observes (tombstones) every add-tag currently seen for e
+  or_remove  = fn [s e] ->
+    [ (or_adds s)
+      (foldl (fn [rs p] -> (or_ins rs p)) (or_removes s)
+             (filter (fn [p] -> ((head p) == e)) (or_adds s))) ]
+  :: present iff some [e tag] in adds is not in removes
+  or_has = fn [s e] ->
+    (any (fn [p] -> (and ((head p) == e) (not (member p (or_removes s))))) (or_adds s))
+  or_merge = fn [a b] ->
+    [ (or_union (or_adds a) (or_adds b)) (or_union (or_removes a) (or_removes b)) ]
+  :: distinct elements currently present
+  or_elems = fn [s] ->
+    (foldl (fn [acc p] ->
+              if (and (not (member p (or_removes s))) (not (member (head p) acc)))
+              then [ (head p) acc ] else acc)
+           0 (or_adds s))
+
+  :: ---- MV-Register: keeps all CONCURRENT values (Dynamo siblings) -----------
+  :: state = set of [value vclock]. A write supersedes every value whose clock it
+  :: dominates; merge keeps the causally-maximal values, so concurrent writes BOTH
+  :: survive for the application to resolve (rather than one silently winning).
+  mv_new    = fn [_] -> 0
+  mv_set    = fn [reg val vc] ->
+    [ [val vc] (filter (fn [e] -> (not ((vc_le (tail e) vc) == 0))) reg) ]
+  mv_maximal = fn [e u] ->
+    (all (fn [f] -> (not ((vc_compare (tail e) (tail f)) == %before))) u)
+  mv_merge  = fn [a b] -> let u = (append a b) in (filter (fn [e] -> (mv_maximal e u)) u)
+  mv_values = fn [reg] -> (map (fn [e] -> (head e)) reg)
+  mv_conflict = fn [reg] -> (gt (len reg) 1)        :: 0 = siblings present
 end

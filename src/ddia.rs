@@ -66,6 +66,7 @@ pub fn cmd_ddia(args: &[String]) {
     println!("Designing Data-Intensive Applications — techniques in Latte (lib/*.lat)");
     if all {
         println!("topics: bloom lsm btree vclock crdt lamport chash quorum wire mapred merkle");
+        println!("        mvcc hll cms stream raft");
     }
 
     if all || topic == "bloom" {
@@ -86,6 +87,9 @@ pub fn cmd_ddia(args: &[String]) {
         row("segments before compaction", &format!("(lsm_nsegs {})", s));
         row("segments after compaction", &format!("(lsm_nsegs (lsm_compact {}))", s));
         row("get c after compaction", &format!("(lsm_get (lsm_compact {}) %c)", s));
+        row("live keys (merged view)", &format!("(lsm_keys {})", s));
+        row("range scan [a,c]", &format!("(map (fn [e] -> (head e)) (lsm_range {} %a %c))", s));
+        row("segment zone maps [min[max cnt]]", &format!("(lsm_segmeta {})", s));
     }
 
     if all || topic == "btree" {
@@ -96,6 +100,8 @@ pub fn cmd_ddia(args: &[String]) {
         row("height (12 keys, t=2)", &format!("(bt_height {})", t));
         row("search aa", &format!("(bt_search {} %aa)", t));
         row("search qq (absent)", &format!("(bt_search {} %qq)", t));
+        row("range scan [cc,mm]", &format!("(map (fn [e] -> (head e)) (bt_range {} %cc %mm))", t));
+        row("min / max key", &format!("[ (head (bt_min {})) (head (bt_max {})) ]", t, t));
     }
 
     if all || topic == "vclock" {
@@ -115,6 +121,15 @@ pub fn cmd_ddia(args: &[String]) {
         row("G-Counter merge(R2,R1)", &format!("(gc_value (gc_merge {} {}))", r2, r1));
         row("PN-Counter +10 -3", "(pn_value (pn_dec (pn_inc (pn_new 0) %a 10) %b 3))");
         row("LWW-Register (ts9 wins)", "(lww_value (lww_merge (lww_set 5 %red %n1) (lww_set 9 %blue %n2)))");
+        // OR-Set: a concurrent add survives a remove that never observed it
+        let rmv = "(or_remove (or_add (or_new 0) %x [%n1 1]) %x)";
+        let cadd = "(or_add (or_new 0) %x [%n2 1])";
+        row("OR-Set add+remove on R1 (1=gone)", &format!("(or_has {} %x)", rmv));
+        row("OR-Set merge w/ concurrent add", &format!("(or_has (or_merge {} {}) %x)", rmv, cadd));
+        // MV-Register: concurrent writes are kept as siblings
+        let wa = "(mv_set (mv_new 0) %red (vc_inc (vc_new 0) %a))";
+        let wb = "(mv_set (mv_new 0) %blue (vc_inc (vc_new 0) %b))";
+        row("MV-Register siblings", &format!("(mv_values (mv_merge {} {}))", wa, wb));
     }
 
     if all || topic == "lamport" {
@@ -132,6 +147,9 @@ pub fn cmd_ddia(args: &[String]) {
         let arm = format!("(ch_assign (ch_removenode {} %n2) {} 65536)", r3, keys);
         row("of 20 keys, moved adding n4", &format!("(ch_moved {} {})", a3, a4));
         row("of 20 keys, moved dropping n2", &format!("(ch_moved {} {})", a3, arm));
+        row("replica list for k1 (3 nodes)", &format!("(ch_replicas {} %k1 3 65536)", r3));
+        row("rendezvous (HRW) owner of k1", "(rv_lookup [%n1 [%n2 [%n3 0]]] %k1)");
+        row("HRW top-2 replicas for k1", "(rv_topn [%n1 [%n2 [%n3 0]]] %k1 2)");
     }
 
     if all || topic == "quorum" {
@@ -150,6 +168,10 @@ pub fn cmd_ddia(args: &[String]) {
         let rs = "[[1 0] [[2 0] [[3 7] 0]]]";
         row("reader view (3 defaults to 7)", &format!("(w_read {} {})", rec, rs));
         row("unknown tags skipped", &format!("(w_unknown {} {})", rec, rs));
+        row("zigzag -1 / +1 / -2", "[ (w_zigzag [1 1]) [ (w_zigzag [0 1]) (w_zigzag [1 2]) ] ]");
+        // length-delimited framing: a reader round-trips a field whose tag it doesn't know
+        let frame = "[[1 [42 0]] [[9 [7 [7 0]]] 0]]";
+        row("framed record decoded", &format!("(w_decrec (w_encrec {}))", frame));
     }
 
     if all || topic == "mapred" {
@@ -166,9 +188,56 @@ pub fn cmd_ddia(args: &[String]) {
         row("keys that differ", &format!("(mk_diffkeys {} {})", a, c));
     }
 
+    if all || topic == "mvcc" {
+        head("MVCC / snapshot isolation (Ch.7)", "versioned writes; a transaction reads its start-time snapshot; write-write conflicts abort");
+        // x=1 committed at ts5, then x=2 committed at ts15
+        let store = "(mvcc_commit (mvcc_commit (mvcc_new 0) %x 1 5) %x 2 15)";
+        row("read x @snapshot 10 (sees v1)", &format!("(mvcc_read {} %x 10)", store));
+        row("read x @snapshot 20 (sees v2)", &format!("(mvcc_read {} %x 20)", store));
+        row("tx writing x [start10,commit18]", &format!("(head (mvcc_try {} [[%x 9] 0] 10 18))", store));
+        row("tx writing y [start10,commit18]", &format!("(head (mvcc_try {} [[%y 9] 0] 10 18))", store));
+    }
+
+    if all || topic == "hll" {
+        head("HyperLogLog (analytics)", "count distinct in tiny fixed memory; ~1.04/sqrt(m) error (here m=256)");
+        let ks = "(map (fn [i] -> (cat %k (numtext i))) (range 400))";
+        let h = format!("(hll_addall (hll_new 8) {})", ks);
+        row("estimate of 400 distinct", &format!("(hll_count {})", h));
+        row("idempotent (add the 400 again)", &format!("(hll_count (hll_addall {} {}))", h, ks));
+        row("empty registers (fill gauge)", &format!("(hll_zeros {})", h));
+    }
+
+    if all || topic == "cms" {
+        head("Count-Min Sketch (analytics)", "frequency estimate in sublinear space; never under-counts (min over d rows)");
+        let s = "(cms_addall (cms_new 4 64) [%a [%a [%a [%a [%a [%b [%b [%c 0]]]]]]]])";
+        row("count a (added 5x)", &format!("(cms_count {} %a)", s));
+        row("count b (added 2x)", &format!("(cms_count {} %b)", s));
+        row("count z (never added)", &format!("(cms_count {} %z)", s));
+    }
+
+    if all || topic == "stream" {
+        head("Stream windowing (Ch.11)", "tumbling windows over event time; a watermark separates on-time from late events");
+        let ev = "[[3 5] [[7 2] [[12 8] [[15 1] [[25 4] 0]]]]]";
+        row("tumbling sums (window=10)", &format!("(stream_sums {} 10)", ev));
+        row("tumbling counts (window=10)", &format!("(stream_counts {} 10)", ev));
+        row("late events before watermark 10", &format!("(stream_late {} 10)", ev));
+        row("sliding sums (size10, step5)", &format!("(stream_slide_sum {} 10 5)", ev));
+    }
+
+    if all || topic == "raft" {
+        head("Raft consensus (Ch.9)", "election restriction + log matching + commit-on-majority — the safety core");
+        let log = "[[1 %a] [[1 %b] [[2 %c] 0]]]";
+        row("up-to-date? cand(t1,i5) vs me(t2,i1)", "(raft_uptodate 1 5 2 1)");
+        row("grant vote (fresh, log ok)", "(raft_grantvote 3 %none %n2 3 2 3 2 3)");
+        row("append @prev(3,t2): log matches", &format!("(head (raft_append {} 3 2 [[3 %d] 0]))", log));
+        row("append @prev(3,t9): mismatch", &format!("(head (raft_append {} 3 9 [[3 %d] 0]))", log));
+        row("commit idx, match [3 3 2 1 1] n5", "(raft_commit [3 [3 [2 [1 [1 0]]]]] 5)");
+    }
+
     if all {
         println!("\nEach technique is a Latte module in lib/ (namespaced: dh_/bloom_/lsm_/bt_/vc_/");
-        println!("gc_/lam_/ch_/q_/w_/mr_/mk_). See docs/data-intensive.md for the interview guide.");
+        println!("gc_,or_,mv_/lam_/ch_,rv_/q_/w_/mr_/mk_/mvcc_/hll_/cms_/stream_/raft_).");
+        println!("See docs/data-intensive.md for the full interview guide.");
     }
 }
 
@@ -273,5 +342,105 @@ mod tests {
         // exactly one differing key, and it is %c
         assert_eq!(n(&format!("(len (mk_diffkeys {} {}))", a, diff)), 1);
         assert_eq!(run(&format!("(head (mk_diffkeys {} {}))", a, diff)).unwrap(), crate::knot::cord("c"));
+    }
+
+    #[test]
+    fn orset_concurrent_add_beats_remove() {
+        // R1 adds x then removes it (observing its own tag); R2 concurrently adds x.
+        let rmv = "(or_remove (or_add (or_new 0) %x [%n1 1]) %x)";
+        let cadd = "(or_add (or_new 0) %x [%n2 1])";
+        assert_eq!(n(&format!("(or_has {} %x)", rmv)), 1); // gone on R1
+        // after merge the concurrent (unobserved) add survives
+        assert_eq!(n(&format!("(or_has (or_merge {} {}) %x)", rmv, cadd)), 0);
+        assert_eq!(n(&format!("(or_has (or_merge {} {}) %x)", cadd, rmv)), 0); // commutative
+    }
+
+    #[test]
+    fn mv_register_keeps_concurrent_siblings() {
+        let wa = "(mv_set (mv_new 0) %red (vc_inc (vc_new 0) %a))";
+        let wb = "(mv_set (mv_new 0) %blue (vc_inc (vc_new 0) %b))";
+        assert_eq!(n(&format!("(len (mv_values (mv_merge {} {})))", wa, wb)), 2); // both kept
+        // a write that dominates both collapses to one value
+        let dom = format!("(mv_set (mv_merge {} {}) %green (vc_inc (vc_inc (vc_inc (vc_new 0) %a) %b) %c))", wa, wb);
+        assert_eq!(n(&format!("(len (mv_values {}))", dom)), 1);
+    }
+
+    #[test]
+    fn chash_replicas_and_rendezvous() {
+        let r3 = "(ch_build [%n1 [%n2 [%n3 0]]] 16 65536)";
+        assert_eq!(n(&format!("(len (ch_replicas {} %k1 3 65536))", r3)), 3); // 3 distinct replicas
+        // HRW: the top-1 of the ranked set is exactly the single-owner lookup
+        let nodes = "[%n1 [%n2 [%n3 0]]]";
+        assert_eq!(n(&format!("((head (rv_topn {} %k1 1)) == (rv_lookup {} %k1))", nodes, nodes)), 0);
+    }
+
+    #[test]
+    fn lsm_and_btree_range_scans() {
+        let s = "(lsm_put (lsm_put (lsm_put (lsm_put (lsm_new 2) %a 1) %c 3) %e 5) %g 7)";
+        assert_eq!(n(&format!("(len (lsm_range {} %b %f))", s)), 2); // c, e
+        let p = "[[%mm 1] [[%dd 2] [[%aa 3] [[%gg 4] [[%cc 5] 0]]]]]";
+        let t = format!("(bt_build {} 2)", p);
+        assert_eq!(n(&format!("(len (bt_range {} %cc %mm))", t)), 4); // cc dd gg mm
+    }
+
+    #[test]
+    fn wire_zigzag_and_framing() {
+        assert_eq!(n("(w_zigzag [1 1])"), 1); // -1
+        assert_eq!(n("(w_zigzag [0 1])"), 2); // +1
+        assert_eq!(n("(tail (w_unzigzag (w_zigzag [1 5])))"), 5); // roundtrip magnitude
+        // a field with a tag the reader doesn't model still round-trips by length
+        let frame = "[[1 [42 0]] [[9 [7 [7 0]]] 0]]";
+        assert_eq!(n(&format!("(w_unvarint (tail (head (w_decrec (w_encrec {})))))", frame)), 42);
+        assert_eq!(n(&format!("(len (w_decrec (w_encrec {})))", frame)), 2);
+    }
+
+    #[test]
+    fn mvcc_snapshot_isolation_and_conflict() {
+        let store = "(mvcc_commit (mvcc_commit (mvcc_new 0) %x 1 5) %x 2 15)";
+        assert_eq!(n(&format!("(tail (mvcc_read {} %x 10))", store)), 1); // snapshot sees v1
+        assert_eq!(n(&format!("(tail (mvcc_read {} %x 20))", store)), 2); // later snapshot sees v2
+        // writing x across the conflicting commit aborts; writing y is safe
+        assert_eq!(run(&format!("(head (mvcc_try {} [[%x 9] 0] 10 18))", store)).unwrap(), crate::knot::cord("abort"));
+        assert_eq!(run(&format!("(head (mvcc_try {} [[%y 9] 0] 10 18))", store)).unwrap(), crate::knot::cord("commit"));
+    }
+
+    #[test]
+    fn hyperloglog_estimates_cardinality() {
+        let ks = "(map (fn [i] -> (cat %k (numtext i))) (range 500))";
+        let est = n(&format!("(hll_count (hll_addall (hll_new 8) {}))", ks));
+        assert!(est > 400 && est < 600, "500 distinct should estimate within ~20%, got {}", est);
+        // idempotent: re-adding the same items doesn't change the estimate
+        let est2 = n(&format!("(hll_count (hll_addall (hll_addall (hll_new 8) {}) {}))", ks, ks));
+        assert_eq!(est, est2);
+    }
+
+    #[test]
+    fn countmin_never_undercounts() {
+        let s = "(cms_addall (cms_new 4 64) [%a [%a [%a [%a [%a [%b [%b [%c 0]]]]]]]])";
+        assert!(n(&format!("(cms_count {} %a)", s)) >= 5);
+        assert!(n(&format!("(cms_count {} %b)", s)) >= 2);
+        assert_eq!(n(&format!("(cms_count {} %z)", s)), 0); // never added -> 0
+    }
+
+    #[test]
+    fn stream_tumbling_windows() {
+        let ev = "[[3 5] [[7 2] [[12 8] [[15 1] [[25 4] 0]]]]]";
+        // window 0 (times 3,7) sums to 7
+        assert_eq!(n(&format!("(tail (head (stream_sums {} 10)))", ev)), 7);
+        // two events fall before a watermark at 10
+        assert_eq!(n(&format!("(stream_nlate {} 10)", ev)), 2);
+    }
+
+    #[test]
+    fn raft_safety_core() {
+        let log = "[[1 %a] [[1 %b] [[2 %c] 0]]]";
+        // election restriction: a higher last-term beats a longer log at a lower term
+        assert_eq!(n("(raft_uptodate 1 5 2 1)"), 1); // candidate NOT up-to-date
+        assert_eq!(n("(raft_uptodate 2 3 2 3)"), 0); // equal -> ok
+        // log matching: accept on matching prev, reject on mismatch
+        assert_eq!(run(&format!("(head (raft_append {} 3 2 [[3 %d] 0]))", log)).unwrap(), crate::knot::cord("ok"));
+        assert_eq!(run(&format!("(head (raft_append {} 3 9 [[3 %d] 0]))", log)).unwrap(), crate::knot::cord("reject"));
+        // commit index = highest entry on a majority of 5 (matchIdx 3,3,2,1,1 -> 2)
+        assert_eq!(n("(raft_commit [3 [3 [2 [1 [1 0]]]]] 5)"), 2);
     }
 }

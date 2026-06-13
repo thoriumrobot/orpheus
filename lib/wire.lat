@@ -60,4 +60,40 @@ core wire
     (filter (fn [f] ->
                (not (member (head f) (map (fn [s] -> (head s)) readerschema))))
             record)
+
+  :: ---- zigzag: signed integers as varint-friendly naturals ------------------
+  :: A signed value is [sign mag] (sign 0 = +, 1 = -). Zigzag interleaves +/- so
+  :: small magnitudes of either sign get small varints: 0,-1,1,-2,2 -> 0,1,2,3,4.
+  :: (Two's-complement would make every negative a maximal 10-byte varint.)
+  w_zigzag = fn [sv] ->
+    if ((head sv) == 0) then (mul 2 (tail sv)) else (sub (mul 2 (tail sv)) 1)
+  w_unzigzag = fn [u] ->
+    if ((mod u 2) == 0) then [ 0 (div u 2) ] else [ 1 (div +(u) 2) ]
+
+  :: ---- self-describing, length-delimited framing (Protobuf wire type 2) -----
+  :: Each field is varint(tag) ++ varint(len) ++ len payload bytes. Because every
+  :: field carries its length, a reader can PARSE and SKIP a field whose tag it has
+  :: never seen — the actual basis of forward compatibility — and payloads nest.
+  w_field = fn [tag bytes] -> (append (w_varint tag) (append (w_varint (len bytes)) bytes))
+  :: encode a record given as a list of [tag payloadBytes]
+  w_encrec = fn [fields] -> (concat (map (fn [f] -> (w_field (head f) (tail f))) fields))
+
+  :: read one varint off the front: returns [value restBytes]
+  w_readvarint = fn [bytes] ->
+    loop with [c = bytes, acc = 0, sh = 1] :
+      if (c == 0) then [ acc 0 ]
+      else if (lt (head c) 128) then [ (add acc (mul (head c) sh)) (tail c) ]
+      else again((tail c), (add acc (mul (sub (head c) 128) sh)), (mul sh 128))
+    end
+  :: parse framing back into a list of [tag payloadBytes] WITHOUT a schema — the
+  :: reader skips fields by length, so unknown tags survive a round trip intact
+  w_decrec = fn [bytes] ->
+    loop with [c = bytes, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else
+        let tg = (w_readvarint c) in
+        let ln = (w_readvarint (tail tg)) in
+        again((drop (head ln) (tail ln)),
+              [ [ (head tg) (take (head ln) (tail ln)) ] acc ])
+    end
 end

@@ -1,0 +1,84 @@
+:: ===========================================================================
+:: hll.lat — HyperLogLog: count distinct elements in tiny, fixed memory.
+::
+:: Cardinality (COUNT DISTINCT) is everywhere in analytics — unique visitors,
+:: distinct search terms — and exact counting needs memory linear in the number
+:: of distinct items. HyperLogLog instead keeps m small registers: hash each
+:: item, use the first p bits to choose a register, and store the largest "number
+:: of leading zeros + 1" seen there. Long zero-runs are rare, so the max run
+:: length estimates the cardinality. With m registers the relative error is about
+:: 1.04/sqrt(m), in a few kilobytes for billions of items.   Arms `hll_`.
+::
+:: sketch = [ p registers ];  m = 2^p registers, each a small natural.
+:: ===========================================================================
+import std
+import dhash
+core hll
+  hll_new = fn [p] -> [ p (replicate (pow 2 p) 0) ]
+  hll_p   = fn [h] -> (head h)
+  hll_regs = fn [h] -> (tail h)
+
+  :: bit length of x (0 -> 0, so leading-zero math stays integer-only)
+  hll_bitlen = fn [x] ->
+    loop with [v = x, n = 0] : if (v == 0) then n else again((div v 2), +(n)) end
+
+  :: set register i to v if larger (registers only ever grow — it's a max-lattice)
+  hll_setmax = fn [regs i v] ->
+    (append (take i regs) [ (max v (nth regs i)) (drop +(i) regs) ])
+
+  :: A strong, NON-LINEAR finalizer. Multiplicative hashing alone maps an
+  :: arithmetic sequence of keys to a low-discrepancy spread (great for hash
+  :: tables, wrong for HLL, which assumes randomness); squaring breaks that
+  :: linearity so collisions become Poisson, as the estimator expects.
+  hll_h = fn [a] -> (dh_mix (mod (add (mul a a) (mul a 2654435761)) 4294967296))
+
+  :: add an item: top p bits pick the register; the leading-zero count of an
+  :: independent hash gives the value (its well-mixed high bits, not low bits).
+  hll_add = fn [h item] ->
+    let p = (hll_p h) in
+    let x = (hll_h (dh_h1 item)) in
+    let i = (div x (pow 2 (sub 32 p))) in
+    let rho = (add (sub 32 (hll_bitlen (hll_h (dh_h2 item)))) 1) in
+    [ p (hll_setmax (hll_regs h) i rho) ]
+  hll_addall = fn [h items] -> (foldl (fn [acc x] -> (hll_add acc x)) h items)
+
+  :: registers that are still zero (a fill diagnostic; near 0 means well-loaded)
+  hll_zeros = fn [h] -> (count (fn [r] -> (r == 0)) (hll_regs h))
+
+  :: the HLL estimate, integer fixed-point. alpha is supplied scaled by 1000
+  :: (0.7213/(1+1.079/m); ~718 for m=256). E = alpha * m^2 / sum_j 2^(-r_j); we
+  :: put the harmonic sum over a common denominator 2^maxr so all stays natural.
+  :: (The small/large-range bias corrections of HLL++ are omitted for clarity —
+  :: use a larger m, i.e. bigger p, for tighter estimates.)
+  hll_alpha1000 = fn [_] -> 718
+  hll_rawestimate = fn [h] ->
+    let regs = (hll_regs h) in
+    let m = (len regs) in
+    let maxr = (maximum regs) in
+    let znum = (foldl (fn [s r] -> (add s (pow 2 (sub maxr r)))) 0 regs) in
+    (div (mul (mul (hll_alpha1000 0) (mul m m)) (pow 2 maxr)) (mul 1000 znum))
+  hll_estimate = fn [h] -> (hll_rawestimate h)
+
+  :: fixed-point natural log (scaled by 1000) of x1000/1000, for x1000 >= 1000.
+  :: Range-reduce by halving (ln2 = 693), then the fast atanh series on [1,2):
+  :: ln(y) = 2*(t + t^3/3 + ...) with t = (y-1)/(y+1), |t| <= 1/3 here.
+  hll_ln1000 = fn [x1000] ->
+    loop with [r = x1000, hv = 0] :
+      if (lt r 2000) then
+        (add (mul hv 693)
+             (mul 2 (let t = (div (mul 1000 (sub r 1000)) (add r 1000)) in
+                     (add t (div (mul (mul t t) t) 3000000)))))
+      else again((div r 2), +(hv))
+    end
+  :: LINEAR COUNTING: n ~ m * ln(m / emptyRegisters). Accurate when registers are
+  :: still filling — precisely where the raw HLL estimate is biased high.
+  hll_lincount = fn [m z] -> (div (mul m (hll_ln1000 (div (mul m 1000) z))) 1000)
+
+  :: the estimator HLL actually ships: use linear counting in the small range
+  :: (raw estimate <= 2.5m and empty registers remain), otherwise the raw estimate.
+  hll_count = fn [h] ->
+    let e = (hll_rawestimate h) in
+    let z = (hll_zeros h) in
+    let m = (len (hll_regs h)) in
+    if (and (lte e (mul 5 (div m 2))) (gt z 0)) then (hll_lincount m z) else e
+end

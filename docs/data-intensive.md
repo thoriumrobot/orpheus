@@ -16,7 +16,7 @@ Three ways, same code:
 
 - **Guided demo:** `latte ddia` runs every technique; `latte ddia bloom` (or
   `lsm`, `btree`, `vclock`, `crdt`, `lamport`, `chash`, `quorum`, `wire`,
-  `mapred`, `merkle`) runs one.
+  `mapred`, `merkle`, `mvcc`, `hll`, `cms`, `stream`, `raft`) runs one.
 - **Console / `eval`:** every library is in the default scope, so
   `latte eval "(bloom_test (bloom_add (bloom_make 64 3) %x) %x)"` just works.
 - **GUI:** open the System page, middle-click a `… ` command line, or open a
@@ -56,6 +56,8 @@ so a write is a single root-to-leaf pass.
 (bt_build [[%mm 1] [[%dd 2] [[%aa 3] [[%zz 4] [[%kk 5] 0]]]]] 2)   :: build, t=2
 (bt_search tree %kk)        :: -> [%val 5]   (0 if absent)
 (bt_inorder tree)           :: sorted [key value] list — a full index scan
+(bt_range tree %cc %mm)     :: every [key value] with cc <= key <= mm
+(bt_min tree) (bt_max tree) :: smallest / largest entry
 (bt_height tree)            :: every leaf is this far from the root
 ```
 
@@ -69,6 +71,16 @@ so a write is a single root-to-leaf pass.
 - *Fan-out?* Real B-trees set node size to the disk/page block size (e.g. 4–16 KB)
   so one node = one I/O; fan-out of several hundred means a billion keys fit in
   ~4 levels.
+- *How do range scans work?* On the sorted order: find the low key, then walk
+  in-order until you pass the high key (`bt_range` here). A production engine uses
+  a **B+-tree** — values live only in the leaves and the leaves are linked in a
+  list — so a range scan is "seek once, then follow leaf pointers," never
+  revisiting internal nodes. (This library keeps values in every node for brevity
+  and rides the in-order traversal; the complexity story is the same.)
+- *Deletion?* The mirror of insertion: if removing a key would underflow a node
+  (`< t-1` keys) you borrow a key from a sibling, or merge with one and pull a key
+  down from the parent. It is the fiddly half of the B-tree and the reason
+  copy-on-write B-trees (which never delete in place) are popular.
 
 ## LSM-tree / SSTable — `lib/lsm.lat`
 
@@ -84,6 +96,9 @@ runs, newest value wins) and drops tombstones, keeping read amplification bounde
 (lsm_del store %k)      :: writes a tombstone (a later compaction reclaims it)
 (lsm_get store %k)      :: -> [%val 42] or %absent
 (lsm_compact store)     :: merge all segments into one, dropping tombstones
+(lsm_keys store)        :: live keys, sorted (the merged view across all layers)
+(lsm_range store %a %m) :: sorted [key value] with a <= key <= m
+(lsm_segmeta store)     :: per segment, [minKey [maxKey count]] — the zone map
 ```
 
 The demo writes five keys with a flush threshold of 2 (so several segments form),
@@ -96,8 +111,17 @@ wins and the deleted key stays gone — with the segment count dropping to one.
 - *What's the catch?* **Read amplification** (a key might live in any segment) and
   **write amplification** (compaction rewrites data repeatedly). You trade read
   latency and background I/O for write throughput.
-- *How do reads stay fast?* Keep an index of each SSTable's keys and a **Bloom
-  filter** per segment so a read skips segments that definitely lack the key.
+- *How do reads stay fast?* Three layers of skipping. Each SSTable carries a
+  **sparse index** (one key every few KB) so you binary-search to the right block;
+  a **zone map** (the min/max key per segment, `lsm_segmeta`) lets a point or range
+  read ignore any segment that can't hold the key; and a per-segment **Bloom
+  filter** turns "is `k` in this segment?" into a couple of bit tests before any
+  I/O. A range scan (`lsm_range`) is a sorted k-way merge across the segments whose
+  zone maps overlap the range.
+- *Size-tiered vs leveled compaction?* Size-tiered merges similarly-sized runs
+  (fewer, bigger merges — write-friendly, more space and read amplification);
+  leveled keeps each level a sorted, non-overlapping set ~10× the one above (more
+  merging — read- and space-friendly). The choice is the classic LSM knob.
 - *B-tree vs LSM in one line?* B-tree = read-optimized, in-place, one copy of each
   key; LSM = write-optimized, append-only, compaction reclaims space later.
 
@@ -148,18 +172,38 @@ doesn't recognize and *default* a field that's missing.
 (w_unvarint (w_varint 1000000))             :: -> 1000000  (round-trips)
 (w_read writer-record reader-schema)        :: the reader's view of a record
 (w_unknown writer-record reader-schema)     :: tags the reader skipped
+(w_zigzag [1 5])            :: signed -5 -> 9   (zigzag: 0,-1,1,-2 -> 0,1,2,3)
+(w_decrec (w_encrec record)):: round-trip length-delimited framing
 ```
 
 The demo has a writer emit tags 1, 2, and 5; the reader knows tags 1, 2, and a new
 tag 3 (default 7). The reader sees 1 and 2, supplies 7 for the missing 3, and
 silently skips the unknown 5.
 
+**Signed integers — zigzag.** A varint encodes a natural, so a naive signed
+encoding would store `-1` as a maximal ten-byte value. **Zigzag** interleaves the
+signs — `0, -1, 1, -2, 2 → 0, 1, 2, 3, 4` — so small magnitudes of either sign stay
+one byte, then a plain varint finishes the job (`w_zigzag` / `w_unzigzag`).
+
+**Length-delimited framing.** Real forward compatibility needs more than knowing the
+tags: to *skip* an unknown field you must know where it ends. So each field is
+written as `varint(tag) ++ varint(length) ++ bytes` (`w_field`, `w_encrec`). A
+reader with no schema at all can still parse the stream into `[tag bytes]` pairs and
+carry unknown fields through untouched (`w_decrec`) — and because the payload is
+just bytes, records nest.
+
 **In an interview**
 - *Backward compatibility:* new code reads old data — achieved by giving new fields
   defaults (the missing-field case).
 - *Forward compatibility:* old code reads new data — achieved by skipping unknown
-  tags (the extra-field case). Tagged formats like Protobuf/Avro/Thrift get both;
-  this is why you add fields with new tags and never reuse or renumber old ones.
+  tags by **length** (the framing above). Tagged formats like Protobuf/Avro/Thrift
+  get both; this is why you add fields with new tags and never reuse or renumber old
+  ones.
+- *Protobuf vs Avro?* Protobuf tags each field on the wire (self-describing framing,
+  as here). Avro writes no tags at all — just values — and resolves the **writer's
+  schema** against the **reader's schema** at decode time, which is why Avro needs
+  the writer schema available (great for big files and a schema registry) while
+  Protobuf is friendlier for loosely-coupled RPC.
 - *Why varints?* Most integers are small; fixed 32/64-bit fields waste space.
 
 ---
@@ -232,6 +276,26 @@ eventual consistency**, with no coordination. Four classics are implemented:
 The demo merges two counter replicas in both orders (same result — commutative)
 and merges a replica with itself (no change — idempotent).
 
+**The hard part: removal and concurrent writes.** A grow-only set can't delete and
+LWW throws data away, so the library also implements the two CRDTs that handle
+concurrency *without loss*:
+
+- **OR-Set** (observed-remove set). Every add stamps the element with a unique tag
+  (a "dot"); a remove tombstones only the tags it has actually *seen*. An element is
+  present if any add-tag survives. So when one replica removes `x` while another
+  concurrently re-adds it, the merge keeps `x` — the add the remove never observed
+  wins. That is the behaviour a naive add/remove set (2P-Set) gets wrong.
+- **MV-Register** (multi-value register), the Dynamo "siblings" model. A write is
+  stamped with a vector clock and supersedes only the values it causally dominates;
+  merge keeps the causally-**maximal** values. Two concurrent writes therefore both
+  survive as siblings for the application to resolve, and a later write that has
+  seen both collapses them back to one.
+
+```
+(or_has (or_merge r1 r2) %x)   :: 0 if x is present after merging two replicas
+(mv_values (mv_merge wa wb))   :: the set of concurrent (sibling) values
+```
+
 **In an interview**
 - *Why commutative/idempotent matters:* gossip delivers updates out of order and
   more than once; only an idempotent, order-independent merge converges anyway.
@@ -239,7 +303,14 @@ and merges a replica with itself (no change — idempotent).
   whole state and join. Op-based ships operations and needs exactly-once causal
   delivery.
 - *The catch with LWW?* It resolves conflicts by discarding data; fine for a cache,
-  dangerous for a shopping cart (use a set/counter that merges without loss).
+  dangerous for a shopping cart — use an OR-Set or a counter that merges without
+  loss.
+- *Why does the OR-Set need tags?* Without them "add then remove" and "remove then
+  add" are indistinguishable after merge. The unique tag records *which* add a
+  remove cancelled, so a concurrent add (with a tag the remove never saw) survives.
+- *Cost?* Tombstones and dots accumulate; real systems prune them once causally
+  stable (every replica has observed them) — the same pruning problem as version
+  vectors.
 
 ## Merkle trees — `lib/merkle.lat`
 
@@ -278,22 +349,87 @@ points per physical node) even out the load and the movement.
 (ch_build [%n1 [%n2 [%n3 0]]] 16 65536)   :: 3 nodes, 16 vnodes each, ring 0..65536
 (ch_lookup ring %key 65536)                :: which node owns the key
 (ch_moved assignment-before assignment-after)  :: how many keys changed owner
+(ch_replicas ring %key 3 65536)            :: the 3 distinct nodes that replicate key
+(rv_lookup [%n1 [%n2 [%n3 0]]] %key)       :: rendezvous (HRW) owner — no ring needed
 ```
 
 The demo assigns 20 keys to 3 nodes, then adds a 4th: only ~5 keys move (not 20),
 and removing a node moves only the keys that node owned.
 
+**Replica placement (the preference list).** A key isn't stored on one node but
+replicated to the next `N` *distinct physical* nodes clockwise — Dynamo's
+"preference list" (`ch_replicas`). Walking distinct nodes (not raw ring points)
+matters: it stops two replicas of the same key landing on two vnodes of the same
+machine, which would defeat the replication.
+
+**Rendezvous (HRW) hashing.** An alternative with no ring at all: score every
+(node, key) pair with a hash and send the key to the highest-scoring node
+(`rv_lookup`); the top-`k` scores give the replica set directly (`rv_topn`). It has
+the same minimal-movement property — drop a node and only *its* keys re-home, to
+their next-highest scorer — with simpler state and naturally even load.
+
 **In an interview**
 - *Why virtual nodes?* Without them, three nodes split the ring into three uneven
   arcs and load is lumpy; many small vnodes approximate a uniform split and let you
   weight bigger machines with more points.
+- *Consistent hashing vs rendezvous?* Both move ~`1/N` of keys on a membership
+  change. The ring needs vnodes to balance load and a sorted structure to find the
+  successor; HRW needs neither (it scores all nodes, `O(N)` per lookup) and gives
+  the replica list for free — great when `N` is modest, as in a shard router.
 - *Consistent hashing vs a lookup table?* DynamoDB/Cassandra-style consistent
   hashing needs no central directory; systems like Spanner instead keep an explicit
   partition map. Trade decentralization for control.
 
 ---
 
-# Part V — Time, order, and consensus (DDIA Ch. 8–9)
+# Part V — Transactions and isolation (DDIA Ch. 7)
+
+A transaction promises atomicity and isolation, but "isolation" has levels, and the
+interesting question is always *which anomalies does this level allow?* The dominant
+modern answer is **snapshot isolation** built on multi-version storage.
+
+## MVCC and snapshot isolation — `lib/mvcc.lat`
+
+Multi-Version Concurrency Control never overwrites: every write creates a new
+version stamped with its commit timestamp. A transaction takes a **snapshot** — its
+start timestamp — and for every key reads the newest version committed at or before
+that instant. So **readers never block writers** (they read an older version) and a
+transaction sees a single consistent point in time for its whole life (repeatable
+read). On commit, a **write-write check** rejects a transaction whose keys were
+committed by someone else since it began — *first committer wins*.
+
+```
+(mvcc_commit store %x 1 5)        :: commit x=1 at timestamp 5
+(mvcc_read store %x 10)           :: snapshot read at ts 10 -> [%val 1] (or %absent)
+(mvcc_try store writes start commit)  :: -> [%commit store'] | [%abort store]
+```
+
+The demo commits `x=1` at ts 5 and `x=2` at ts 15. A reader on a snapshot at ts 10
+still sees `1` (the later commit is invisible); a snapshot at ts 20 sees `2`. A
+transaction that started at ts 10 and tries to write `x` at commit ts 18 **aborts**
+(because `x` changed at ts 15, inside its window); writing an untouched key commits.
+
+**In an interview**
+- *What anomaly does SI still allow?* **Write skew.** Two transactions read an
+  overlapping set, each checks an invariant that currently holds, and each writes a
+  *different* row. Their write sets are disjoint, so the write-write check passes for
+  both — yet together they violate the invariant (the classic "both on-call doctors
+  go off shift" bug). Snapshot isolation does not prevent it.
+- *So how do you get serializable?* Three routes: **actual serial execution**
+  (VoltDB/Redis — one transaction at a time on a partition); **two-phase locking**
+  (predicate/range locks — correct but contended); or **serializable snapshot
+  isolation (SSI)**, which runs optimistically on a snapshot and aborts a transaction
+  only when it detects the read-write dependency cycle that would make the schedule
+  non-serializable (PostgreSQL's `SERIALIZABLE`, the modern favourite).
+- *Why timestamps for visibility?* A version is visible iff `commit_ts <= snapshot`,
+  so visibility is a pure comparison — no locks on the read path. The hard part is
+  garbage-collecting versions no live snapshot can still see.
+- *Relation to undo logs / time travel?* The version chain *is* an undo history;
+  many engines expose it as "query as of timestamp T."
+
+---
+
+# Part VI — Time, order, and consensus (DDIA Ch. 8–9)
 
 ## Lamport clocks — `lib/lamport.lat`
 
@@ -316,9 +452,54 @@ node id give a **total order**, the foundation of total-order broadcast.
   timestamps order messages but don't by themselves decide membership or handle
   failures — that's Raft/Paxos territory.
 
+## Raft consensus — `lib/raft.lat`
+
+Consensus is how a set of replicas agree on one order of operations — a replicated
+log — despite crashes and lost messages. Raft is the readable member of the family,
+and its safety rests on three rules, implemented here as pure functions:
+
+1. **Election restriction.** A server grants its vote only to a candidate whose log
+   is at least as up-to-date as its own (higher last term wins; same term, longer
+   log wins — `raft_uptodate`). This guarantees a new leader already holds every
+   committed entry, so leadership never loses data.
+2. **Log matching.** `AppendEntries` is rejected unless the entry just before the new
+   ones matches the leader in **both index and term** (`raft_append`). On acceptance
+   any conflicting suffix is truncated and replaced. Inductively, identical
+   `(index, term)` implies identical logs up to that point.
+3. **Commit by majority.** An entry is committed once it is stored on a **majority**
+   of servers (`raft_commit` scans the per-follower match indices for the highest
+   index a majority has reached). A leader only counts entries from its *own* term.
+
+```
+(raft_uptodate candTerm candIdx myTerm myIdx)        :: 0 if candidate's log is OK to elect
+(raft_grantvote myTerm myVote cand candTerm clt cli mlt mli)  :: 0 = grant
+(raft_append log prevIdx prevTerm entries)           :: [%ok newlog] | [%reject 0]
+(raft_commit matchIndexList n)                       :: highest index on a majority
+```
+
+The demo shows a candidate with a longer but lower-term log being refused (the
+election restriction), an `AppendEntries` accepted on a matching prefix and rejected
+on a mismatch, and a commit index of 2 from match indices `[3 3 2 1 1]` across five
+servers (only two servers reached index 3, but three reached index 2).
+
+**In an interview**
+- *Why a leader at all?* A single leader sequences all writes, turning consensus per
+  entry into "replicate the leader's log." The price is an election whenever the
+  leader fails, gated by randomized timeouts to avoid split votes.
+- *Raft vs Paxos vs Zab?* Same safety guarantees; Raft factors the problem into
+  leader election + log replication + safety to be teachable, Multi-Paxos is the
+  classic, Zab is ZooKeeper's. All need a majority quorum and so tolerate `f`
+  failures with `2f+1` nodes.
+- *Why majority?* Any two majorities of `2f+1` intersect, so a newly elected leader's
+  voting majority necessarily overlaps the majority that stored any committed entry —
+  the entry can't be lost. This is the same quorum-overlap idea as `W + R > N`.
+- *Liveness vs safety?* Raft is always safe (never returns a wrong result) but can
+  stall during partitions/repeated elections — exactly what FLP predicts; randomized
+  timeouts restore progress in practice.
+
 ---
 
-# Part VI — Batch processing (DDIA Ch. 10)
+# Part VII — Batch processing (DDIA Ch. 10)
 
 ## MapReduce — `lib/mapred.lat`
 
@@ -342,7 +523,125 @@ immutable input, the job is restartable and embarrassingly parallel.
 
 ---
 
-# Part VII — Orpheus *is* a data-intensive system
+# Part VIII — Stream processing (DDIA Ch. 11)
+
+Batch processing assumes a finite input; a stream is unbounded, so aggregates have
+no natural end. The fix is to cut the stream into **windows over event time** and to
+reason explicitly about events that arrive out of order.
+
+## Windowing and watermarks — `lib/stream.lat`
+
+A **tumbling** window of size `s` assigns an event at time `t` to window
+`floor(t/s)`; the values in each window are aggregated (count, sum). A **sliding**
+window emits overlapping windows every `step`. Because events can arrive late, a
+**watermark** marks "event time up to here has probably arrived" — anything older is
+**late** and is dropped or routed to a side output. This is the event-time model of
+Flink, Beam, and Kafka Streams.
+
+```
+(stream_sums events 10)          :: [windowId sum] for tumbling windows of size 10
+(stream_counts events 10)        :: [windowId count]
+(stream_late events watermark)   :: the events that arrived too late to count
+(stream_slide_sum events 10 5)   :: sliding windows: size 10, step 5
+```
+
+The demo windows five timestamped events into size-10 buckets (summing and
+counting), separates the two events that fall before a watermark at time 10, and
+shows the overlapping sliding-window sums.
+
+**In an interview**
+- *Event time vs processing time?* Event time is when something happened; processing
+  time is when your job saw it. Windowing on event time gives correct, reproducible
+  results regardless of delays; processing time is simpler but wrong under lag.
+- *What's a watermark, really?* A moving lower bound on event time. When it passes a
+  window's end you can emit that window's result and reclaim its state — trading a
+  little latency (waiting for stragglers) against completeness.
+- *Stream–table duality.* A table is the current state; a stream is the log of
+  changes to it. Replaying the change stream rebuilds the table (event sourcing /
+  change data capture), and a windowed aggregate of a stream *is* a table — the
+  insight behind Kafka/Samza and behind Orpheus's own event log.
+- *Exactly-once?* Achieved not by delivering once but by making effects idempotent or
+  transactional (dedup keys, atomic offset+output commit), so a replay after failure
+  lands the same result.
+
+---
+
+# Part IX — Probabilistic structures for analytics
+
+Analytics over huge or unbounded data often can't afford exact counts. Two sketches
+answer the two most common questions in sublinear, fixed memory, trading a bounded
+error for enormous space savings — and both are mergeable, so per-shard sketches
+combine into a global one.
+
+## HyperLogLog — `lib/hll.lat`
+
+**How many DISTINCT?** Exact distinct-count needs memory proportional to the number
+of distinct items. HyperLogLog keeps `m = 2^p` small registers: hash each item, use
+the first `p` bits to pick a register, and store the largest "leading-zero count +
+1" seen there. A run of `k` leading zeros appears once per `2^k` items, so the
+register maxima estimate the cardinality. The standard error is about
+`1.04/√m` — billions of items in a few kilobytes.
+
+```
+(hll_add (hll_new 8) %item)   :: p=8 -> 256 registers
+(hll_count sketch)            :: estimated number of distinct items
+(hll_zeros sketch)            :: empty registers — a fill gauge
+```
+
+The demo feeds 400 distinct keys into a 256-register sketch and estimates ~400
+(here 422, within the expected error band), unchanged when the same items are added
+again — distinct-count, not a total.
+
+**Implementation notes (worth knowing).** Two integer-only subtleties bite in
+practice and are handled here. First, the estimator assumes the hash spreads items
+*randomly*; plain multiplicative hashing maps a sequence like `k1, k2, …` to a
+**low-discrepancy** (anti-clustered) spread — wonderful for a hash table, wrong for
+HLL — so a **non-linear** finalizer (a squaring step) is applied to restore
+Poisson-distributed collisions. Second, the raw estimate is badly biased when many
+registers are still empty, so for small cardinalities the library switches to
+**linear counting** (`m·ln(m/zeros)`, with a fixed-point logarithm) — exactly the
+small-range correction the original HLL paper prescribes. (Production HLL++ adds
+empirical bias correction and sparse storage on top.)
+
+**In an interview**
+- *Why not a hash set?* A set is exact but `O(distinct)` memory; HLL is approximate
+  but `O(2^p)` fixed — constant memory for any cardinality.
+- *Why is it mergeable?* The registers form a max-lattice: the union's register is the
+  pairwise max, so two shards' sketches merge with no re-scan — ideal for
+  map-reduce / per-partition rollups.
+- *Tune accuracy?* Raise `p`: error ≈ `1.04/√(2^p)`, at `2^p` registers. `p = 14`
+  (16384 registers, ~16 KB) is Redis's default for ~0.8% error.
+
+## Count-Min Sketch — `lib/cms.lat`
+
+**How OFTEN?** A Count-Min Sketch estimates the frequency of a key using `d` rows of
+`w` counters and `d` hash functions. Adding a key increments one counter per row; the
+estimate is the **minimum** of those counters. Because a hash collision can only
+*add* to a counter, the sketch **never under-counts** — it is an upper bound, tight
+for the heavy hitters that dominate traffic.
+
+```
+(cms_add (cms_new 4 64) %k)   :: 4 rows of 64 counters
+(cms_count sketch %k)         :: estimated count of k (>= the true count)
+```
+
+The demo adds `a` five times, `b` twice, `c` once, and reads those counts back
+exactly (no collisions at this size), while an unseen key reads 0.
+
+**In an interview**
+- *Why the minimum?* Every row's counter for `k` includes `k`'s true count plus any
+  collisions; the least-collided row is the tightest, so the min is the best upper
+  bound. Error is `≤ ε·total` with probability `1 − δ` for `w = ⌈e/ε⌉`,
+  `d = ⌈ln(1/δ)⌉`.
+- *HLL vs CMS in one line?* HLL = how many distinct (cardinality); CMS = how often
+  each (frequency). Different questions, same "small sketch, bounded error, merges
+  cleanly" philosophy — and CMS feeds streaming top-`k` / heavy-hitter detection.
+- *Where used?* Network flow accounting, trending queries, and cache admission
+  (TinyLFU/W-TinyLFU in Caffeine uses a Count-Min Sketch).
+
+---
+
+# Part X — Orpheus *is* a data-intensive system
 
 These techniques aren't decoration. The host implements the same ideas to make
 ordinary Latte apps durable and distributed for free:
@@ -356,7 +655,7 @@ ordinary Latte apps durable and distributed for free:
   reconciliation is exactly the Merkle/quorum reasoning in Parts III, and the
   Forge (team coding) is a shared, gossiped snippet log built on it.
 - **Logical time.** Orpheus orders events by `(lamport, node, hash)` — a Lamport
-  timestamp with deterministic tie-breaks, precisely Part V.
+  timestamp with deterministic tie-breaks, precisely Part VI.
 - **Convergent state.** Because Mocha pokes are commutative, durable events, app
   state converges without a coordinator — the CRDT story in Part III. A `poke` is a
   durable, gossiped event; persistence, time-travel, and log compaction come for
@@ -367,7 +666,7 @@ small, what the runtime under your program does in the large.
 
 ---
 
-# Part VIII — The rest of the system, at a glance
+# Part XI — The rest of the system, at a glance
 
 So this guide stays balanced rather than DDIA-only, here is the whole stack and
 where to read more. Everything above the host is written *in Latte*.

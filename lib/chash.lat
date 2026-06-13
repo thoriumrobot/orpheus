@@ -52,4 +52,42 @@ core chash
       else if ((tail (head xs)) == (tail (head ys))) then again((tail xs), (tail ys), n)
       else again((tail xs), (tail ys), +(n))
     end
+
+  :: REPLICA PREFERENCE LIST (Dynamo): the next `n` DISTINCT physical nodes
+  :: clockwise from a key — where its replicas live. Walking distinct nodes (not
+  :: ring points) is what stops two replicas landing on the same machine's vnodes.
+  ch_replicas = fn [ring key n ringsz] ->
+    let start = (dh_idx (dh_h1 key) ringsz) in
+    let rot = (append (filter (fn [pt] -> (gte (head pt) start)) ring)
+                      (filter (fn [pt] -> (lt (head pt) start)) ring)) in
+    loop with [c = rot, acc = 0, cnt = 0] :
+      if (cnt == n) then (reverse acc)
+      else if (c == 0) then (reverse acc)
+      else if ((member (tail (head c)) acc) == 0) then again((tail c), acc, cnt)
+      else again((tail c), [ (tail (head c)) acc ], +(cnt))
+    end
+
+  :: ---- RENDEZVOUS (Highest-Random-Weight) hashing: no ring at all -----------
+  :: Each (node, key) pair gets a score; the key goes to the highest-scoring node.
+  :: It gives the same minimal-movement property as a ring with simpler state and
+  :: even load, and the top-k scores give the replica set directly.
+  rv_score  = fn [node key] -> (dh_h1 (cat (cat node %124) key))   :: 124 = '|'
+  rv_lookup = fn [nodes key] ->
+    loop with [c = (tail nodes), best = (head nodes), bs = (rv_score (head nodes) key)] :
+      if (c == 0) then best
+      else let s = (rv_score (head c) key) in
+        if (gt s bs) then again((tail c), (head c), s)
+        else again((tail c), best, bs)
+    end
+  :: insert a node into a list kept sorted by descending score (for top-k)
+  rv_ins = fn [ranked node key] ->
+    loop with [c = ranked, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ node 0 ])
+      else if ((gt (rv_score node key) (rv_score (head c) key)) == 0) then
+        (append (reverse acc) [ node c ])
+      else again((tail c), [ (head c) acc ])
+    end
+  :: the top `n` nodes for a key — the rendezvous-hashing replica set
+  rv_topn = fn [nodes key n] ->
+    (take n (foldl (fn [r nd] -> (rv_ins r nd key)) 0 nodes))
 end

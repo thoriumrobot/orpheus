@@ -110,4 +110,14 @@ core btree
 
   :: all leaves are equidistant from the root; this is that common height
   bt_height = fn [nd] -> if ((bt_isleaf nd) == 0) then 1 else +((bt_height (head (bt_kids nd))))
+
+  :: RANGE SCAN [lo, hi] — the ordered scan a B-tree index is built for; here it
+  :: rides the in-order traversal (a real B+-tree links the leaves to do the same
+  :: without revisiting internal nodes)
+  bt_range = fn [tree lo hi] ->
+    (filter (fn [e] -> (and (not (dh_klt (head e) lo)) (not (dh_klt hi (head e)))))
+            (bt_inorder tree))
+  bt_count = fn [tree] -> (len (bt_inorder tree))
+  bt_min   = fn [tree] -> (head (bt_inorder tree))
+  bt_max   = fn [tree] -> (last (bt_inorder tree))
 end
