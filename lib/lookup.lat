@@ -1,0 +1,93 @@
+:: ===========================================================================
+:: lookup.lat — "jump to definition": given a module's source as a list of line
+:: cords and a function name, return the lines that define it (with the doc comment
+:: that sits immediately above it). This is the engine behind the GUI's `System.Def`
+:: tool — highlight a function name, and its definition is fetched and shown.
+::
+:: A module here is a list of LINE CORDS (one cord per source line; the host splits
+:: the file and passes them in). A cord is an atom read as little-endian bytes, so a
+:: line's k-byte prefix is just `line mod 256^k` — no scanning needed for a match.
+:: Top-level arms in a Latte library are indented two spaces (`  name = ...`);
+:: continuation lines are indented further; blank lines are empty; and a new arm,
+:: a `  :: comment`, or the closing `end` all begin at column <= 2. Those facts are
+:: all the structure the extractor needs.   Arms prefixed `lk_`.
+:: ===========================================================================
+import std
+core lookup
+  :: the byte at position i of a line cord (0 if past the end)
+  lk_byte = fn [line i] -> (mod (div line (pow 256 i)) 256)
+  :: the first k bytes of a line, as a cord (for comparing against a fixed pattern)
+  lk_prefix = fn [line k] -> (mod line (pow 256 k))
+  :: loobean 0 if `line` begins with the cord `pat`
+  lk_startswith = fn [line pat] -> ((lk_prefix line (bytelen pat)) == pat)
+  :: number of leading spaces (byte 32) — a line's indentation
+  lk_indent = fn [line] ->
+    loop with [x = line, n = 0] :
+      if ((mod x 256) == 32) then again((div x 256), +(n)) else n end
+  :: loobean 0 if the line is empty (a blank separator line)
+  lk_blank = fn [line] -> (line == 0)
+
+  :: the two-space arm indent and a couple of byte constants we match against
+  lk_indent2 = fn [_] -> (cat 32 32)             :: "  "
+  lk_comml   = fn [_] -> (cat (cat 32 32) (cat 58 58))   :: "  ::"  (58 = ':')
+
+  :: does this line START the definition of `name`? It must read `  name` followed
+  :: by a space or '=' (so `bt_n` does not match `bt_new`).
+  lk_isdef = fn [line name] ->
+    let pre = (cat (lk_indent2 0) name) in
+    if ((lk_startswith line pre) == 0) then
+      let nb = (lk_byte line (bytelen pre)) in
+      (if (or (nb == 32) (nb == 61)) then 0 else 1)        :: 61 = '='
+    else 1
+  :: a comment line attached to a definition (begins `  ::`)
+  lk_iscomment = fn [line] -> (lk_startswith line (lk_comml 0))
+  :: a BOUNDARY line ends a definition's body: non-blank and indented <= 2 columns
+  :: (the next arm, a top-level comment, or `core`/`end`). Blank and deeper-indented
+  :: lines belong to the current definition.
+  lk_isboundary = fn [line] ->
+    if ((lk_blank line) == 0) then 1
+    else if (lte (lk_indent line) 2) then 0 else 1
+
+  :: index of the line defining `name`, as [%at i], or %none
+  lk_find = fn [lines name] ->
+    loop with [c = lines, i = 0] :
+      if (c == 0) then %none
+      else if ((lk_isdef (head c) name) == 0) then [ %at i ]
+      else again((tail c), +(i))
+    end
+  :: walk up from the definition over any contiguous `  ::` comment block
+  lk_commentstart = fn [lines idx] ->
+    loop with [i = idx] :
+      if (i == 0) then 0
+      else if ((lk_iscomment (nth lines (sub i 1))) == 0) then again((sub i 1))
+      else i
+    end
+  :: first line index AFTER the definition's body (its closing boundary, or the end)
+  lk_defend = fn [lines idx] ->
+    loop with [j = +(idx)] :
+      if (j == (len lines)) then j
+      else if ((lk_isboundary (nth lines j)) == 0) then j
+      else again(+(j))
+    end
+
+  :: THE TOOL: the lines that define `name` (preceding comment + signature + body),
+  :: or %none if this module does not define it.
+  lk_lookup = fn [lines name] ->
+    let f = (lk_find lines name) in
+    if (f == %none) then %none
+    else let idx = (tail f) in
+      let lo = (lk_commentstart lines idx) in
+      let hi = (lk_defend lines idx) in
+      (take (sub hi lo) (drop lo lines))
+
+  :: a tiny sample "module" (line cords) so the tool runs as a one-liner:
+  :: (lk_lookup (lk_sample 0) %b)  ->  the two lines defining b.
+  lk_sample = fn [_] ->
+    [ "core m"
+      [ "  :: doc for a"
+        [ "  a = x"
+          [ "  b = fn [y] ->"
+            [ "    (add y 1)"
+              [ "  c = 3"
+                [ "end" 0 ] ] ] ] ] ] ]
+end

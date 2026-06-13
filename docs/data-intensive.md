@@ -683,7 +683,70 @@ exactly (no collisions at this size), while an unseen key reads 0.
 
 ---
 
-# Part X — Orpheus *is* a data-intensive system
+# Part IX½ — Putting it together: a composed database — `lib/db.lat`
+
+The libraries above are the *parts* of a database. `db.lat` wires them into one
+small engine so you can watch the techniques cooperate — it is the through-line of
+Parts I–VII in a single module. A `db` value is the tuple
+`[ store index bloom idxtag rschema ts vers ]`, and each field is a layer:
+
+| Layer | Library | DDIA |
+|---|---|---|
+| primary key → record | LSM-tree (`lsm`) | Ch. 3 (storage) |
+| "definitely absent?" before any read | Bloom filter (`bloom`) | Ch. 3 (negative lookups) |
+| indexed field value → primary keys | a second LSM (`lsm`) | Ch. 3 (secondary index) |
+| tagged records, evolved on read | `wire` | Ch. 4 (encoding/evolution) |
+| key → shard | consistent hashing (`chash`) | Ch. 6 (partitioning) |
+| read-set validation at commit | the version map `vers` | Ch. 7 (OCC / SSI) |
+
+Records are wire-style field lists (`[ [tag value] … 0 ]`). A read passes the
+record through the reader schema, so a row written before a field existed still
+loads with that field's default — schema evolution, live. The Bloom filter
+shortcuts a guaranteed miss so a lookup for an absent key touches no run at all.
+The secondary index keeps a posting list of primary keys per field value, updated
+on every put and delete. And a transaction reads a consistent snapshot — free,
+because a `db` value is immutable — then commits only if nothing it *read* changed
+underneath it; that read-set validation is what turns snapshot isolation
+serializable and refuses write skew.
+
+`db_sample` is a ready database (three users, indexed on a "city" field), so every
+example runs as a one-liner:
+
+```
+(db_get (db_sample 0) %u1)                 :: primary read -> [%rec [[1 %alice] [[2 %nyc] 0]]]
+(db_get (db_sample 0) %u9)                 :: %absent — and the Bloom filter skipped the store
+(db_skipped (db_sample 0) %u9)             :: 1 = the read was skipped entirely
+(map (fn [r] -> (head r)) (db_query (db_sample 0) %nyc))   :: secondary index -> [%u3 %u1]
+(map (fn [r] -> (head r)) (db_query (db_delete (db_sample 0) %u1) %nyc))  :: delete updates the index -> [%u3]
+(map (fn [e] -> (head e)) (db_range (db_sample 0) %u1 %u2)):: primary range scan -> [%u1 %u2]
+:: schema evolution: a row with no field 3, read through a schema that expects one
+(db_get (db_put (db_open 2 [[1 0] [[2 0] [[3 %zz] 0]]] 4) %u1 [[1 %alice] [[2 %nyc] 0]]) %u1)
+(db_route (ch_build [%n1 [%n2 [%n3 0]]] 16 65536) %u1 65536)   :: which shard owns u1
+:: a transaction commits while its read set holds...
+(head (db_commit (db_sample 0) (db_sample 0) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))  :: %commit
+:: ...but aborts once a key it read has changed (write skew prevented)
+(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] 0]) in
+  (head (db_commit cur snap [%u1 0] [[%u2 [[1 %bz] 0]] 0])))                    :: %abort
+```
+
+Run the whole demo with `latte ddia db`.
+
+**In an interview**
+- *Why is a snapshot free here?* Because the database is an immutable value:
+  "begin" just keeps a reference to the current `db`, and any number of readers
+  share it without locks. A real engine recreates this with MVCC version chains.
+- *What does the Bloom filter buy?* It converts most negative lookups — the common
+  case for a write-heavy key space — into a single bit test instead of a read
+  across every sorted run. The cost is a tunable false-positive rate (a deleted key
+  may still test "possibly present", costing one wasted read, never a wrong answer).
+- *Where would this engine differ from production?* The layers here are honest but
+  separate; a real LSM unifies the value store, secondary index, and version
+  metadata into shared segments, and commit validation runs against a concurrency
+  manager rather than a per-key version map. The *reasoning*, though, is identical.
+
+---
+
+
 
 These techniques aren't decoration. The host implements the same ideas to make
 ordinary Latte apps durable and distributed for free:
@@ -728,6 +791,13 @@ where to read more. Everything above the host is written *in Latte*.
 - **The Formatter** — `Edit.Format *` formats the **marked** source frame,
   provably meaning-preserving (the result must re-parse to the same AST). How to
   mark and format is in `the-system.md`.
+- **Definition lookup (`System.Def`)** — highlight a function name anywhere in the
+  GUI and click **≡ Def** (or run `System.Def`); the host runs the `lookup` library
+  (`lk_lookup`) over every module's source and shows the function's doc comment and
+  body. The lookup itself is a Latte tool: it treats a module as a list of line
+  cords and matches on a line's byte prefix, so finding `  name` followed by a space
+  or `=` is just `line mod 256^k`. Try it from the shell, too:
+  `latte ddia lookup`, or `curl 'localhost:PORT/api/defn?name=bt_search'`.
 - **SCArs / Conlang** — a sound-change applier and phonology builder (the
   linguistics suite); `scars-sound-changes.md` and `conlang-tools.md`.
 - **The numeric stack** — signed fixed-point `num`, n-dimensional `tensor`,
@@ -742,6 +812,7 @@ where to read more. Everything above the host is written *in Latte*.
 Each data-intensive technique is one Latte module in `lib/`, with arms namespaced
 so they coexist in one flat scope: `dh_` (hashing), `bloom_`, `lsm_`, `bt_`,
 `vc_` (vclock), `gc_`/`pn_`/`gs_`/`lww_` (CRDTs), `lam_` (lamport), `ch_` (chash),
-`q_` (quorum), `w_` (wire), `mr_` (mapred), `mk_` (merkle). Read any of them with
+`q_` (quorum), `w_` (wire), `mr_` (mapred), `mk_` (merkle), `db_` (the composed
+database), and `lk_` (the definition-lookup tool). Read any of them with
 `System.Open <name>` in the GUI or `latte eval --lib name=lib/name.lat "…"` from
 the shell.

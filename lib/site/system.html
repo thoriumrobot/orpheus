@@ -128,6 +128,7 @@
   <span class="links">
     <a href="#" onclick="exec('System.OpenTrack');return false" title="add a column (System.OpenTrack)">⊞ Track</a>
     <a href="#" onclick="exec('System.CloseTrack');return false" title="remove a column (System.CloseTrack)">⊟</a>
+    <a href="#" onclick="exec('System.Def');return false" title="look up the definition of the highlighted function (System.Def)">≡ Def</a>
     <a href="#" onclick="openPage('Draw','/draw');return false" title="the graphics editor — drawings embed in texts" style="font-weight:700;color:#ffe9a8">✎ Draw</a><a class="pg" href="/draw" target="_blank" title="in a browser tab">↗</a>
     <a href="#" onclick="openTool('Trade');return false" title="trading tool text">Trade</a><a class="pg" href="/trade" target="_blank" title="page in a browser tab">↗</a>
     <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart" target="_blank">↗</a>
@@ -1038,6 +1039,16 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.Clear'){ clearLog(); return; }
   if(headTok==='System.Modules'||headTok==='System.Sources'){ logEcho(line); refreshModules(); return; }
   if(headTok==='System.OpenTrack'){ logEcho(line); openTrackCol(); return; }
+  // ---- System.Def : look up the definition of a highlighted function ----
+  if(headTok==='System.Def'){
+    var nm=(rest||(window.getSelection&&String(window.getSelection()))||'').trim();
+    if(!nm){ logOut('System.Def: highlight a function name, or run  System.Def <name>', true); return; }
+    logEcho('System.Def '+nm);
+    fetch('/api/defn?name='+encodeURIComponent(nm)).then(function(r){return r.text();}).then(function(out){
+      logOut(out, /no definition|highlight a function|lookup error/.test(out));
+    }).catch(function(e){ logOut('System.Def: '+e, true); });
+    return;
+  }
   // ---- Forge.* : team coding (the shared snippet log; /api/forge) ----
   if(headTok==='Forge.As'){
     logEcho(line);

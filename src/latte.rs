@@ -769,6 +769,10 @@ pub const CMS_LAT: &str = include_str!("../lib/cms.lat");
 pub const STREAM_LAT: &str = include_str!("../lib/stream.lat");
 /// Raft consensus core (DDIA Ch.9), via `import raft`.
 pub const RAFT_LAT: &str = include_str!("../lib/raft.lat");
+/// A composed data-intensive database (storage+index+bloom+encoding+partition+txn), via `import db`.
+pub const DB_LAT: &str = include_str!("../lib/db.lat");
+/// Definition-lookup tool (the engine behind the GUI's `System.Def`), via `import lookup`.
+pub const LOOKUP_LAT: &str = include_str!("../lib/lookup.lat");
 
 
 fn builtin_lib(name: &str) -> Option<&'static str> {
@@ -813,6 +817,8 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "cms" => Some(CMS_LAT),
         "stream" => Some(STREAM_LAT),
         "raft" => Some(RAFT_LAT),
+        "db" => Some(DB_LAT),
+        "lookup" => Some(LOOKUP_LAT),
         _ => None,
     }
 }
@@ -890,7 +896,7 @@ pub fn all_libs() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1003,7 +1009,7 @@ pub fn builtin_lib_names() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup",
     ]
     .iter()
     .map(|s| s.to_string())

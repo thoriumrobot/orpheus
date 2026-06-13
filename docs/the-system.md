@@ -194,6 +194,11 @@ ones and `CloseTrack` restores what was beneath (the hierarchy is
   `Viewers` module likewise "delivers hints as to where it might best be
   placed". Tool outputs, sources, and texts spread across your columns
   instead of piling into one.
+- **`System.Def`** (or the header's ≡ Def) looks up the definition of the
+  **highlighted** function: select a name in any viewer and run it, and its doc
+  comment and body are fetched from whichever module defines it and printed to the
+  Log. The search itself is a Latte program (`lib/lookup.lat`); see
+  `data-intensive.md`.
 
 ## The desktop
 

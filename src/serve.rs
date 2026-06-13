@@ -419,6 +419,18 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             }
             None => simple(400, "text/plain; charset=utf-8", b"bad module name".to_vec()),
         },
+        // Look up the definition of a function across all modules, by running the
+        // `lookup` library (lk_lookup) — the Latte tool — over each module's source.
+        // GET /api/defn?name=bt_search  ->  "module btree\n\n  <comment+definition lines>"
+        ("GET", "/api/defn") => {
+            match query_param(&req.query, "name").map(|n| n.trim().to_string()) {
+                Some(name) if is_ident(&name) => {
+                    simple(200, "text/plain; charset=utf-8", lookup_definition(&name, root).into_bytes())
+                }
+                _ => simple(400, "text/plain; charset=utf-8",
+                    b"highlight a function name first (letters, digits, '_', '.')".to_vec()),
+            }
+        }
         // Compile a module's source into the running system and persist it to disk if possible.
         // This is the GUI's edit -> compile -> run loop applied to the system's own modules.
         // ---- TEXTS: the user's documents-with-objects, saved under <root>/text/ ----
@@ -1757,6 +1769,91 @@ fn safe_facet_path(root: &str, name: Option<&str>) -> Option<std::path::PathBuf>
 /// directory (`lib/site`); the libraries sit one level up (`lib`).
 fn lib_dir(root: &str) -> Option<std::path::PathBuf> {
     std::path::Path::new(root).parent().map(|p| p.to_path_buf())
+}
+
+/// Run the `lookup` library (lk_lookup) — the Latte definition-lookup tool — over
+/// every module's source and return the first definition found, prefixed with the
+/// module it lives in. The host's only job is to split each module into line cords,
+/// hand them to the Latte tool, and render the line cords it hands back.
+fn lookup_definition(name: &str, root: &str) -> String {
+    // gather every module name the same way /api/sources does
+    let mut names: Vec<String> = crate::latte::builtin_lib_names();
+    names.extend(crate::latte::runtime_lib_names());
+    if let Some(dir) = lib_dir(root) {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("lat") {
+                    if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+                        names.push(stem.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+
+    // a Latte string-literal for a single source line (escape \  "  tab)
+    fn quote_line(line: &str) -> String {
+        let mut q = String::with_capacity(line.len() + 2);
+        q.push('"');
+        for ch in line.chars() {
+            match ch {
+                '\\' => q.push_str("\\\\"),
+                '"' => q.push_str("\\\""),
+                '\t' => q.push_str("\\t"),
+                _ => q.push(ch),
+            }
+        }
+        q.push('"');
+        q
+    }
+
+    for modname in &names {
+        let src = match crate::latte::library_source(modname) {
+            Some(s) => s,
+            None => continue,
+        };
+        // cheap pre-filter: does some line begin `  name` then a space or '='?
+        let defines = src.lines().any(|l| {
+            if let Some(rest) = l.strip_prefix("  ").and_then(|r| r.strip_prefix(name)) {
+                rest.starts_with(' ') || rest.starts_with('=')
+            } else {
+                false
+            }
+        });
+        if !defines {
+            continue;
+        }
+        // build  (lk_lookup [ "l0" [ "l1" [ ... 0 ] ] ] "name")  and run the tool
+        let mut list = String::from("0");
+        for line in src.lines().rev() {
+            list = format!("[ {} {} ]", quote_line(line), list);
+        }
+        let expr = format!("(lk_lookup {} {})", list, quote_line(name));
+        let n = match crate::latte::run_with_libs(&expr, &["std", "lookup"]) {
+            Ok(n) => n,
+            Err(e) => return format!("lookup error: {}", e),
+        };
+        // %none -> not in this module; otherwise decode the list of line cords
+        if let Some(a) = n.as_atom() {
+            if a.bytes_le() == b"none" {
+                continue;
+            }
+        }
+        let mut out = String::new();
+        let mut cur = &n;
+        while let Some((head, tail)) = cur.as_cell() {
+            if let Some(a) = head.as_atom() {
+                out.push_str(&String::from_utf8_lossy(a.bytes_le()));
+                out.push('\n');
+            }
+            cur = tail;
+        }
+        return format!("module {}\n\n{}", modname, out.trim_end());
+    }
+    format!("no definition found for '{}'", name)
 }
 
 /// The documentation directory (`docs/`), a sibling of the library directory.

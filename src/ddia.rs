@@ -66,6 +66,7 @@ pub fn cmd_ddia(args: &[String]) {
     println!("Designing Data-Intensive Applications — techniques in Latte (lib/*.lat)");
     if all {
         println!("topics: bloom lsm btree vclock crdt lamport chash quorum wire mapred merkle");
+        println!("        mvcc hll cms stream raft db lookup");
         println!("        mvcc hll cms stream raft");
     }
 
@@ -243,6 +244,33 @@ pub fn cmd_ddia(args: &[String]) {
         row("commit idx, match [3 3 2 1 1] n5", "(raft_commit [3 [3 [2 [1 [1 0]]]]] 5)");
     }
 
+    if all || topic == "db" {
+        head("A composed database (Ch.3–7)",
+             "LSM storage + Bloom + secondary index + schema evolution + partitioning + OCC transactions");
+        row("get u1 (primary read)", "(db_get (db_sample 0) %u1)");
+        row("get u9 (Bloom -> absent, store skipped)", "(db_get (db_sample 0) %u9)");
+        row("Bloom skipped the read? (1 = yes)", "(db_skipped (db_sample 0) %u9)");
+        row("query city=nyc (secondary index)", "(map (fn [r] -> (head r)) (db_query (db_sample 0) %nyc))");
+        row("delete u1, re-query nyc", "(map (fn [r] -> (head r)) (db_query (db_delete (db_sample 0) %u1) %nyc))");
+        row("range scan [u1,u2]", "(map (fn [e] -> (head e)) (db_range (db_sample 0) %u1 %u2))");
+        let rs = "[[1 0] [[2 0] [[3 %zz] 0]]]";
+        row("schema evolution: field 3 defaults",
+            &format!("(db_get (db_put (db_open 2 {} 4) %u1 [[1 %alice] [[2 %nyc] 0]]) %u1)", rs));
+        row("partition route u1 (3-node ring)", "(db_route (ch_build [%n1 [%n2 [%n3 0]]] 16 65536) %u1 65536)");
+        row("txn commit (read set still valid)",
+            "(head (db_commit (db_sample 0) (db_sample 0) [%u1 0] [[%u4 [[1 %dave] [[2 %nyc] 0]]] 0]))");
+        row("write skew -> abort (u1 changed)",
+            "(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] [[2 %sfo] 0]]) in (head (db_commit cur snap [%u1 0] [[%u2 [[1 %bz] [[2 %nyc] 0]]] 0])))");
+    }
+
+    if all || topic == "lookup" {
+        head("Definition-lookup tool",
+             "highlight a function name; lk_lookup returns its doc comment + definition from the module source");
+        row("lk_lookup sample for b (sig + body)", "(lk_lookup (lk_sample 0) %b)");
+        row("lk_lookup sample for a (doc + def)", "(lk_lookup (lk_sample 0) %a)");
+        row("missing name -> %none", "(lk_lookup (lk_sample 0) %z)");
+    }
+
     if all {
         println!("\nEach technique is a Latte module in lib/ (namespaced: dh_/bloom_/lsm_/bt_/vc_/");
         println!("gc_,or_,mv_/lam_/ch_,rv_/q_/w_/mr_/mk_/mvcc_/hll_/cms_/stream_/raft_).");
@@ -263,6 +291,51 @@ mod tests {
         assert_eq!(n(&format!("(bloom_test {} %apple)", f)), 0); // present
         assert_eq!(n(&format!("(bloom_test {} %banana)", f)), 0);
         assert_eq!(n(&format!("(bloom_test {} %grape)", f)), 1); // absent
+    }
+
+    #[test]
+    fn db_get_query_and_bloom_skip() {
+        let d = "(db_sample 0)";
+        // primary read returns the stored record under the %rec tag
+        assert_eq!(run(&format!("(head (db_get {} %u1))", d)).unwrap(), crate::knot::cord("rec"));
+        // a key never inserted is reported absent and the Bloom filter skips the store read
+        assert_eq!(run(&format!("(db_get {} %u9)", d)).unwrap(), crate::knot::cord("absent"));
+        assert_eq!(n(&format!("(db_skipped {} %u9)", d)), 1);
+        // the secondary index on the city field returns both nyc users
+        assert_eq!(n(&format!("(len (db_query {} %nyc))", d)), 2);
+        assert_eq!(n(&format!("(len (db_query {} %sfo))", d)), 1);
+    }
+
+    #[test]
+    fn db_delete_updates_secondary_index() {
+        // deleting u1 (nyc) leaves only u3 under the nyc posting list, and the row is gone
+        let d = "(db_delete (db_sample 0) %u1)";
+        assert_eq!(run(&format!("(db_get {} %u1)", d)).unwrap(), crate::knot::cord("absent"));
+        assert_eq!(n(&format!("(len (db_query {} %nyc))", d)), 1);
+    }
+
+    #[test]
+    fn db_transactions_prevent_write_skew() {
+        // a transaction whose read set still holds commits
+        let ok = "(head (db_commit (db_sample 0) (db_sample 0) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))";
+        assert_eq!(run(ok).unwrap(), crate::knot::cord("commit"));
+        // a transaction that read u1 aborts once u1 has changed underneath it (write skew)
+        let skew = "(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] 0]) in \
+                     (head (db_commit cur snap [%u1 0] [[%u2 [[1 %bz] 0]] 0])))";
+        assert_eq!(run(skew).unwrap(), crate::knot::cord("abort"));
+    }
+
+    #[test]
+    fn lookup_finds_definition_with_comment() {
+        let s = "(lk_sample 0)";
+        // b has a signature line + an indented body line -> two lines, no preceding comment
+        assert_eq!(n(&format!("(len (lk_lookup {} %b))", s)), 2);
+        // a is preceded by a doc comment -> the comment is included
+        assert_eq!(n(&format!("(len (lk_lookup {} %a))", s)), 2);
+        assert_eq!(run(&format!("(lk_iscomment (head (lk_lookup {} %a)))", s)).unwrap(),
+                   crate::knot::num(0)); // first returned line is the comment
+        // a missing name yields %none
+        assert_eq!(run(&format!("(lk_lookup {} %zzz)", s)).unwrap(), crate::knot::cord("none"));
     }
 
     #[test]

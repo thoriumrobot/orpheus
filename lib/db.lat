@@ -1,0 +1,152 @@
+:: ===========================================================================
+:: db.lat — a small but real DATABASE assembled from the data-intensive parts.
+::
+:: Each technique in this collection is a layer of a database; this module wires
+:: them into one engine so you can watch them cooperate (DDIA, the whole arc):
+::
+::   * STORAGE   (Ch.3) — an LSM-tree holds primary key -> record.
+::   * NEGATIVE LOOKUPS (Ch.3) — a Bloom filter answers "definitely absent" before
+::                  the engine ever touches a run, so a miss costs no read.
+::   * SECONDARY INDEX (Ch.3) — a second LSM maps an indexed field's value -> the
+::                  list of primary keys that carry it, so you can query by non-key.
+::   * ENCODING  (Ch.4) — values are tagged records; reads pass them through a
+::                  reader schema, so an old row missing a new field gets a default
+::                  and a row with an unknown field still loads (schema evolution).
+::   * PARTITIONING (Ch.6) — a consistent-hash ring routes a key to its shard.
+::   * TRANSACTIONS (Ch.7) — optimistic concurrency control: a transaction reads a
+::                  consistent snapshot (free, because a db value is immutable) and
+::                  commits only if nothing it READ changed underneath it. That
+::                  read-set validation is what makes snapshot isolation serializable
+::                  and is what stops write skew.
+::
+:: A db value is the 7-tuple [ store index bloom idxtag rschema ts vers ]:
+::   store   = primary LSM (pk -> record)        index = secondary LSM (fieldval -> [pk..])
+::   bloom   = Bloom filter over primary keys     idxtag = which record field is indexed
+::   rschema = reader schema for evolution        ts     = monotonic write counter
+::   vers    = assoc list pk -> last-write ts (the per-key version OCC validates against)
+:: A record is a wire-style field list: [ [tag value] [tag value] .. 0 ].
+:: Arms prefixed `db_`.
+:: ===========================================================================
+import std
+import dhash
+import lsm
+import bloom
+import wire
+import chash
+core db
+  :: ---- the db tuple and its accessors --------------------------------------
+  db_make = fn [store index bloom idxtag rschema ts vers] ->
+    [ store [ index [ bloom [ idxtag [ rschema [ ts [ vers 0 ] ] ] ] ] ] ]
+  db_store   = fn [d] -> (nth d 0)
+  db_index   = fn [d] -> (nth d 1)
+  db_bloom   = fn [d] -> (nth d 2)
+  db_idxtag  = fn [d] -> (nth d 3)
+  db_rschema = fn [d] -> (nth d 4)
+  db_ts      = fn [d] -> (nth d 5)
+  db_vers    = fn [d] -> (nth d 6)
+
+  :: open a database: index field `idxtag`, evolve reads through `rschema`
+  :: (pass 0 for no schema), LSM flush threshold `thresh`.
+  db_open = fn [idxtag rschema thresh] ->
+    (db_make (lsm_new thresh) (lsm_new thresh) (bloom_make 1024 4) idxtag rschema 0 0)
+
+  :: ---- tiny helpers --------------------------------------------------------
+  :: the value of field `tag` in a record (0 if the record has no such field)
+  db_field = fn [rec tag] -> let f = (w_find rec tag) in if (f == 0) then 0 else (tail f)
+  :: unwrap an lsm result: [%val v] -> v, %absent -> 0
+  db_unwrap = fn [g] -> if (g == %absent) then 0 else (tail g)
+  :: a per-key version map is an assoc list [ [pk ts] .. 0 ]
+  db_vget = fn [vers pk] ->
+    loop with [c = vers] :
+      if (c == 0) then 0
+      else if ((head (head c)) == pk) then (tail (head c))
+      else again((tail c))
+    end
+  db_vset = fn [vers pk ts] ->
+    loop with [c = vers, acc = 0] :
+      if (c == 0) then [ [pk ts] (reverse acc) ]
+      else if ((head (head c)) == pk) then (append (reverse acc) [ [pk ts] (tail c) ])
+      else again((tail c), [ (head c) acc ])
+    end
+  :: add / drop a primary key from a secondary-index posting list
+  db_addpk = fn [pks pk] -> if ((member pk pks) == 0) then pks else [ pk pks ]
+  db_delpk = fn [pks pk] -> (filter (fn [x] -> if (x == pk) then 1 else 0) pks)
+
+  :: ---- writes --------------------------------------------------------------
+  :: insert/overwrite record `rec` under primary key `pk`. Updates the primary
+  :: store, the Bloom filter, the secondary index posting list, and the version map.
+  db_put = fn [d pk rec] ->
+    let ts1 = (add (db_ts d) 1) in
+    let store2 = (lsm_put (db_store d) pk rec) in
+    let bloom2 = (bloom_add (db_bloom d) pk) in
+    let fv = (db_field rec (db_idxtag d)) in
+    let cur = (db_unwrap (lsm_get (db_index d) fv)) in
+    let index2 = (lsm_put (db_index d) fv (db_addpk cur pk)) in
+    let vers2 = (db_vset (db_vers d) pk ts1) in
+    (db_make store2 index2 bloom2 (db_idxtag d) (db_rschema d) ts1 vers2)
+
+  :: delete a key: write a tombstone in the primary store and remove the key from
+  :: its secondary posting list. (The Bloom filter cannot un-set a bit, so a
+  :: deleted key may still "test possibly-present" — a false positive that costs
+  :: one wasted store read, never a wrong answer.)
+  db_delete = fn [d pk] ->
+    let rec = (db_unwrap (lsm_get (db_store d) pk)) in
+    let fv = (db_field rec (db_idxtag d)) in
+    let store2 = (lsm_del (db_store d) pk) in
+    let cur = (db_unwrap (lsm_get (db_index d) fv)) in
+    let index2 = (lsm_put (db_index d) fv (db_delpk cur pk)) in
+    let ts1 = (add (db_ts d) 1) in
+    (db_make store2 index2 (db_bloom d) (db_idxtag d) (db_rschema d) ts1 (db_vset (db_vers d) pk ts1))
+
+  :: ---- reads ---------------------------------------------------------------
+  :: point read. The Bloom filter shortcuts a guaranteed miss (no store read at
+  :: all); otherwise fetch the record and, if a reader schema is set, evolve it.
+  db_get = fn [d pk] ->
+    if ((bloom_test (db_bloom d) pk) == 1) then %absent           :: definitely absent
+    else let g = (lsm_get (db_store d) pk) in
+      if (g == %absent) then %absent
+      else let rec = (tail g) in
+        if ((db_rschema d) == 0) then [ %rec rec ] else [ %rec (w_read rec (db_rschema d)) ]
+
+  :: did the Bloom filter let us skip the store entirely for this key? (0 = skipped)
+  db_skipped = fn [d pk] -> (bloom_test (db_bloom d) pk)
+
+  :: secondary-index query: every record whose indexed field equals `fv`
+  db_query = fn [d fv] ->
+    let pks = (db_unwrap (lsm_get (db_index d) fv)) in
+    (map (fn [pk] -> [ pk (db_get d pk) ]) pks)
+
+  :: primary-key range scan [lo, hi] (rides the LSM's sorted order)
+  db_range = fn [d lo hi] -> (lsm_range (db_store d) lo hi)
+
+  :: merge segments in both the primary store and the secondary index
+  db_compact = fn [d] ->
+    (db_make (lsm_compact (db_store d)) (lsm_compact (db_index d)) (db_bloom d)
+             (db_idxtag d) (db_rschema d) (db_ts d) (db_vers d))
+
+  :: ---- partitioning (Ch.6): route a key to its shard on a consistent-hash ring
+  db_route = fn [ring pk ringsize] -> (ch_lookup ring pk ringsize)
+
+  :: ---- transactions (Ch.7): optimistic concurrency control ------------------
+  :: A snapshot is just the immutable db value at begin — capturing it is free.
+  db_begin = fn [d] -> d
+  :: the version a reader observed for a key under some db
+  db_readts = fn [d pk] -> (db_vget (db_vers d) pk)
+  :: VALIDATE: did any key in `readset` change between the snapshot and now?
+  :: 0 = a read key advanced -> the transaction saw stale data and must abort.
+  db_validate = fn [cur snap readset] ->
+    (any (fn [pk] -> (gt (db_readts cur pk) (db_readts snap pk))) readset)
+  :: COMMIT a transaction: `writes` is a list of [pk rec]. If the read set still
+  :: holds, apply the writes to the *current* db; otherwise abort. This refuses
+  :: the write skew that plain snapshot isolation would wave through.
+  db_commit = fn [cur snap readset writes] ->
+    if ((db_validate cur snap readset) == 0) then [ %abort cur ]
+    else [ %commit (foldl (fn [d w] -> (db_put d (head w) (tail w))) cur writes) ]
+
+  :: ---- a ready-made database so examples run as one-liners ------------------
+  :: indexes field 2 (a "city"); two users in nyc, one in sfo.
+  db_sample = fn [_] ->
+    (db_put (db_put (db_put (db_open 2 0 4) %u1 [ [1 %alice] [ [2 %nyc] 0 ] ])
+                    %u2 [ [1 %bob] [ [2 %sfo] 0 ] ])
+            %u3 [ [1 %carol] [ [2 %nyc] 0 ] ])
+end
