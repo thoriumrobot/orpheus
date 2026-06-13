@@ -1,0 +1,36 @@
+:: ===========================================================================
+:: quorum.lat — quorum reads & writes (DDIA, Ch. 5, pp. 179-184).
+::
+:: In a leaderless (Dynamo-style) store with N replicas, a write waits for W acks
+:: and a read queries R replicas, taking the value with the highest version. If
+:: W + R > N the read and write sets must OVERLAP, so a read is guaranteed to see
+:: the latest committed write. With W + R <= N a read can miss it (stale). This
+:: library makes that guarantee concrete and shows READ REPAIR.   Arms `q_`.
+::
+:: state = list of N replicas, each [version value].  Writes hit the first W;
+:: reads query the last R — so the sets overlap exactly when W + R > N.
+:: ===========================================================================
+import std
+core quorum
+  q_init    = fn [n] -> (replicate n [0 %nil])
+  :: does this configuration guarantee read-your-writes? loobean 0 = yes (W+R>N)
+  q_overlap = fn [n w r] -> (gt (add w r) n)
+
+  :: a write to a quorum of W replicas (the first W), at the given version
+  q_write = fn [state w ver val] ->
+    (append (map (fn [_] -> [ver val]) (take w state)) (drop w state))
+
+  :: the R replicas a read contacts (the last R) and the freshest among them
+  q_readset = fn [state r] -> (drop (sub (len state) r) state)
+  q_read = fn [state r] ->
+    (foldl (fn [best e] -> if ((gt (head e) (head best)) == 0) then e else best)
+           [0 %nil] (q_readset state r))
+  q_readval = fn [state r] -> (tail (q_read state r))
+
+  :: READ REPAIR: after reading, push the freshest [ver val] back over the read
+  :: set, healing stale replicas (anti-entropy on the read path)
+  q_repair = fn [state r] ->
+    let fresh = (q_read state r) in
+    let keep  = (sub (len state) r) in
+    (append (take keep state) (map (fn [_] -> fresh) (q_readset state r)))
+end

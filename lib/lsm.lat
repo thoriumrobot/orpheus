@@ -1,0 +1,84 @@
+:: ===========================================================================
+:: lsm.lat — an LSM-tree / SSTable storage engine (DDIA, Ch. 3, pp. 76-79).
+::
+:: Writes go to an in-memory MEMTABLE kept sorted by key; when it grows past a
+:: threshold it is flushed as an immutable, sorted SEGMENT (an SSTable). Reads
+:: consult the memtable, then segments newest-first, so the first hit wins.
+:: Deletes write a TOMBSTONE. COMPACTION merges the sorted segments (a k-way
+:: merge, newer value wins) and drops tombstones — the same mechanism a real
+:: LSM engine (LevelDB, RocksDB, Cassandra) uses.   Arms prefixed `lsm_`.
+::
+:: store      = [ memtable [ segments threshold ] ]
+:: memtable   = sorted list of [key valcell]
+:: segment    = sorted list of [key valcell]   (immutable SSTable)
+:: valcell    = [0 v] present  |  [1 0] tombstone
+:: ===========================================================================
+import std
+import dhash
+core lsm
+  lsm_new    = fn [thresh] -> [ 0 [ 0 thresh ] ]
+  lsm_mem    = fn [s] -> (head s)
+  lsm_segs   = fn [s] -> (head (tail s))
+  lsm_thresh = fn [s] -> (tail (tail s))
+
+  :: sorted upsert into a sorted [key valcell] list (replace on equal key)
+  lsm_ins = fn [lst k vc] ->
+    loop with [c = lst, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ [k vc] 0 ])
+      else let e = (head c) in let ek = (head e) in
+        if (ek == k) then (append (reverse acc) [ [k vc] (tail c) ])
+        else if ((dh_klt k ek) == 0) then (append (reverse acc) [ [k vc] c ])
+        else again((tail c), [ e acc ])
+    end
+
+  :: flush the memtable into a fresh newest segment, clearing the memtable
+  lsm_flush = fn [s] -> [ 0 [ [ (lsm_mem s) (lsm_segs s) ] (lsm_thresh s) ] ]
+  lsm_maybeflush = fn [s] ->
+    if (gt (len (lsm_mem s)) (lsm_thresh s)) then (lsm_flush s) else s
+
+  lsm_put = fn [s k v] ->
+    (lsm_maybeflush [ (lsm_ins (lsm_mem s) k [0 v]) [ (lsm_segs s) (lsm_thresh s) ] ])
+  lsm_del = fn [s k] ->
+    (lsm_maybeflush [ (lsm_ins (lsm_mem s) k [1 0]) [ (lsm_segs s) (lsm_thresh s) ] ])
+
+  :: find a key in one segment: 0 = miss, else [%f valcell]
+  lsm_findseg = fn [seg k] ->
+    loop with [c = seg] :
+      if (c == 0) then 0
+      else if ((head (head c)) == k) then [ %f (tail (head c)) ]
+      else again((tail c))
+    end
+
+  :: get: memtable then segments newest-first; tombstone or no-hit -> %absent
+  lsm_get = fn [s k] ->
+    loop with [c = [ (lsm_mem s) (lsm_segs s) ]] :
+      if (c == 0) then %absent
+      else let hit = (lsm_findseg (head c) k) in
+        if (hit == 0) then again((tail c))
+        else if ((head (tail hit)) == 0) then [ %val (tail (tail hit)) ]
+        else %absent
+    end
+
+  :: merge two sorted segments; on equal key the FIRST (newer) wins
+  lsm_merge = fn [a b] ->
+    loop with [xs = a, ys = b, acc = 0] :
+      if (xs == 0) then (append (reverse acc) ys)
+      else if (ys == 0) then (append (reverse acc) xs)
+      else let kx = (head (head xs)) in let ky = (head (head ys)) in
+        if (kx == ky) then again((tail xs), (tail ys), [ (head xs) acc ])
+        else if ((dh_klt kx ky) == 0) then again((tail xs), ys, [ (head xs) acc ])
+        else again(xs, (tail ys), [ (head ys) acc ])
+    end
+
+  :: compaction: k-way merge of all segments (newest-first) into one, dropping
+  :: tombstones — the steady-state job of an LSM background thread
+  lsm_compact = fn [s] ->
+    let segs = (lsm_segs s) in
+    if (segs == 0) then s
+    else let merged = (foldl (fn [acc seg] -> (lsm_merge acc seg)) (head segs) (tail segs)) in
+      let live = (filter (fn [e] -> (head (tail e))) merged) in
+      [ (lsm_mem s) [ [ live 0 ] (lsm_thresh s) ] ]
+
+  :: how many immutable segments exist (read amplification)
+  lsm_nsegs = fn [s] -> (len (lsm_segs s))
+end

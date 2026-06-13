@@ -1,0 +1,55 @@
+:: ===========================================================================
+:: crdt.lat — Conflict-free Replicated Data Types (DDIA, Ch. 5, p. 174).
+::
+:: CRDTs converge without coordination: their MERGE is commutative, associative,
+:: and idempotent (a join on a lattice), so replicas that see the same set of
+:: updates in any order reach the same state — strong eventual consistency. This
+:: is exactly the convergence Orpheus's own gossip layer relies on.
+:: Four classics:  G-Counter, PN-Counter, G-Set, LWW-Register.
+:: Arms prefixed `gc_` / `pn_` / `gs_` / `lww_`.
+:: ===========================================================================
+import std
+core crdt
+  :: ---- G-Counter: grow-only counter, per-node sub-counts -------------------
+  :: state = list of [node count]; merge = pointwise max; value = sum
+  gc_new   = fn [_] -> 0
+  gc_get   = fn [g node] ->
+    loop with [c = g] :
+      if (c == 0) then 0
+      else if ((head (head c)) == node) then (tail (head c))
+      else again((tail c))
+    end
+  gc_inc   = fn [g node d] ->
+    [ [node (add (gc_get g node) d)] (filter (fn [e] -> (not ((head e) == node))) g) ]
+  gc_nodes = fn [a b] ->
+    let na = (map (fn [e] -> (head e)) a) in
+    (append na (filter (fn [nd] -> (not (member nd na))) (map (fn [e] -> (head e)) b)))
+  gc_merge = fn [a b] ->
+    (map (fn [nd] -> [ nd (max (gc_get a nd) (gc_get b nd)) ]) (gc_nodes a b))
+  gc_value = fn [g] -> (foldl (fn [s e] -> (add s (tail e))) 0 g)
+
+  :: ---- PN-Counter: two G-Counters [P N]; value = sum(P) - sum(N) -----------
+  pn_new   = fn [_] -> [ 0 0 ]
+  pn_inc   = fn [p node d] -> [ (gc_inc (head p) node d) (tail p) ]
+  pn_dec   = fn [p node d] -> [ (head p) (gc_inc (tail p) node d) ]
+  pn_merge = fn [a b] -> [ (gc_merge (head a) (head b)) (gc_merge (tail a) (tail b)) ]
+  pn_value = fn [p] -> (sub (gc_value (head p)) (gc_value (tail p)))
+
+  :: ---- G-Set: grow-only set; merge = union --------------------------------
+  gs_new   = fn [_] -> 0
+  gs_add   = fn [s x] -> if ((member x s) == 0) then s else [ x s ]
+  gs_has   = fn [s x] -> (member x s)
+  gs_merge = fn [a b] -> (foldl (fn [s x] -> (gs_add s x)) a b)
+
+  :: ---- LWW-Register: [ts value node]; higher ts wins (tie: higher node) ----
+  lww_new   = fn [_] -> [ 0 [ %nil 0 ] ]
+  lww_set   = fn [ts val node] -> [ ts [ val node ] ]
+  lww_ts    = fn [r] -> (head r)
+  lww_value = fn [r] -> (head (tail r))
+  lww_node  = fn [r] -> (tail (tail r))
+  lww_merge = fn [a b] ->
+    if (gt (lww_ts a) (lww_ts b)) then a
+    else if (gt (lww_ts b) (lww_ts a)) then b
+    else if (gte (lww_node a) (lww_node b)) then a
+    else b
+end

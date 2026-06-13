@@ -1,0 +1,63 @@
+:: ===========================================================================
+:: wire.lat — encoding & schema evolution (DDIA, Ch. 4, pp. 116-128).
+::
+:: Two ideas that make rolling upgrades safe. (1) VARINT (LEB128): a natural is
+:: packed into 7-bit groups, high bit = "more bytes follow", so small numbers
+:: cost one byte — the encoding Protocol Buffers and Thrift use. (2) TAGGED
+:: RECORDS + reader/writer schemas: every field carries a numeric tag, so a
+:: reader can skip unknown (newer) fields for FORWARD compatibility and supply
+:: defaults for missing (newer) fields for BACKWARD compatibility.  Arms `w_`.
+::
+:: record       = list of [tag value]      (what the writer serialized)
+:: readerschema = list of [tag default]    (the fields the reader knows)
+:: ===========================================================================
+import std
+core wire
+  :: ---- varint (LEB128) ------------------------------------------------------
+  w_varint = fn [n] ->
+    loop with [x = n, acc = 0] :
+      let b = (mod x 128) in
+      let r = (div x 128) in
+      if (r == 0) then (reverse [ b acc ])
+      else again(r, [ (add b 128) acc ])
+    end
+  w_unvarint = fn [bytes] ->
+    loop with [c = bytes, acc = 0, sh = 1] :
+      if (c == 0) then acc
+      else if (lt (head c) 128) then (add acc (mul (head c) sh))
+      else again((tail c), (add acc (mul (sub (head c) 128) sh)), (mul sh 128))
+    end
+  :: total encoded size (bytes) of a natural under varint
+  w_varlen = fn [n] -> (len (w_varint n))
+
+  :: ---- tagged records -------------------------------------------------------
+  :: encode a record as a flat byte stream: per field, varint(tag) ++ varint(value)
+  w_encode = fn [record] ->
+    (concat (map (fn [f] -> (append (w_varint (head f)) (w_varint (tail f)))) record))
+
+  :: find a field by tag in a record: 0 = absent, else [%f value]
+  w_find = fn [record tag] ->
+    loop with [c = record] :
+      if (c == 0) then 0
+      else if ((head (head c)) == tag) then [ %f (tail (head c)) ]
+      else again((tail c))
+    end
+
+  :: SCHEMA EVOLUTION: read a writer's record through a reader schema. Known
+  :: fields take their value; missing fields take the schema default (backward
+  :: compat); the writer's unknown extra tags are simply not requested (forward
+  :: compat). Returns the reader's view as a list of [tag value].
+  w_read = fn [record readerschema] ->
+    (map (fn [s] ->
+            let tag = (head s) in
+            let found = (w_find record tag) in
+            if (found == 0) then [ tag (tail s) ]
+            else [ tag (tail found) ])
+         readerschema)
+
+  :: the writer tags the reader did not know about (and safely skipped)
+  w_unknown = fn [record readerschema] ->
+    (filter (fn [f] ->
+               (not (member (head f) (map (fn [s] -> (head s)) readerschema))))
+            record)
+end

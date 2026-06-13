@@ -1,0 +1,55 @@
+:: ===========================================================================
+:: chash.lat — consistent hashing with virtual nodes (DDIA, Ch. 6, p. 204).
+::
+:: Keys and nodes hash onto one ring of size R; a key is owned by the first node
+:: clockwise from it. Adding or removing a node moves only the keys between it
+:: and its predecessor — about 1/N of them — instead of remapping everything (as
+:: plain `hash(key) mod N` would). VIRTUAL NODES (several ring points per
+:: physical node) smooth the load.   Arms prefixed `ch_`.
+::
+:: ring = list of [pos node] sorted ascending by pos.
+:: ===========================================================================
+import std
+import dhash
+core chash
+  :: insert a [pos node] point keeping the ring sorted by pos
+  ch_insert = fn [ring pt] ->
+    loop with [c = ring, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ pt 0 ])
+      else if ((lt (head pt) (head (head c))) == 0) then (append (reverse acc) [ pt c ])
+      else again((tail c), [ (head c) acc ])
+    end
+
+  :: place `vn` virtual points for `node` on a ring of size R
+  ch_addnode = fn [ring node vn ringsz] ->
+    (foldl (fn [r i] -> (ch_insert r [ (dh_idx (dh_h1 (cat node (numtext i))) ringsz) node ]))
+           ring (range vn))
+
+  :: build a ring from a list of nodes
+  ch_build = fn [nodes vn ringsz] ->
+    (foldl (fn [r node] -> (ch_addnode r node vn ringsz)) 0 nodes)
+
+  :: remove every ring point belonging to `node`
+  ch_removenode = fn [ring node] -> (filter (fn [pt] -> (not ((tail pt) == node))) ring)
+
+  :: which node owns `key`: first ring point with pos >= hash(key), else wrap
+  ch_lookup = fn [ring key ringsz] ->
+    let p = (dh_idx (dh_h1 key) ringsz) in
+    loop with [c = ring] :
+      if (c == 0) then (tail (head ring))
+      else if ((gte (head (head c)) p) == 0) then (tail (head c))
+      else again((tail c))
+    end
+
+  :: assign a list of keys: returns list of [key node]
+  ch_assign = fn [ring keys ringsz] ->
+    (map (fn [k] -> [ k (ch_lookup ring k ringsz) ]) keys)
+
+  :: how many keys change owner between two assignments (the rebalance cost)
+  ch_moved = fn [asgnA asgnB] ->
+    loop with [xs = asgnA, ys = asgnB, n = 0] :
+      if (xs == 0) then n
+      else if ((tail (head xs)) == (tail (head ys))) then again((tail xs), (tail ys), n)
+      else again((tail xs), (tail ys), +(n))
+    end
+end

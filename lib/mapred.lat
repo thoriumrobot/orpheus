@@ -1,0 +1,36 @@
+:: ===========================================================================
+:: mapred.lat — the MapReduce batch model (DDIA, Ch. 10, pp. 397-405).
+::
+:: Three pure stages. MAP turns each input record into zero or more [key value]
+:: pairs. SHUFFLE groups the pairs by key (the framework's job — bringing all
+:: values for a key together). REDUCE collapses each key's value list to a
+:: result. Because every stage is a deterministic function with no shared state,
+:: the computation is restartable and parallelizable — the whole point of the
+:: model.   Arms prefixed `mr_`.
+:: ===========================================================================
+import std
+core mapred
+  :: add one [key value] into the grouping (prepend to the key's list, or start one)
+  mr_addpair = fn [groups k v] ->
+    loop with [c = groups, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ [k [v 0]] 0 ])
+      else if ((head (head c)) == k) then
+        (append (reverse acc) [ [k [v (tail (head c))]] (tail c) ])
+      else again((tail c), [ (head c) acc ])
+    end
+  :: SHUFFLE: list of [key value] -> list of [key listOfValues], grouping by key
+  mr_shuffle = fn [pairs] ->
+    (foldl (fn [groups p] -> (mr_addpair groups (head p) (tail p))) 0 pairs)
+
+  :: full pipeline: mapf : record -> list of [key value];  redf : key valuelist -> result
+  mr_run = fn [mapf redf input] ->
+    let mapped = (concat (map mapf input)) in
+    let grouped = (mr_shuffle mapped) in
+    (map (fn [g] -> [ (head g) (redf (head g) (tail g)) ]) grouped)
+
+  :: --- word count: the canonical MapReduce example ---------------------------
+  :: input = list of documents, each a list of word cords
+  mr_wc_map = fn [doc] -> (map (fn [w] -> [ w 1 ]) doc)
+  mr_wc_red = fn [key counts] -> (sum counts)
+  mr_wordcount = fn [docs] -> (mr_run (fn [d] -> (mr_wc_map d)) (fn [k vs] -> (mr_wc_red k vs)) docs)
+end

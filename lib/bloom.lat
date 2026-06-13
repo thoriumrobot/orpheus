@@ -1,0 +1,53 @@
+:: ===========================================================================
+:: bloom.lat — a Bloom filter: probabilistic set membership (DDIA, Ch. 3).
+::
+:: A Bloom filter answers "is key X in the set?" with NO false negatives and a
+:: tunable false-positive rate, in a fixed bit array far smaller than the keys.
+:: LSM-tree storage engines keep one per SSTable so a read can skip segments
+:: that definitely do not contain the key (DDIA p.79).
+::
+:: Representation:  [m [k bits]]   m = bit count, k = #hashes, bits = packed bitset.
+:: k indices come from Kirsch-Mitzenmacher DOUBLE HASHING: g_i = (h1 + i*h2) mod m,
+:: so two base hashes give k independent-looking probes.   Arms prefixed `bloom_`.
+:: Membership returns a LOOBEAN: 0 = "possibly present", 1 = "definitely absent".
+:: ===========================================================================
+import std
+import dhash
+core bloom
+  bloom_make = fn [m k] -> [ m [ k 0 ] ]         :: empty filter: m bits, k hashes
+  bloom_m    = fn [bf] -> (head bf)
+  bloom_k    = fn [bf] -> (head (tail bf))
+  bloom_bits = fn [bf] -> (tail (tail bf))
+
+  :: set the k bits for `key` and return the updated filter
+  bloom_add = fn [bf key] ->
+    let m = (bloom_m bf) in
+    let k = (bloom_k bf) in
+    let a = (dh_h1 key) in
+    let b = (dh_h2 key) in
+    let bits =
+      loop with [i = 0, bs = (bloom_bits bf)] :
+        if (i == k) then bs
+        else again(+(i), (dh_set bs (dh_idx (dh_mix (add a (mul i b))) m)))
+      end in
+    [ m [ k bits ] ]
+
+  :: add every key in a list
+  bloom_addall = fn [bf keys] -> (foldl (fn [f key] -> (bloom_add f key)) bf keys)
+
+  :: membership: 0 = possibly present (all k bits set), 1 = definitely absent
+  bloom_test = fn [bf key] ->
+    let m = (bloom_m bf) in
+    let k = (bloom_k bf) in
+    let a = (dh_h1 key) in
+    let b = (dh_h2 key) in
+    let bs = (bloom_bits bf) in
+    loop with [i = 0] :
+      if (i == k) then 0
+      else if ((dh_bit bs (dh_idx (dh_mix (add a (mul i b))) m)) == 0) then 1
+      else again(+(i))
+    end
+
+  :: number of bits currently set (its "fill")
+  bloom_count = fn [bf] -> (dh_popcount (bloom_bits bf))
+end

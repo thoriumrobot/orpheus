@@ -1,0 +1,113 @@
+:: ===========================================================================
+:: btree.lat — a B-tree: the read-optimized index family (DDIA, Ch. 3, p. 79).
+::
+:: Where an LSM-tree appends and merges, a B-tree keeps keys in a balanced,
+:: high-fanout search tree and updates pages IN PLACE. Every leaf is the same
+:: depth from the root, so lookups are O(log n) with a small, predictable height
+:: — which is why B-trees dominate read-heavy, transactional stores. This is the
+:: textbook (CLRS) immutable B-tree with PROACTIVE SPLITTING on the way down, so
+:: insertion is a single root-to-leaf pass.   Arms prefixed `bt_`.
+::
+:: node = [ keys kids ];  keys = sorted list of [k v];  kids = list of children
+:: (or 0 for a leaf). `t` is the minimum degree: a node holds t-1 .. 2t-1 keys.
+:: ===========================================================================
+import std
+import dhash
+core btree
+  bt_new    = fn [_] -> [ 0 0 ]
+  bt_keys   = fn [nd] -> (head nd)
+  bt_kids   = fn [nd] -> (tail nd)
+  bt_isleaf = fn [nd] -> ((tail nd) == 0)                    :: loobean 0 = leaf
+  bt_full   = fn [nd t] -> ((len (bt_keys nd)) == (sub (mul 2 t) 1))
+
+  bt_setnth = fn [xs i v] -> (append (take i xs) [ v (drop +(i) xs) ])
+
+  :: number of keys whose key-part is strictly less than k (the child to descend)
+  bt_findpos = fn [keys k] ->
+    loop with [c = keys, i = 0] :
+      if (c == 0) then i
+      else if ((dh_klt (head (head c)) k) == 0) then again((tail c), +(i))
+      else i
+    end
+  :: is k among this node's keys? loobean 0 = yes
+  bt_haskey = fn [keys k] ->
+    loop with [c = keys] :
+      if (c == 0) then 1
+      else if ((head (head c)) == k) then 0
+      else again((tail c))
+    end
+  :: lookup k in this node's keys: 0 = absent, else [%val v]
+  bt_findkey = fn [keys k] ->
+    loop with [c = keys] :
+      if (c == 0) then 0
+      else if ((head (head c)) == k) then [ %val (tail (head c)) ]
+      else again((tail c))
+    end
+  bt_replace = fn [keys k v] -> (map (fn [e] -> if ((head e) == k) then [k v] else e) keys)
+  bt_sortins = fn [keys k v] ->
+    loop with [c = keys, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ [k v] 0 ])
+      else if ((dh_klt k (head (head c))) == 0) then (append (reverse acc) [ [k v] c ])
+      else again((tail c), [ (head c) acc ])
+    end
+
+  :: search the whole tree: 0 = absent, else [%val v]
+  bt_search = fn [tree k] ->
+    loop with [node = tree] :
+      let hit = (bt_findkey (bt_keys node) k) in
+      if (hit == 0) then
+        (if ((bt_isleaf node) == 0) then 0
+         else again((nth (bt_kids node) (bt_findpos (bt_keys node) k))))
+      else hit
+    end
+
+  :: split parent's full child at index i; the median moves up into parent
+  bt_splitchild = fn [parent i t] ->
+    let pk = (bt_keys parent) in
+    let pkids = (bt_kids parent) in
+    let ch = (nth pkids i) in
+    let ck = (bt_keys ch) in
+    let med = (nth ck (sub t 1)) in
+    let leaf = (bt_isleaf ch) in
+    let left = [ (take (sub t 1) ck) (if (leaf == 0) then 0 else (take t (bt_kids ch))) ] in
+    let right = [ (drop t ck) (if (leaf == 0) then 0 else (drop t (bt_kids ch))) ] in
+    [ (append (take i pk) [ med (drop i pk) ])
+      (append (take i pkids) [ left [ right (drop +(i) pkids) ] ]) ]
+
+  :: insert into a node known not to be full (proactive split of full children)
+  bt_insnonfull = fn [nd k v t] ->
+    let keys = (bt_keys nd) in
+    if ((bt_haskey keys k) == 0) then [ (bt_replace keys k v) (bt_kids nd) ]
+    else if ((bt_isleaf nd) == 0) then [ (bt_sortins keys k v) 0 ]
+    else
+      let i = (bt_findpos keys k) in
+      let child = (nth (bt_kids nd) i) in
+      if ((bt_full child t) == 0) then
+        let nd2 = (bt_splitchild nd i t) in
+        let med = (head (nth (bt_keys nd2) i)) in
+        if (med == k) then [ (bt_replace (bt_keys nd2) k v) (bt_kids nd2) ]
+        else
+          let j = if ((dh_klt med k) == 0) then +(i) else i in
+          [ (bt_keys nd2) (bt_setnth (bt_kids nd2) j (bt_insnonfull (nth (bt_kids nd2) j) k v t)) ]
+      else [ keys (bt_setnth (bt_kids nd) i (bt_insnonfull child k v t)) ]
+
+  :: top-level insert: if the root is full, grow a new root first (the only way a
+  :: B-tree's height increases)
+  bt_insert = fn [tree k v t] ->
+    if ((bt_full tree t) == 0) then (bt_insnonfull (bt_splitchild [ 0 [ tree 0 ] ] 0 t) k v t)
+    else (bt_insnonfull tree k v t)
+
+  bt_build = fn [pairs t] -> (foldl (fn [tr p] -> (bt_insert tr (head p) (tail p) t)) (bt_new 0) pairs)
+
+  :: in-order traversal -> sorted list of [k v] (a full index scan)
+  bt_inorder = fn [nd] ->
+    if ((bt_isleaf nd) == 0) then (bt_keys nd)
+    else (bt_walk (bt_kids nd) (bt_keys nd))
+  bt_walk = fn [kids keys] ->
+    if (keys == 0) then (bt_inorder (head kids))
+    else (append (bt_inorder (head kids))
+                 (append [ (head keys) 0 ] (bt_walk (tail kids) (tail keys))))
+
+  :: all leaves are equidistant from the root; this is that common height
+  bt_height = fn [nd] -> if ((bt_isleaf nd) == 0) then 1 else +((bt_height (head (bt_kids nd))))
+end

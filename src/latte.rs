@@ -733,6 +733,33 @@ pub const XIANGQIML_LAT: &str = include_str!("../lib/xiangqiml.lat");
 /// System commands written in Latte (the Oberon-style command set), via `import tool`.
 pub const TOOL_LAT: &str = include_str!("../lib/tool.lat");
 
+// ---- the data-intensive (DDIA) libraries: techniques from Kleppmann's
+// "Designing Data-Intensive Applications", each a small Latte module ----------
+/// Hashing & bit primitives (polynomial hash, avalanche mix, bitset), via `import dhash`.
+pub const DHASH_LAT: &str = include_str!("../lib/dhash.lat");
+/// Bloom filter — probabilistic set membership (DDIA Ch.3), via `import bloom`.
+pub const BLOOM_LAT: &str = include_str!("../lib/bloom.lat");
+/// LSM-tree / SSTable storage engine (DDIA Ch.3), via `import lsm`.
+pub const LSM_LAT: &str = include_str!("../lib/lsm.lat");
+/// B-tree — read-optimized index (DDIA Ch.3), via `import btree`.
+pub const BTREE_LAT: &str = include_str!("../lib/btree.lat");
+/// Vector clocks / version vectors (DDIA Ch.5), via `import vclock`.
+pub const VCLOCK_LAT: &str = include_str!("../lib/vclock.lat");
+/// CRDTs — G/PN counters, G-Set, LWW-Register (DDIA Ch.5), via `import crdt`.
+pub const CRDT_LAT: &str = include_str!("../lib/crdt.lat");
+/// Lamport logical clocks & total order (DDIA Ch.8-9), via `import lamport`.
+pub const LAMPORT_LAT: &str = include_str!("../lib/lamport.lat");
+/// Consistent hashing with virtual nodes (DDIA Ch.6), via `import chash`.
+pub const CHASH_LAT: &str = include_str!("../lib/chash.lat");
+/// Quorum reads/writes, W+R>N, read repair (DDIA Ch.5), via `import quorum`.
+pub const QUORUM_LAT: &str = include_str!("../lib/quorum.lat");
+/// Encoding & schema evolution — varint, tagged records (DDIA Ch.4), via `import wire`.
+pub const WIRE_LAT: &str = include_str!("../lib/wire.lat");
+/// MapReduce batch model (DDIA Ch.10), via `import mapred`.
+pub const MAPRED_LAT: &str = include_str!("../lib/mapred.lat");
+/// Merkle trees for anti-entropy (DDIA Ch.5), via `import merkle`.
+pub const MERKLE_LAT: &str = include_str!("../lib/merkle.lat");
+
 
 fn builtin_lib(name: &str) -> Option<&'static str> {
     match name {
@@ -759,6 +786,18 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "xiangqi" => Some(XIANGQI_LAT),
         "xiangqiml" => Some(XIANGQIML_LAT),
         "tool" => Some(TOOL_LAT),
+        "dhash" => Some(DHASH_LAT),
+        "bloom" => Some(BLOOM_LAT),
+        "lsm" => Some(LSM_LAT),
+        "btree" => Some(BTREE_LAT),
+        "vclock" => Some(VCLOCK_LAT),
+        "crdt" => Some(CRDT_LAT),
+        "lamport" => Some(LAMPORT_LAT),
+        "chash" => Some(CHASH_LAT),
+        "quorum" => Some(QUORUM_LAT),
+        "wire" => Some(WIRE_LAT),
+        "mapred" => Some(MAPRED_LAT),
+        "merkle" => Some(MERKLE_LAT),
         _ => None,
     }
 }
@@ -835,6 +874,7 @@ pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
+        "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -946,6 +986,7 @@ pub fn builtin_lib_names() -> Vec<String> {
     let mut v: Vec<String> = [
         "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool",
+        "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
     ]
     .iter()
     .map(|s| s.to_string())

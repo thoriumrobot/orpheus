@@ -1,0 +1,33 @@
+:: ===========================================================================
+:: lamport.lat — Lamport logical clocks & total order (DDIA, Ch. 8-9, p. 291).
+::
+:: A counter per node, with one rule: every event increments it, and on
+:: receiving a message you advance to max(local, received)+1. The resulting
+:: timestamps are consistent with causality (if a -> b then L(a) < L(b)); ties
+:: are broken by node id to get a TOTAL order — the backbone of total-order
+:: broadcast and of Orpheus's own (lamport, node, hash) event ordering.
+:: Arms prefixed `lam_`.
+:: ===========================================================================
+import std
+core lamport
+  lam_new  = fn [_] -> 0
+  :: a local event (or a send): tick the clock; the new value is the timestamp
+  lam_tick = fn [c] -> +(c)
+  :: on receive: advance past the message's timestamp, then tick
+  lam_recv = fn [c ts] -> +((max c ts))
+
+  :: a stamped event is [ts node]; total order compares ts, then node
+  lam_lt = fn [a b] ->
+    if ((head a) == (head b)) then (lt (tail a) (tail b))
+    else (lt (head a) (head b))
+
+  :: insert a stamped event into a totally-ordered log (insertion sort step)
+  lam_insert = fn [log ev] ->
+    loop with [c = log, acc = 0] :
+      if (c == 0) then (append (reverse acc) [ ev 0 ])
+      else if ((lam_lt ev (head c)) == 0) then (append (reverse acc) [ ev c ])
+      else again((tail c), [ (head c) acc ])
+    end
+  :: deliver a batch of stamped events in total order
+  lam_order = fn [evs] -> (foldl (fn [log ev] -> (lam_insert log ev)) 0 evs)
+end

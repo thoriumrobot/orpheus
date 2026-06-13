@@ -1,0 +1,59 @@
+:: ===========================================================================
+:: merkle.lat — Merkle (hash) trees for anti-entropy (DDIA, Ch. 5, p. 178).
+::
+:: Each leaf hashes one key/value; each parent hashes its children's hashes. The
+:: ROOT hash summarizes the whole dataset, so two replicas compare a single hash:
+:: if equal, their data is identical and NOTHING is transferred. If it differs,
+:: they descend the tree, comparing subtree hashes, and pinpoint exactly which
+:: leaves disagree — so anti-entropy ships only the differing keys. This is how
+:: Dynamo/Cassandra/Riak reconcile replicas.   Arms prefixed `mk_`.
+::
+:: leaf  = [ hash [%leaf [key value]] ]
+:: node  = [ hash [%node [left right]] ]
+:: ===========================================================================
+import std
+import dhash
+core merkle
+  mk_hash = fn [nd] -> (head nd)
+  mk_comb = fn [a b] -> (mod (add (mul a 1000003) (add b 1)) 4294967296)
+  mk_leaf = fn [kv] -> [ (mk_comb (dh_h1 (head kv)) (dh_h1 (tail kv))) [ %leaf kv ] ]
+  mk_isleaf = fn [nd] -> ((head (tail nd)) == %leaf)              :: loobean 0 = leaf
+  mk_kv    = fn [nd] -> (tail (tail nd))                          :: a leaf's [key value]
+  mk_kids  = fn [nd] -> (tail (tail nd))                          :: a node's [left right]
+
+  :: combine one level into the next: pair adjacent nodes, an odd one carries up
+  mk_pairup = fn [nodes] ->
+    loop with [c = nodes, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else if ((tail c) == 0) then (reverse [ (head c) acc ])
+      else
+        let l = (head c) in
+        let r = (head (tail c)) in
+        again((tail (tail c)),
+              [ [ (mk_comb (mk_hash l) (mk_hash r)) [ %node [ l r ] ] ] acc ])
+    end
+
+  :: build a Merkle tree from a list of [key value] (give it the keys in a fixed
+  :: order — e.g. sorted — so two replicas build the same shape)
+  mk_build = fn [kvs] ->
+    if (kvs == 0) then [ 0 [ %leaf [ %nil 0 ] ] ]
+    else
+      loop with [level = (map (fn [kv] -> (mk_leaf kv)) kvs)] :
+        if ((tail level) == 0) then (head level)
+        else again((mk_pairup level))
+      end
+  mk_root = fn [tree] -> (mk_hash tree)
+
+  :: do two datasets match by a single comparison? loobean 0 = identical
+  mk_equal = fn [a b] -> ((mk_root a) == (mk_root b))
+
+  :: the keys that differ between two same-shaped trees (descend only where the
+  :: subtree hashes disagree — the whole point of the structure)
+  mk_diffkeys = fn [a b] ->
+    if ((mk_hash a) == (mk_hash b)) then 0
+    else if ((mk_isleaf a) == 0) then [ (head (mk_kv a)) 0 ]
+    else
+      let ca = (mk_kids a) in
+      let cb = (mk_kids b) in
+      (append (mk_diffkeys (head ca) (head cb)) (mk_diffkeys (tail ca) (tail cb)))
+end

@@ -473,7 +473,11 @@ Commands fall into three families:
 - **`System.*`** — the display/OS commands, handled in the browser: `System.Open NAME`
   (open a module's source in a new frame), `System.Close`, `System.Grow`, `System.Copy`,
   `System.Clear`, `System.New NAME`, `System.Modules`, `System.Chess` (open the board). A
-  viewer can be **marked** (click it; it shows `✷`); commands with `*` act on the marked one.
+  viewer is **marked** by clicking its **title bar** — it shows a `✷` star and a highlighted
+  menu; commands with `*` act on the marked viewer. Marking is deliberate: editing a body or
+  running a command never moves the mark, so you can mark a source frame and then run
+  `Edit.Format *` (or `Compiler.Compile *`, `Forge.Share`) from *another* viewer — the Format
+  tool, a text, the Log — and it acts on the frame you marked.
 - **`Compiler.Compile *` / `Compiler.Store *`** — compile the marked source frame into the
   running system (`/api/compile`), or compile **and persist** it to its `lib/NAME.lat` file
   (`/api/source`). No binary rebuild — the new definitions are live immediately.

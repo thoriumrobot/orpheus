@@ -850,6 +850,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 "scars-sound-changes" => 2,
                 "interaction-nets" => 3,
                 "adding-libraries" => 4,
+                "data-intensive" => 5,
                 _ => 9,
             });
             simple(200, "text/plain; charset=utf-8", names.join("\n").into_bytes())

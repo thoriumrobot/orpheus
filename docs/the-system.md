@@ -96,14 +96,21 @@ the CLI bridge.
 
 ## Format — the Latte formatter
 
-`Edit.Format *` (and the Format button on every source frame) formats the
-marked frame canonically: structural indentation (arms at two spaces, bodies
-one step in, `loop`/`case` bodies one step past their opener with `end`
-aligned under it, flat let-chains), canonical spacing (tight brackets, spaced
-`=`/`==`/`->`, tight `again(`), author line breaks and all comments preserved.
-Formatting is **proven** meaning-preserving: the result must re-parse to the
-identical AST, arm for arm, or the original is returned untouched. The same
-engine is `latte fmt <file> [--write]` and `/api/fmt`.
+To format a source frame, **mark it** — click its title bar, and a `✷` star
+appears with a highlighted menu — then run `Edit.Format *` (the Format tool's
+button, a line in any text, or the command line). The `*` always refers to the
+marked frame, and *running a command never moves the mark*, so you can keep a
+source frame marked while you drive it from the Format tool, a text, or the Log.
+Each source frame also has its own **Format** button, which marks that frame and
+formats it in one gesture.
+
+`Edit.Format *` formats the marked frame canonically: structural indentation
+(arms at two spaces, bodies one step in, `loop`/`case` bodies one step past their
+opener with `end` aligned under it, flat let-chains), canonical spacing (tight
+brackets, spaced `=`/`==`/`->`, tight `again(`), author line breaks and all
+comments preserved. Formatting is **proven** meaning-preserving: the result must
+re-parse to the identical AST, arm for arm, or the original is returned untouched.
+The same engine is `latte fmt <file> [--write]` and `/api/fmt`.
 Edit the arguments, run lines, embed outputs, Store your customized tool. The
 small ↗ beside each link opens the corresponding full page when you want one.
 
@@ -148,6 +155,14 @@ third dimension."
 
 Here, identically:
 
+- **Mark** — click a viewer's **title bar** to mark it: a `✷` star appears and
+  the menu bar highlights. The mark is Oberon's star pointer — it designates the
+  viewer that `*` refers to (`Edit.Format *`, `Compiler.Compile *`, `System.Move *`,
+  `Forge.Share`, …). It is deliberate and sticky: typing in a body, opening a
+  document, or running a command line does **not** move it, so you can mark one
+  frame and operate on it from another (e.g. mark a source frame, then Format it
+  from the Format tool). A command's own menu buttons mark their viewer first, so
+  a frame's Format/Compile/Store buttons always act on that frame.
 - **Resize** — left-drag a viewer's title bar up or down: the bar is the
   viewer's top edge, and the viewer above gives or takes the space. (The
   separator bars still work too.)

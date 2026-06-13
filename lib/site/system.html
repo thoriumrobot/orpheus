@@ -404,7 +404,11 @@ function makeViewer(opts){
     menu.appendChild(b);
   });
   menu.appendChild(el('span','spacer'));
-  menu.onmousedown=function(e){ if(e.target===menu||e.target.classList.contains('name')||e.target.classList.contains('star')) mark(v); };
+  // Marking is a DELIBERATE title-bar gesture (Oberon's star): click anywhere
+  // on a viewer's title bar — except a command button, which marks itself —
+  // to mark that viewer. The mark persists until you mark another viewer, and
+  // is what `*` resolves to. Editing a body or running a command never moves it.
+  menu.onmousedown=function(e){ if(!(e.target.classList&&e.target.classList.contains('cmd'))) mark(v); };
   wireBarDrag(menu, v);
   box.appendChild(menu);
 
@@ -442,7 +446,7 @@ function makeViewer(opts){
 
 /* plain source frames (modules, raw markdown) */
 function wireFrame(ta, v){
-  ta.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
+  ta.addEventListener('mousedown', function(e){ if(e.button===1) e.preventDefault(); }); // focus only — does not move the mark
   ta.addEventListener('auxclick', function(e){
     if(e.button===1){ e.preventDefault(); execText(v, lineAtPoint(ta, e.clientY)); }
   });
@@ -468,7 +472,7 @@ function caretLine(ta){
 function execText(v, lineText){
   var t=(lineText||'').trim();
   if(!t || t.charAt(0)==='#' || t.slice(0,2)==='::') return;
-  mark(v); exec(t, v);
+  exec(t, v); // running a line does NOT move the mark; * keeps its target
 }
 
 /* ---- TEXT frames: editable texts with embedded dynamic objects ------------ */
@@ -478,14 +482,14 @@ function execText(v, lineText){
    active elements". Objects remember their command (data-cmd), so the text
    serializes to markdown (```tool <cmd>``` fences) and rehydrates on load. */
 function wireRichText(rt, v){
-  rt.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
+  rt.addEventListener('mousedown', function(e){ if(e.button===1) e.preventDefault(); }); // focus only — does not move the mark
   rt.addEventListener('click', function(e){
     var b=e.target.closest ? e.target.closest('button.runbtn') : null;
     if(!b) return;
     e.preventDefault();
     var line=lineNodeAt(rt, b);
     var cmd=substFields(rt, b.dataset.cmd||'');
-    if(line && cmd){ mark(v); exec(cmd, v, {textViewer:v, afterNode:line}); }
+    if(line && cmd){ exec(cmd, v, {textViewer:v, afterNode:line}); }
   });
   rt.addEventListener('auxclick', function(e){
     if(e.button!==1) return;
@@ -538,8 +542,7 @@ function runTextLine(v, node){
     : (node.textContent||'').replace(/\u200b/g,'').trim();
   cmd = cmd.replace(/^[\u25B8! ] ?/,'');
   if(!cmd || cmd.charAt(0)==='#' || cmd.slice(0,2)==='::') return;
-  mark(v);
-  exec(cmd, v, {textViewer:v, afterNode:node});
+  exec(cmd, v, {textViewer:v, afterNode:node}); // does NOT move the mark; * keeps its target
 }
 /* insert (or replace) an object under `afterNode` in a text frame */
 function insertObjAt(v, afterNode, cmd, html){
@@ -725,7 +728,7 @@ function toggleHeading(cls){
 
 /* ---- the rich Log / tool-output streams ----------------------------------- */
 function wireRichLog(rl, v){
-  rl.addEventListener('mousedown', function(e){ mark(v); if(e.button===1) e.preventDefault(); });
+  rl.addEventListener('mousedown', function(e){ if(e.button===1) e.preventDefault(); }); // focus only — does not move the mark
   rl.addEventListener('auxclick', function(e){
     if(e.button!==1) return;
     var ln = e.target.closest ? e.target.closest('.ln') : null;
@@ -774,7 +777,7 @@ function renderPanel(v, p){
       var b=document.createElement('button'); b.textContent=item.text;
       b.onclick=function(){
         var cmd=item.cmd.replace(/\$([A-Za-z0-9_]+)/g, function(_,n){ return fields[n]?fields[n].value.trim():''; });
-        mark(v); exec(cmd, v);
+        exec(cmd, v); // panel buttons run commands without moving the mark
       };
       into.appendChild(b); return;
     }
@@ -1288,7 +1291,11 @@ function formatFrame(v){
 
 function targetViewer(rest, fromViewer){
   rest=(rest||'').trim();
-  if(rest===''||rest==='*') return marked||fromViewer;
+  // `*` is the Oberon star: the deliberately MARKED viewer (fall back to the
+  // issuing viewer if nothing is marked). An empty argument means "this viewer"
+  // — the one the command was issued from — falling back to the mark.
+  if(rest==='*') return marked||fromViewer;
+  if(rest==='') return fromViewer||marked;
   var nm=rest.replace(/\.Mod$/,'');
   return viewers.find(function(v){ return v.name===rest||v.name===nm||v.name===nm+'.Mod'||v.name===nm+'.Text'; })||marked||fromViewer;
 }
