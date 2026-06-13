@@ -99,6 +99,112 @@ core btree
 
   bt_build = fn [pairs t] -> (foldl (fn [tr p] -> (bt_insert tr (head p) (tail p) t)) (bt_new 0) pairs)
 
+  :: ---- DELETION: the borrow/merge half of the B-tree (CLRS 18.3) ------------
+  :: Deletion is harder than insertion because a node may underflow (drop below
+  :: t-1 keys). The invariant that makes it a single downward pass mirrors the
+  :: proactive split on insert: before we ever RECURSE into a child, we guarantee
+  :: that child already has at least t keys, so it can afford to lose one. We do
+  :: that by borrowing a key from a sibling, or — if both siblings are minimal —
+  :: merging the child, a sibling, and their separator key into one full node.
+
+  bt_nkeys = fn [nd] -> (len (bt_keys nd))
+  :: largest / smallest [k v] in a subtree: walk to the rightmost / leftmost leaf
+  bt_maxkey = fn [nd] ->
+    loop with [x = nd] : if ((bt_isleaf x) == 0) then (last (bt_keys x)) else again((last (bt_kids x))) end
+  bt_minkey = fn [nd] ->
+    loop with [x = nd] : if ((bt_isleaf x) == 0) then (head (bt_keys x)) else again((head (bt_kids x))) end
+
+  :: fuse a left child, the separator key between them, and a right child into one
+  :: node of 2t-1 keys (used when neither side can spare a key)
+  bt_merge = fn [left sep right] ->
+    [ (append (bt_keys left) (append [ sep 0 ] (bt_keys right)))
+      (if ((bt_isleaf left) == 0) then 0 else (append (bt_kids left) (bt_kids right))) ]
+
+  :: rotate a key from the LEFT sibling i-1 through the parent into child i
+  bt_borrowleft = fn [nd i] ->
+    let keys = (bt_keys nd) in let kids = (bt_kids nd) in
+    let child = (nth kids i) in let left = (nth kids (sub i 1)) in
+    let lk = (bt_keys left) in let sep = (nth keys (sub i 1)) in
+    let lastk = (last lk) in
+    let child2 = [ [ sep (bt_keys child) ]
+                   (if ((bt_isleaf left) == 0) then 0
+                    else [ (last (bt_kids left)) (bt_kids child) ]) ] in
+    let left2 = [ (take (sub (len lk) 1) lk)
+                  (if ((bt_isleaf left) == 0) then 0 else (take (sub (len (bt_kids left)) 1) (bt_kids left))) ] in
+    [ (bt_setnth keys (sub i 1) lastk)
+      (bt_setnth (bt_setnth kids i child2) (sub i 1) left2) ]
+
+  :: rotate a key from the RIGHT sibling i+1 through the parent into child i
+  bt_borrowright = fn [nd i] ->
+    let keys = (bt_keys nd) in let kids = (bt_kids nd) in
+    let child = (nth kids i) in let right = (nth kids +(i)) in
+    let rk = (bt_keys right) in let sep = (nth keys i) in
+    let firstk = (head rk) in
+    let child2 = [ (append (bt_keys child) [ sep 0 ])
+                   (if ((bt_isleaf right) == 0) then 0
+                    else (append (bt_kids child) [ (head (bt_kids right)) 0 ])) ] in
+    let right2 = [ (tail rk)
+                   (if ((bt_isleaf right) == 0) then 0 else (tail (bt_kids right))) ] in
+    [ (bt_setnth keys i firstk)
+      (bt_setnth (bt_setnth kids i child2) +(i) right2) ]
+
+  :: ensure child i has >= t keys: borrow from whichever sibling can spare one,
+  :: else merge with a sibling (shrinking this node by one key and one child)
+  bt_fill = fn [nd i t] ->
+    let keys = (bt_keys nd) in let kids = (bt_kids nd) in let n = (len keys) in
+    let leftok  = if (gt i 0) then (gte (bt_nkeys (nth kids (sub i 1))) t) else 1 in   :: lazy: sub only when i>0
+    let rightok = if (lt i n) then (gte (bt_nkeys (nth kids +(i))) t) else 1 in
+    if (leftok == 0) then (bt_borrowleft nd i)
+    else if (rightok == 0) then (bt_borrowright nd i)
+    else if (lt i n) then
+      let merged = (bt_merge (nth kids i) (nth keys i) (nth kids +(i))) in
+      [ (append (take i keys) (drop +(i) keys))
+        (append (take i kids) [ merged (drop (add i 2) kids) ]) ]
+    else
+      let merged = (bt_merge (nth kids (sub i 1)) (nth keys (sub i 1)) (nth kids i)) in
+      [ (append (take (sub i 1) keys) (drop i keys))
+        (append (take (sub i 1) kids) [ merged (drop +(i) kids) ]) ]
+
+  :: delete k from a node that already holds >= t keys (or is the root)
+  bt_del = fn [nd k t] ->
+    let keys = (bt_keys nd) in let kids = (bt_kids nd) in
+    let i = (bt_findpos keys k) in
+    let here = if ((lt i (len keys)) == 0) then ((head (nth keys i)) == k) else 1 in   :: 0 if k is in THIS node (lazy guard: nth only when i in range)
+    if ((bt_isleaf nd) == 0) then
+      (if (here == 0) then [ (append (take i keys) (drop +(i) keys)) 0 ] else nd)  :: leaf: drop it (or absent)
+    else if (here == 0) then
+      :: k is in an internal node: replace it with a neighbour key, then delete that
+      (if (gte (bt_nkeys (nth kids i)) t) then
+         let pred = (bt_maxkey (nth kids i)) in
+         [ (bt_setnth keys i pred) (bt_setnth kids i (bt_del (nth kids i) (head pred) t)) ]
+       else if (gte (bt_nkeys (nth kids +(i))) t) then
+         let succ = (bt_minkey (nth kids +(i))) in
+         [ (bt_setnth keys i succ) (bt_setnth kids +(i) (bt_del (nth kids +(i) ) (head succ) t)) ]
+       else
+         let merged = (bt_merge (nth kids i) (nth keys i) (nth kids +(i))) in
+         let keys2 = (append (take i keys) (drop +(i) keys)) in
+         let kids2 = (append (take i kids) [ merged (drop (add i 2) kids) ]) in
+         [ keys2 (bt_setnth kids2 i (bt_del merged k t)) ])
+    else
+      :: k is not here: descend into child i, first guaranteeing it has >= t keys
+      :: (a 0-key node is a transient root with a single child — descend straight in,
+      :: it has no sibling to borrow/merge with and is collapsed at the top level)
+      (if (gte (bt_nkeys (nth kids i)) t) then
+         [ keys (bt_setnth kids i (bt_del (nth kids i) k t)) ]
+       else if ((len keys) == 0) then
+         [ keys (bt_setnth kids i (bt_del (nth kids i) k t)) ]
+       else (bt_del (bt_fill nd i t) k t))
+
+  :: top-level delete: if the root loses its last key, its only child becomes the
+  :: new root (the single way a B-tree's height ever decreases)
+  bt_delete = fn [tree k t] ->
+    let r = (bt_del tree k t) in
+    if (and ((bt_keys r) == 0) (not ((bt_kids r) == 0))) then (head (bt_kids r)) else r
+
+  :: a ready-made tree so every example below runs as a one-liner: (bt_search (bt_sample 0) %kk)
+  bt_sample = fn [_] ->
+    (bt_build [[%mm 1] [[%dd 2] [[%aa 3] [[%zz 4] [[%kk 5] [[%gg 6] [[%pp 7] [[%cc 8] 0]]]]]]]] 2)
+
   :: in-order traversal -> sorted list of [k v] (a full index scan)
   bt_inorder = fn [nd] ->
     if ((bt_isleaf nd) == 0) then (bt_keys nd)

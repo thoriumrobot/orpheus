@@ -51,4 +51,8 @@ core stream
                      else again((add s step), acc)
                    end)
                 0 events))
+
+  :: a ready-made event stream [time value] so examples run as one-liners:
+  :: (stream_sums (stream_sample 0) 10)  groups times 3,7 | 12,15 | 25 into windows.
+  stream_sample = fn [_] -> [ [3 5] [ [7 2] [ [12 8] [ [15 1] [ [25 4] 0 ] ] ] ] ]
 end

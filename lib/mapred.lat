@@ -33,4 +33,8 @@ core mapred
   mr_wc_map = fn [doc] -> (map (fn [w] -> [ w 1 ]) doc)
   mr_wc_red = fn [key counts] -> (sum counts)
   mr_wordcount = fn [docs] -> (mr_run (fn [d] -> (mr_wc_map d)) (fn [k vs] -> (mr_wc_red k vs)) docs)
+
+  :: two short documents (word lists) so examples run as one-liners:
+  :: (mr_wordcount (mr_sample 0))  ->  the becomes 2, others 1.
+  mr_sample = fn [_] -> [ [%the [%cat [%sat 0]]] [ [%the [%dog [%ran 0]]] 0 ] ]
 end

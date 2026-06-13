@@ -50,4 +50,23 @@ core mvcc
     if ((mvcc_wconflict store (map (fn [w] -> (head w)) writes) startts committs) == 0)
     then [ %abort store ]
     else [ %commit (foldl (fn [s w] -> (mvcc_commit s (head w) (tail w) committs)) store writes) ]
+
+  :: ---- serializable validation: closing the write-skew hole in plain SI -------
+  :: Snapshot isolation permits WRITE SKEW: two transactions read an overlapping set,
+  :: each checks an invariant that still holds on its snapshot, then each writes a
+  :: DIFFERENT key. Their write sets are disjoint, so the write-write check passes for
+  :: both, yet together they break the invariant. To get serializability we also
+  :: validate the READ set: if anything we read was overwritten by a commit during our
+  :: lifetime, our decision was based on stale data and we must abort. This is the
+  :: read-set validation that optimistic concurrency control (and the SSI family) use.
+  mvcc_readvalid = fn [store readset startts committs] ->
+    (mvcc_wconflict store readset startts committs)   :: 0 = a read key changed -> invalid
+  :: commit only if BOTH the write set and the read set survive validation
+  mvcc_ssi_try = fn [store readset writes startts committs] ->
+    if ((mvcc_readvalid store readset startts committs) == 0) then [ %abort store ]
+    else (mvcc_try store writes startts committs)
+
+  :: a ready-made store (x committed =1 at ts5, then =2 at ts15) so examples run as
+  :: one-liners: (mvcc_read (mvcc_sample 0) %x 10) sees 1; at snapshot 20 it sees 2.
+  mvcc_sample = fn [_] -> (mvcc_commit (mvcc_commit (mvcc_new 0) %x 1 5) %x 2 15)
 end

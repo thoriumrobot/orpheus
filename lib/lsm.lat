@@ -49,15 +49,32 @@ core lsm
       else again((tail c))
     end
 
-  :: get: memtable then segments newest-first; tombstone or no-hit -> %absent
+  :: ZONE CHECK: could key k be in this sorted run at all? Since a run is sorted,
+  :: its key range is [firstKey, lastKey]; if k falls outside, the run cannot hold
+  :: it and the scan is skipped entirely. Loobean 0 = "k is within range, scan it".
+  lsm_inzone = fn [seg k] ->
+    if (seg == 0) then 1
+    else (and (not (dh_klt k (head (head seg)))) (not (dh_klt (head (last seg)) k)))
+
+  :: get: walk memtable then segments newest-first, but SKIP any run whose zone map
+  :: rules k out (the first real read optimization in an LSM engine — a production
+  :: store adds a per-segment Bloom filter for the runs the zone can't exclude).
+  :: First live hit wins; a tombstone or no hit anywhere -> %absent.
   lsm_get = fn [s k] ->
     loop with [c = [ (lsm_mem s) (lsm_segs s) ]] :
       if (c == 0) then %absent
-      else let hit = (lsm_findseg (head c) k) in
-        if (hit == 0) then again((tail c))
-        else if ((head (tail hit)) == 0) then [ %val (tail (tail hit)) ]
-        else %absent
+      else if ((lsm_inzone (head c) k) == 0) then
+        let hit = (lsm_findseg (head c) k) in
+        (if (hit == 0) then again((tail c))
+         else if ((head (tail hit)) == 0) then [ %val (tail (tail hit)) ]
+         else %absent)
+      else again((tail c))
     end
+
+  :: how many runs a read of k actually scans (zone map lets the rest be skipped) —
+  :: exposed so the demo can show reads touching fewer than all the segments
+  lsm_probed = fn [s k] ->
+    (count (fn [layer] -> (lsm_inzone layer k)) [ (lsm_mem s) (lsm_segs s) ])
 
   :: merge two sorted segments; on equal key the FIRST (newer) wins
   lsm_merge = fn [a b] ->
@@ -97,9 +114,14 @@ core lsm
     (filter (fn [e] -> (and (not (dh_klt (head e) lo)) (not (dh_klt hi (head e)))))
             (lsm_live s))
 
-  :: ZONE MAP / sparse index: per segment, [minKey [maxKey count]]. A read or range
-  :: skips any segment whose [min,max] cannot contain the key — the cheap filter
-  :: that, with a per-segment Bloom filter, keeps LSM reads from touching every run.
+  :: ZONE MAP / sparse index summary: per segment, [minKey [maxKey count]]. This is
+  :: the metadata `lsm_get`/`lsm_probed` consult to skip non-overlapping runs.
   lsm_segmeta = fn [s] ->
     (map (fn [seg] -> [ (head (head seg)) [ (head (last seg)) (len seg) ] ]) (lsm_segs s))
+
+  :: a ready-made store so examples run as one-liners: (lsm_get (lsm_sample 0) %cherry)
+  :: five writes (threshold 2, so several segments form), one overwrite, one delete.
+  lsm_sample = fn [_] ->
+    (lsm_del (lsm_put (lsm_put (lsm_put (lsm_put (lsm_put (lsm_new 2) %apple 1) %cherry 3)
+                                        %elder 5) %grape 7) %cherry 33) %elder)
 end

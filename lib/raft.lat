@@ -54,4 +54,8 @@ core raft
       else if ((gte (count (fn [m] -> (gte m idx)) matchIdx) maj) == 0) then idx
       else again((dec idx))
     end
+
+  :: a ready-made 3-entry log [term command] (terms 1,1,2) so examples run as
+  :: one-liners: (raft_append (raft_sample 0) 3 2 [[3 %d] 0]) appends after a match.
+  raft_sample = fn [_] -> [ [1 %a] [ [1 %b] [ [2 %c] 0 ] ] ]
 end

@@ -22,6 +22,23 @@ Three ways, same code:
 - **GUI:** open the System page, middle-click a `… ` command line, or open a
   module from the Modules viewer (`System.Open lsm`) to read and edit the source.
 
+**Every example below is a runnable one-liner.** A name like `tree` or `store` is
+not bound to anything — typing `(bt_search tree %kk)` on its own gives
+`unbound face 'tree'`, because the value built on the previous line was never named.
+So each library ships a **`<name>_sample`** fixture returning a ready-made instance;
+pass it a dummy argument and drop it straight into any call:
+
+```
+(bt_search (bt_sample 0) %kk)       :: -> [%val 5]   — no setup, runs as-is
+(lsm_get   (lsm_sample 0) %cherry)  :: -> [%val 33]
+```
+
+To build and reuse your own value in one expression, bind it with `let … in`:
+
+```
+let tree = (bt_build [[%mm 1] [[%kk 5] 0]] 2) in (bt_search tree %kk)
+```
+
 A 30-second Latte refresher (full reference in `latte-language.md`): values are
 **atoms** (arbitrary-precision naturals; short text is packed into an atom as a
 `%cord`) and **cells** `[a b]`. Booleans are **loobean**: `0` is true, so `(a == b)`
@@ -53,12 +70,13 @@ between `t-1` and `2t-1` keys, and insertion splits any full child on the way do
 so a write is a single root-to-leaf pass.
 
 ```
-(bt_build [[%mm 1] [[%dd 2] [[%aa 3] [[%zz 4] [[%kk 5] 0]]]]] 2)   :: build, t=2
-(bt_search tree %kk)        :: -> [%val 5]   (0 if absent)
-(bt_inorder tree)           :: sorted [key value] list — a full index scan
-(bt_range tree %cc %mm)     :: every [key value] with cc <= key <= mm
-(bt_min tree) (bt_max tree) :: smallest / largest entry
-(bt_height tree)            :: every leaf is this far from the root
+(bt_sample 0)               :: a ready-made tree of 8 keys (t=2)
+(bt_search (bt_sample 0) %kk)        :: -> [%val 5]   (0 if absent)
+(bt_inorder (bt_sample 0))           :: sorted [key value] list — a full index scan
+(bt_range (bt_sample 0) %cc %mm)     :: every [key value] with cc <= key <= mm
+(bt_min (bt_sample 0)) (bt_max (bt_sample 0)) :: smallest / largest entry
+(bt_height (bt_sample 0))            :: every leaf is this far from the root
+(bt_delete (bt_sample 0) %mm 2)      :: remove a key (borrow/merge to stay balanced)
 ```
 
 **In an interview**
@@ -77,10 +95,15 @@ so a write is a single root-to-leaf pass.
   list — so a range scan is "seek once, then follow leaf pointers," never
   revisiting internal nodes. (This library keeps values in every node for brevity
   and rides the in-order traversal; the complexity story is the same.)
-- *Deletion?* The mirror of insertion: if removing a key would underflow a node
-  (`< t-1` keys) you borrow a key from a sibling, or merge with one and pull a key
-  down from the parent. It is the fiddly half of the B-tree and the reason
-  copy-on-write B-trees (which never delete in place) are popular.
+- *Deletion?* The mirror of insertion, and implemented here as `bt_delete`: if
+  removing a key would underflow a node (`< t-1` keys) you **borrow** a key from a
+  sibling (rotating it through the parent), or, if both siblings are minimal,
+  **merge** the node, a sibling, and their separator key into one node and recurse.
+  Like insertion it stays a single root-to-leaf pass by fixing each child to hold
+  `>= t` keys *before* descending into it; when the root loses its last key its only
+  child becomes the new root (the one way height shrinks). It is the fiddly half of
+  the B-tree, which is why copy-on-write B-trees (which rewrite a path instead of
+  editing in place) are popular for snapshots and crash-safety.
 
 ## LSM-tree / SSTable — `lib/lsm.lat`
 
@@ -92,13 +115,15 @@ the memtable, then segments newest-first, returning the first hit. Deletes write
 runs, newest value wins) and drops tombstones, keeping read amplification bounded.
 
 ```
-(lsm_put store %k 42)   :: append; auto-flushes when the memtable is full
-(lsm_del store %k)      :: writes a tombstone (a later compaction reclaims it)
-(lsm_get store %k)      :: -> [%val 42] or %absent
-(lsm_compact store)     :: merge all segments into one, dropping tombstones
-(lsm_keys store)        :: live keys, sorted (the merged view across all layers)
-(lsm_range store %a %m) :: sorted [key value] with a <= key <= m
-(lsm_segmeta store)     :: per segment, [minKey [maxKey count]] — the zone map
+(lsm_sample 0)                  :: ready-made store: 5 writes, an overwrite, a delete
+(lsm_put (lsm_sample 0) %k 42)  :: append; auto-flushes when the memtable is full
+(lsm_del (lsm_sample 0) %k)     :: writes a tombstone (a later compaction reclaims it)
+(lsm_get (lsm_sample 0) %cherry)        :: -> [%val 33] (the overwrite) or %absent
+(lsm_compact (lsm_sample 0))            :: merge all segments into one, dropping tombstones
+(lsm_keys (lsm_sample 0))               :: live keys, sorted (merged view across layers)
+(lsm_range (lsm_sample 0) %apple %elder):: sorted [key value] within the range
+(lsm_segmeta (lsm_sample 0))            :: per segment, [minKey [maxKey count]] — the zone map
+(lsm_probed (lsm_sample 0) %zzz)        :: -> 0: the zone map skips every run for an out-of-range key
 ```
 
 The demo writes five keys with a flush threshold of 2 (so several segments form),
@@ -111,16 +136,16 @@ wins and the deleted key stays gone — with the segment count dropping to one.
 - *What's the catch?* **Read amplification** (a key might live in any segment) and
   **write amplification** (compaction rewrites data repeatedly). You trade read
   latency and background I/O for write throughput.
-- *How do reads stay fast?* Three layers of skipping in a production engine. Each
-  SSTable carries a **sparse index** (one key every few KB) to binary-search to the
-  right block; a **zone map** — the min/max key per segment, which `lsm_segmeta`
-  exposes — lets a read ignore any segment that can't hold the key; and a per-segment
-  **Bloom filter** (the `bloom` library) turns "is `k` in this segment?" into a few
-  bit tests before any I/O. This library *provides* the zone-map summary but keeps the
-  read path deliberately simple: `lsm_get` scans newest segment to oldest and
-  `lsm_range` does a sorted merge then filters to the range. Wiring the zone map and a
-  per-segment Bloom filter into that scan is the standard next optimization, not yet
-  done here.
+- *How do reads stay fast?* Three layers of skipping. A **zone map** — the min/max
+  key per segment, which `lsm_segmeta` exposes — lets a read ignore any segment that
+  can't hold the key. This library wires that into the read path: `lsm_get` skips any
+  run whose `[min,max]` excludes the key, and `lsm_probed` reports how many runs a
+  read actually scans (an out-of-range key touches zero). A production engine adds two
+  more: a **sparse index** (one key every few KB) to binary-search to the right block
+  within a segment, and a per-segment **Bloom filter** (the `bloom` library) to answer
+  "is `k` in this segment?" with a few bit tests before any I/O. Range reads
+  (`lsm_range`) here still do a sorted merge across all layers then filter to the
+  range; skipping non-overlapping segments by zone is the same idea applied to scans.
 - *Size-tiered vs leveled compaction?* Size-tiered merges similarly-sized runs
   (fewer, bigger merges — write-friendly, more space and read amplification);
   leveled keeps each level a sorted, non-overlapping set ~10× the one above (more
@@ -143,9 +168,9 @@ multiplicative avalanche step, and ranges are taken from the high bits — see
 `lib/dhash.lat`.
 
 ```
-(bloom_addall (bloom_make 128 4) [%apple [%banana 0]])  :: 128 bits, 4 hashes
-(bloom_test filter %apple)   :: 0  (possibly present — never a false negative)
-(bloom_test filter %grape)   :: 1  (definitely absent)
+(bloom_sample 0)                       :: ready-made filter (256 bits, 3 hashes, 3 members)
+(bloom_test (bloom_sample 0) %apple)   :: 0  (possibly present — never a false negative)
+(bloom_test (bloom_sample 0) %grape)   :: 1  (definitely absent)
 ```
 
 **In an interview**
@@ -173,10 +198,10 @@ doesn't recognize and *default* a field that's missing.
 ```
 (w_varint 300)              :: -> [172 2]   (two bytes; 127 fits in one)
 (w_unvarint (w_varint 1000000))             :: -> 1000000  (round-trips)
-(w_read writer-record reader-schema)        :: the reader's view of a record
-(w_unknown writer-record reader-schema)     :: tags the reader skipped
+(w_read (w_sample 0) (w_sample_schema 0))   :: the reader's view (tag 3 defaults to 7)
+(w_unknown (w_sample 0) (w_sample_schema 0)):: tags the reader skipped (tag 5)
 (w_zigzag [1 5])            :: signed -5 -> 9   (zigzag: 0,-1,1,-2 -> 0,1,2,3)
-(w_decrec (w_encrec record)):: round-trip length-delimited framing
+(w_decrec (w_encrec (w_sample 0)))          :: round-trip length-delimited framing
 ```
 
 The demo has a writer emit tags 1, 2, and 5; the reader knows tags 1, 2, and a new
@@ -248,10 +273,10 @@ causal relationship: one **happened-before** the other (safe to overwrite), they
 (Dynamo calls the survivors "siblings") rather than silently resolved by a clock.
 
 ```
-(vc_inc clock %a)            :: a local event on node a
-(vc_merge a b)               :: pointwise max — what a replica does on receive
-(vc_compare a b)             :: %before | %after | %eq | %concurrent
-(vc_conflict a b)            :: 0 if the two versions conflict (are concurrent)
+(vc_inc (vc_new 0) %a)       :: a local event on node a -> [[%a 1] 0]
+(vc_merge (vc_inc (vc_new 0) %a) (vc_inc (vc_new 0) %b))   :: pointwise max on receive
+(vc_compare (vc_inc (vc_new 0) %a) (vc_inc (vc_new 0) %b)) :: -> %concurrent
+(vc_conflict (vc_inc (vc_new 0) %a) (vc_inc (vc_new 0) %b)):: 0 — they conflict (concurrent)
 ```
 
 **In an interview**
@@ -270,10 +295,10 @@ updates — in any order, with duplicates — reach the same state. That's **str
 eventual consistency**, with no coordination. Four classics are implemented:
 
 ```
-(gc_value (gc_merge r1 r2))  :: G-Counter: per-node maxes; value = sum
-(pn_value pn)                :: PN-Counter: two G-Counters; value = P − N
-(gs_merge a b)               :: G-Set: grow-only set; merge = union
-(lww_merge a b)              :: LWW-Register: highest timestamp wins
+(gc_value (gc_merge (gc_inc (gc_new 0) %a 5) (gc_inc (gc_new 0) %b 7)))  :: G-Counter -> 12
+(pn_value (pn_dec (pn_inc (pn_new 0) %a 10) %b 3))   :: PN-Counter: P − N -> 7
+(gs_merge [%x [%y 0]] [%y [%z 0]])                   :: G-Set: union of two replicas
+(lww_value (lww_merge (lww_set 5 %red %n1) (lww_set 9 %blue %n2)))  :: LWW -> %blue (ts9 wins)
 ```
 
 The demo merges two counter replicas in both orders (same result — commutative)
@@ -295,8 +320,12 @@ concurrency *without loss*:
   seen both collapses them back to one.
 
 ```
-(or_has (or_merge r1 r2) %x)   :: 0 if x is present after merging two replicas
-(mv_values (mv_merge wa wb))   :: the set of concurrent (sibling) values
+:: OR-Set: a concurrent re-add survives a remove that never observed it (0 = present)
+(or_has (or_merge (or_remove (or_add (or_new 0) %x [%n1 1]) %x)
+                  (or_add (or_new 0) %x [%n2 1])) %x)
+:: MV-Register: two concurrent writes are kept as siblings -> [%red, %blue]
+(mv_values (mv_merge (mv_set (mv_new 0) %red (vc_inc (vc_new 0) %a))
+                     (mv_set (mv_new 0) %blue (vc_inc (vc_new 0) %b))))
 ```
 
 **In an interview**
@@ -349,10 +378,9 @@ the keys in that one arc — about `1/N` of them. **Virtual nodes** (several rin
 points per physical node) even out the load and the movement.
 
 ```
-(ch_build [%n1 [%n2 [%n3 0]]] 16 65536)   :: 3 nodes, 16 vnodes each, ring 0..65536
-(ch_lookup ring %key 65536)                :: which node owns the key
-(ch_moved assignment-before assignment-after)  :: how many keys changed owner
-(ch_replicas ring %key 3 65536)            :: the 3 distinct nodes that replicate key
+(ch_sample 0)                              :: ready-made ring: 3 nodes, 16 vnodes each
+(ch_lookup (ch_sample 0) %key 65536)       :: which node owns the key
+(ch_replicas (ch_sample 0) %key 3 65536)   :: the 3 distinct nodes that replicate key
 (rv_lookup [%n1 [%n2 [%n3 0]]] %key)       :: rendezvous (HRW) owner — no ring needed
 ```
 
@@ -402,9 +430,13 @@ read). On commit, a **write-write check** rejects a transaction whose keys were
 committed by someone else since it began — *first committer wins*.
 
 ```
-(mvcc_commit store %x 1 5)        :: commit x=1 at timestamp 5
-(mvcc_read store %x 10)           :: snapshot read at ts 10 -> [%val 1] (or %absent)
-(mvcc_try store writes start commit)  :: -> [%commit store'] | [%abort store]
+(mvcc_sample 0)                          :: ready-made store: x=1@ts5, then x=2@ts15
+(mvcc_read (mvcc_sample 0) %x 10)         :: snapshot read at ts 10 -> [%val 1]
+(mvcc_read (mvcc_sample 0) %x 20)         :: snapshot read at ts 20 -> [%val 2]
+(head (mvcc_try (mvcc_sample 0) [[%x 9] 0] 10 18))      :: %abort — x changed in (10,18]
+(head (mvcc_try (mvcc_sample 0) [[%y 9] 0] 10 18))      :: %commit — y untouched
+:: serializable: read-set validation aborts write skew that plain SI would allow
+(head (mvcc_ssi_try (mvcc_sample 0) [%x 0] [[%y 9] 0] 10 18))  :: %abort — read x changed
 ```
 
 The demo commits `x=1` at ts 5 and `x=2` at ts 15. A reader on a snapshot at ts 10
@@ -422,8 +454,12 @@ transaction that started at ts 10 and tries to write `x` at commit ts 18 **abort
   (VoltDB/Redis — one transaction at a time on a partition); **two-phase locking**
   (predicate/range locks — correct but contended); or **serializable snapshot
   isolation (SSI)**, which runs optimistically on a snapshot and aborts a transaction
-  only when it detects the read-write dependency cycle that would make the schedule
-  non-serializable (PostgreSQL's `SERIALIZABLE`, the modern favourite).
+  only when it detects the read-write dependency that would make the schedule
+  non-serializable (PostgreSQL's `SERIALIZABLE`, the modern favourite). `mvcc_ssi_try`
+  implements the optimistic core: alongside the write-write check it **validates the
+  read set** — if any key the transaction read was overwritten by a commit during its
+  lifetime, its decision rested on stale data and it aborts. That is exactly what
+  turns the write-skew example above from a commit into an abort.
 - *Why timestamps for visibility?* A version is visible iff `commit_ts <= snapshot`,
   so visibility is a pure comparison — no locks on the read path. The hard part is
   garbage-collecting versions no live snapshot can still see.
@@ -442,9 +478,9 @@ causality — if `a` causally precedes `b` then `L(a) < L(b)` — and ties broke
 node id give a **total order**, the foundation of total-order broadcast.
 
 ```
-(lam_tick clock)        :: a local event; the new value is the timestamp
-(lam_recv clock ts)     :: advance past a message's timestamp, then tick
-(lam_order events)      :: sort [ts node] events into one agreed total order
+(lam_tick 0)            :: a local event; the new value is the timestamp -> 1
+(lam_recv 3 5)          :: advance past a message's timestamp, then tick -> 6
+(lam_order [[5 %a] [[2 %b] [[5 %c] 0]]])  :: sort [ts node] events into a total order
 ```
 
 **In an interview**
@@ -474,10 +510,10 @@ and its safety rests on three rules, implemented here as pure functions:
    index a majority has reached). A leader only counts entries from its *own* term.
 
 ```
-(raft_uptodate candTerm candIdx myTerm myIdx)        :: 0 if candidate's log is OK to elect
-(raft_grantvote myTerm myVote cand candTerm clt cli mlt mli)  :: 0 = grant
-(raft_append log prevIdx prevTerm entries)           :: [%ok newlog] | [%reject 0]
-(raft_commit matchIndexList n)                       :: highest index on a majority
+(raft_uptodate 2 3 2 2)        :: 0 — candidate's log (term2,idx3) is OK to elect over (term2,idx2)
+(raft_grantvote 1 0 %c1 2 2 3 1 2)  :: 0 = grant the vote (see lib for arg order)
+(raft_append (raft_sample 0) 3 2 [[3 %d] 0])  :: append after a matching entry -> [%ok newlog]
+(raft_commit [3 [3 [1 0]]] 3)  :: highest index replicated on a majority of 3 -> 3
 ```
 
 The demo shows a candidate with a longer but lower-term log being refused (the
@@ -512,8 +548,9 @@ each key's values to a result. Because every stage is a deterministic function o
 immutable input, the job is restartable and embarrassingly parallel.
 
 ```
-(mr_run mapf redf input)   :: the generic pipeline
-(mr_wordcount docs)        :: the canonical example: word -> total count
+(mr_wordcount (mr_sample 0))   :: word -> total count over two sample docs (the -> 2)
+:: the generic pipeline: map each doc to [key value] pairs, group, then reduce
+(mr_run (fn [d] -> (mr_wc_map d)) (fn [k vs] -> (mr_wc_red k vs)) (mr_sample 0))
 ```
 
 **In an interview**
@@ -542,10 +579,10 @@ window emits overlapping windows every `step`. Because events can arrive late, a
 Flink, Beam, and Kafka Streams.
 
 ```
-(stream_sums events 10)          :: [windowId sum] for tumbling windows of size 10
-(stream_counts events 10)        :: [windowId count]
-(stream_late events watermark)   :: the events that arrived too late to count
-(stream_slide_sum events 10 5)   :: sliding windows: size 10, step 5
+(stream_sums (stream_sample 0) 10)     :: [windowId sum] for tumbling windows of size 10
+(stream_counts (stream_sample 0) 10)    :: [windowId count]
+(stream_late (stream_sample 0) 12)      :: events older than the watermark (arrived too late)
+(stream_slide_sum (stream_sample 0) 10 5) :: sliding windows: size 10, step 5
 ```
 
 The demo windows five timestamped events into size-10 buckets (summing and
@@ -586,9 +623,10 @@ register maxima estimate the cardinality. The standard error is about
 `1.04/√m` — billions of items in a few kilobytes.
 
 ```
-(hll_add (hll_new 8) %item)   :: p=8 -> 256 registers
-(hll_count sketch)            :: estimated number of distinct items
-(hll_zeros sketch)            :: empty registers — a fill gauge
+(hll_add (hll_new 8) %item)   :: p=8 -> 256 registers; add one item
+:: feed 400 distinct keys and estimate the count (~400; here ~422)
+(hll_count (hll_addall (hll_new 8) (map (fn [i] -> (cat %k (numtext i))) (range 400))))
+(hll_zeros (hll_new 8))       :: empty registers — a fill gauge (256 when fresh)
 ```
 
 The demo feeds 400 distinct keys into a 256-register sketch and estimates ~400
@@ -624,8 +662,9 @@ estimate is the **minimum** of those counters. Because a hash collision can only
 for the heavy hitters that dominate traffic.
 
 ```
-(cms_add (cms_new 4 64) %k)   :: 4 rows of 64 counters
-(cms_count sketch %k)         :: estimated count of k (>= the true count)
+(cms_add (cms_new 4 64) %k)   :: 4 rows of 64 counters; add one key
+:: add a five times, b twice, then read a's estimated count -> 5
+(cms_count (cms_addall (cms_new 4 64) [%a [%a [%a [%a [%a [%b [%b 0]]]]]]]) %a)
 ```
 
 The demo adds `a` five times, `b` twice, `c` once, and reads those counts back

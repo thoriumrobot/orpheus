@@ -90,4 +90,8 @@ core chash
   :: the top `n` nodes for a key — the rendezvous-hashing replica set
   rv_topn = fn [nodes key n] ->
     (take n (foldl (fn [r nd] -> (rv_ins r nd key)) 0 nodes))
+
+  :: a ready-made ring (3 nodes, 16 vnodes each) so examples run as one-liners:
+  :: (ch_lookup (ch_sample 0) %key 65536)  or  (ch_replicas (ch_sample 0) %key 3 65536)
+  ch_sample = fn [_] -> (ch_build [%n1 [%n2 [%n3 0]]] 16 65536)
 end

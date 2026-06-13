@@ -96,4 +96,10 @@ core wire
         again((drop (head ln) (tail ln)),
               [ [ (head tg) (take (head ln) (tail ln)) ] acc ])
     end
+
+  :: a ready-made writer record [[tag value]...] (tags 1,2,5) and an evolved reader
+  :: schema [[tag default]...] that knows tags 1,2,3 — so (w_read (w_sample 0)
+  :: (w_sample_schema 0)) defaults the missing tag 3 and (w_unknown ...) reports tag 5.
+  w_sample        = fn [_] -> [ [1 100] [ [2 200] [ [5 999] 0 ] ] ]
+  w_sample_schema = fn [_] -> [ [1 0] [ [2 0] [ [3 7] 0 ] ] ]
 end

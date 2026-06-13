@@ -56,4 +56,9 @@ core merkle
       let ca = (mk_kids a) in
       let cb = (mk_kids b) in
       (append (mk_diffkeys (head ca) (head cb)) (mk_diffkeys (tail ca) (tail cb)))
+
+  :: two ready-made trees so examples run as one-liners: they agree on a,b,d but
+  :: differ at c, so (mk_diffkeys (mk_sample 0) (mk_sample2 0)) returns just [%c].
+  mk_sample  = fn [_] -> (mk_build [[%a 1] [[%b 2] [[%c 3] [[%d 4] 0]]]])
+  mk_sample2 = fn [_] -> (mk_build [[%a 1] [[%b 2] [[%c 9] [[%d 4] 0]]]])
 end

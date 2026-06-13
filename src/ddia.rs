@@ -90,6 +90,8 @@ pub fn cmd_ddia(args: &[String]) {
         row("live keys (merged view)", &format!("(lsm_keys {})", s));
         row("range scan [a,c]", &format!("(map (fn [e] -> (head e)) (lsm_range {} %a %c))", s));
         row("segment zone maps [min[max cnt]]", &format!("(lsm_segmeta {})", s));
+        row("runs scanned for a (zone-skip)", &format!("(lsm_probed {} %a)", s));
+        row("runs scanned for zz (none: out of range)", &format!("(lsm_probed {} %zz)", s));
     }
 
     if all || topic == "btree" {
@@ -102,6 +104,8 @@ pub fn cmd_ddia(args: &[String]) {
         row("search qq (absent)", &format!("(bt_search {} %qq)", t));
         row("range scan [cc,mm]", &format!("(map (fn [e] -> (head e)) (bt_range {} %cc %mm))", t));
         row("min / max key", &format!("[ (head (bt_min {})) (head (bt_max {})) ]", t, t));
+        row("delete mm, then search mm", &format!("(bt_search (bt_delete {} %mm 2) %mm)", t));
+        row("count after deleting mm (was 12)", &format!("(bt_count (bt_delete {} %mm 2))", t));
     }
 
     if all || topic == "vclock" {
@@ -196,6 +200,11 @@ pub fn cmd_ddia(args: &[String]) {
         row("read x @snapshot 20 (sees v2)", &format!("(mvcc_read {} %x 20)", store));
         row("tx writing x [start10,commit18]", &format!("(head (mvcc_try {} [[%x 9] 0] 10 18))", store));
         row("tx writing y [start10,commit18]", &format!("(head (mvcc_try {} [[%y 9] 0] 10 18))", store));
+        // write skew: x=y=1; T1 sets x=0 (commits ts10); T2 read {x,y}, sets y=0 (commit ts15)
+        let s0 = "(mvcc_commit (mvcc_commit (mvcc_new 0) %x 1 1) %y 1 1)";
+        let after_t1 = format!("(tail (mvcc_ssi_try {} [%x [%y 0]] [[%x 0] 0] 5 10))", s0);
+        row("write skew under plain SI: T2 commits", &format!("(head (mvcc_try {} [[%y 0] 0] 5 15))", after_t1));
+        row("write skew under SSI: T2 aborts", &format!("(head (mvcc_ssi_try {} [%x [%y 0]] [[%y 0] 0] 5 15))", after_t1));
     }
 
     if all || topic == "hll" {
@@ -266,6 +275,19 @@ mod tests {
     }
 
     #[test]
+    fn lsm_zone_map_skips_runs() {
+        // zone-aware get matches the logical value, and probes fewer runs than exist
+        let s = "(lsm_sample 0)";
+        assert_eq!(n(&format!("(tail (lsm_get {} %apple))", s)), 1);
+        assert_eq!(run(&format!("(lsm_get {} %elder)", s)).unwrap(), crate::knot::cord("absent")); // deleted
+        let total = n(&format!("(add 1 (lsm_nsegs {}))", s));
+        // a key in only one run is probed in fewer runs than the total
+        assert!(n(&format!("(lsm_probed {} %apple)", s)) < total);
+        // a key past every zone's max is skipped entirely (0 runs scanned)
+        assert_eq!(n(&format!("(lsm_probed {} %zzz)", s)), 0);
+    }
+
+    #[test]
     fn btree_inorder_is_sorted_and_searchable() {
         let p = "[[%mm 1] [[%aa 2] [[%zz 3] [[%dd 4] [[%kk 5] 0]]]]]";
         let t = format!("(bt_build {} 2)", p);
@@ -273,6 +295,25 @@ mod tests {
         // bt_search returns [%val v]; pull the value for %zz
         assert_eq!(n(&format!("(tail (bt_search {} %zz))", t)), 3);
         assert_eq!(n(&format!("(bt_search {} %qq)", t)), 0); // absent
+    }
+
+    #[test]
+    fn btree_delete_borrow_and_merge() {
+        // delete every key from the sample tree one at a time -> each search misses, count drops
+        for k in ["aa", "cc", "dd", "gg", "kk", "mm", "pp", "zz"] {
+            assert_eq!(n(&format!("(bt_search (bt_delete (bt_sample 0) %{} 2) %{})", k, k)), 0);
+            assert_eq!(n(&format!("(bt_count (bt_delete (bt_sample 0) %{} 2))", k)), 7);
+        }
+        // deleting an absent key leaves the tree unchanged
+        assert_eq!(n("(bt_count (bt_delete (bt_sample 0) %qq 2))"), 8);
+        // delete all eight in sequence -> empty tree
+        let mut t = "(bt_sample 0)".to_string();
+        for k in ["mm", "dd", "gg", "pp", "aa", "zz", "kk", "cc"] {
+            t = format!("(bt_delete {} %{} 2)", t, k);
+        }
+        assert_eq!(n(&format!("(bt_count {})", t)), 0);
+        // delete then reinsert is observable
+        assert_eq!(n("(tail (bt_search (bt_insert (bt_delete (bt_sample 0) %mm 2) %mm 99 2) %mm))"), 99);
     }
 
     #[test]
@@ -402,6 +443,19 @@ mod tests {
         // writing x across the conflicting commit aborts; writing y is safe
         assert_eq!(run(&format!("(head (mvcc_try {} [[%x 9] 0] 10 18))", store)).unwrap(), crate::knot::cord("abort"));
         assert_eq!(run(&format!("(head (mvcc_try {} [[%y 9] 0] 10 18))", store)).unwrap(), crate::knot::cord("commit"));
+    }
+
+    #[test]
+    fn mvcc_ssi_prevents_write_skew() {
+        // x=y=1; T1 reads {x,y} and sets x=0 (commits ts10)
+        let s0 = "(mvcc_commit (mvcc_commit (mvcc_new 0) %x 1 1) %y 1 1)";
+        let after_t1 = format!("(tail (mvcc_ssi_try {} [%x [%y 0]] [[%x 0] 0] 5 10))", s0);
+        // T2 also read {x,y} and now sets y=0. Disjoint write -> plain SI lets it commit (skew)...
+        assert_eq!(run(&format!("(head (mvcc_try {} [[%y 0] 0] 5 15))", after_t1)).unwrap(), crate::knot::cord("commit"));
+        // ...but read-set validation aborts T2 because x (which it read) changed under it.
+        assert_eq!(run(&format!("(head (mvcc_ssi_try {} [%x [%y 0]] [[%y 0] 0] 5 15))", after_t1)).unwrap(), crate::knot::cord("abort"));
+        // a transaction whose read set is untouched still commits under SSI
+        assert_eq!(run(&format!("(head (mvcc_ssi_try {} [%x 0] [[%z 9] 0] 5 12))", s0)).unwrap(), crate::knot::cord("commit"));
     }
 
     #[test]

@@ -50,4 +50,8 @@ core bloom
 
   :: number of bits currently set (its "fill")
   bloom_count = fn [bf] -> (dh_popcount (bloom_bits bf))
+
+  :: a ready-made filter (256 bits, 3 hashes) with three members, so examples run
+  :: as one-liners: (bloom_test (bloom_sample 0) %apple)  -> 0 (probably present).
+  bloom_sample = fn [_] -> (bloom_addall (bloom_make 256 3) [%apple [%banana [%cherry 0]]])
 end
