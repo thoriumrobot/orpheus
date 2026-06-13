@@ -111,13 +111,16 @@ wins and the deleted key stays gone — with the segment count dropping to one.
 - *What's the catch?* **Read amplification** (a key might live in any segment) and
   **write amplification** (compaction rewrites data repeatedly). You trade read
   latency and background I/O for write throughput.
-- *How do reads stay fast?* Three layers of skipping. Each SSTable carries a
-  **sparse index** (one key every few KB) so you binary-search to the right block;
-  a **zone map** (the min/max key per segment, `lsm_segmeta`) lets a point or range
-  read ignore any segment that can't hold the key; and a per-segment **Bloom
-  filter** turns "is `k` in this segment?" into a couple of bit tests before any
-  I/O. A range scan (`lsm_range`) is a sorted k-way merge across the segments whose
-  zone maps overlap the range.
+- *How do reads stay fast?* Three layers of skipping in a production engine. Each
+  SSTable carries a **sparse index** (one key every few KB) to binary-search to the
+  right block; a **zone map** — the min/max key per segment, which `lsm_segmeta`
+  exposes — lets a read ignore any segment that can't hold the key; and a per-segment
+  **Bloom filter** (the `bloom` library) turns "is `k` in this segment?" into a few
+  bit tests before any I/O. This library *provides* the zone-map summary but keeps the
+  read path deliberately simple: `lsm_get` scans newest segment to oldest and
+  `lsm_range` does a sorted merge then filters to the range. Wiring the zone map and a
+  per-segment Bloom filter into that scan is the standard next optimization, not yet
+  done here.
 - *Size-tiered vs leveled compaction?* Size-tiered merges similarly-sized runs
   (fewer, bigger merges — write-friendly, more space and read amplification);
   leveled keeps each level a sorted, non-overlapping set ~10× the one above (more
