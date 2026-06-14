@@ -63,18 +63,67 @@ core std
   scanl = fn [f z xs] -> loop with [c = xs, acc = z, out = [ z 0 ] ] : if (c == 0) then (reverse out) else again((tail c), (f acc (head c)), [ (f acc (head c)) out ]) end
   :: flatten a list of lists
   concat = fn [xss] -> (foldr (fn [a b] -> (append a b)) 0 xss)
+  :: remove duplicate elements, keeping the first occurrence (structural equality)
+  nub = fn [xs] -> (reverse (foldl (fn [acc x] -> if ((member x acc) == 0) then acc else [ x acc ]) 0 xs))
+
+  :: --- association lists: a key->value map as a list of [key value] pairs ------
+  :: a pair is [k v] (a cell); the value is its tail.
+  :: the value for `k` (the first match), or default `d` if `k` is absent
+  aget = fn [al k d] ->
+    loop with [c = al] :
+      if (c == 0) then d
+      else if ((head (head c)) == k) then (tail (head c))
+      else again((tail c))
+    end
+  :: 0 if key `k` is present
+  ahas = fn [al k] -> loop with [c = al] : if (c == 0) then 1 else if ((head (head c)) == k) then 0 else again((tail c)) end
+  :: insert or replace the binding for `k` (preserves order; updates in place)
+  aput = fn [al k v] ->
+    if ((ahas al k) == 0) then
+      (map (fn [p] -> if ((head p) == k) then [ k v ] else p) al)
+    else (append al [ [ k v ] 0 ])
+  :: remove the binding for `k`
+  adel = fn [al k] -> (filter (fn [p] -> if ((head p) == k) then 1 else 0) al)
+  :: all keys / all values, in order
+  akeys = fn [al] -> (map (fn [p] -> (head p)) al)
+  avals = fn [al] -> (map (fn [p] -> (tail p)) al)
 
   :: --- cords (text): atoms read as little-endian UTF-8 bytes -----------------
   :: These arms make Latte self-sufficient for TEXT-PRODUCING tools: build any
   :: string — SVG, HTML, a report — as a cord and return it (tag it %svg/%html
   :: and the System embeds it as a live object; see docs/the-system.md).
-  pow = fn [b e] -> loop with [acc = 1, i = e] : if (i == 0) then acc else again((mul acc b), (dec i)) end
+  :: integer power by binary (squaring) exponentiation: O(log e) multiplies, not e.
+  :: Hot path for bloom bit masks (pow 2 i) and cord shifts (pow 256 len), so the
+  :: whole database, bloom filter, and string builder get faster.
+  pow = fn [b e] -> loop with [acc = 1, base = b, i = e] :
+    if (i == 0) then acc
+    else again((if ((mod i 2) == 1) then (mul acc base) else acc),
+               (if (lt i 2) then base else (mul base base)),
+               (div i 2))
+  end
   :: byte length of a cord (0 for the empty cord / nil)
   bytelen = fn [c] -> loop with [x = c, n = 0] : if (x == 0) then n else again((div x 256), +(n)) end
   :: concatenate two cords:  %ab `cat` %cd  ->  %abcd
   cat = fn [a b] -> if (a == 0) then b else (add a (mul b (pow 256 (bytelen a))))
   :: concatenate a list of cords
   catall = fn [cs] -> (foldl (fn [a c] -> (cat a c)) 0 cs)
+  :: balanced concatenation — same bytes as catall, but O(n log n) not O(n^2).
+  :: Each `cat` shifts the right cord by the LEFT cord's length (a big-integer
+  :: multiply), so a left fold over many/long cords is quadratic. Pairing adjacent
+  :: cords and halving the list repeatedly keeps the shifts small. Prefer this when
+  :: assembling large strings (e.g. an HTML page with an inline SVG).
+  catpairs = fn [cs] ->
+    loop with [c = cs, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else if ((tail c) == 0) then (reverse [ (head c) acc ])
+      else again((tail (tail c)), [ (cat (head c) (head (tail c))) acc ])
+    end
+  catbal = fn [cs] ->
+    loop with [c = cs] :
+      if (c == 0) then 0
+      else if ((tail c) == 0) then (head c)
+      else again((catpairs c))
+    end
   :: join a list of cords with a separator cord
   joincords = fn [sep cs] ->
     if (cs == 0) then 0

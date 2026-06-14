@@ -74,7 +74,8 @@ so a write is a single root-to-leaf pass.
 (bt_search (bt_sample 0) %kk)        :: -> [%val 5]   (0 if absent)
 (bt_inorder (bt_sample 0))           :: sorted [key value] list — a full index scan
 (bt_range (bt_sample 0) %cc %mm)     :: every [key value] with cc <= key <= mm
-(bt_min (bt_sample 0)) (bt_max (bt_sample 0)) :: smallest / largest entry
+(bt_min (bt_sample 0))               :: smallest entry
+(bt_max (bt_sample 0))               :: largest entry
 (bt_height (bt_sample 0))            :: every leaf is this far from the root
 (bt_delete (bt_sample 0) %mm 2)      :: remove a key (borrow/merge to stay balanced)
 ```
@@ -686,63 +687,169 @@ exactly (no collisions at this size), while an unseen key reads 0.
 # Part IX½ — Putting it together: a composed database — `lib/db.lat`
 
 The libraries above are the *parts* of a database. `db.lat` wires them into one
-small engine so you can watch the techniques cooperate — it is the through-line of
-Parts I–VII in a single module. A `db` value is the tuple
-`[ store index bloom idxtag rschema ts vers ]`, and each field is a layer:
+engine deep enough to show the techniques the way DDIA presents them — it is the
+through-line of Parts I–II in a single module. A `db` value is the tuple
+`[ store index bloom idxtag rschema ts wal ]`, and each layer is a chapter:
+
+> **There is an interactive tour of all of this.** Open `System.OpenText
+> database-tutorial` (or the **Interactive tutorial** button in the Db tool): a text
+> whose every framed panel is a live object run against the real database — point
+> reads, the Bloom filter answering "absent", a functional write, an index query,
+> MVCC history, the write-ahead log, and the findb application — with buttons and
+> fields so you can poke it while you read. Tool fences in any text now rehydrate
+> through the full command set, so `db.*` and package arms embed live on load.
+>
+> It is also fast now. A `db_put` runs the whole stack — log, Bloom add, index,
+> version chain — and the Bloom add dominated, because setting a bit in the packed
+> bitset called `pow 2 i` (a 128-byte big-integer) built by *naive* repeated
+> multiplication. Making `std.pow` binary-exponentiation (O(log e)) cut a 24-bar
+> load from ~0.5s to ~0.1s and the findb dashboard from seconds to a fifth of a
+> second — and it speeds up cord building too, since `cat` shifts by `pow 256 len`.
+
 
 | Layer | Library | DDIA |
 |---|---|---|
-| primary key → record | LSM-tree (`lsm`) | Ch. 3 (storage) |
+| primary key → **version chain** | LSM-tree (`lsm`) | Ch. 3 (storage) + Ch. 7 (MVCC) |
+| every mutation logged before it applies | the `wal` field | Ch. 3 (durability / recovery) |
 | "definitely absent?" before any read | Bloom filter (`bloom`) | Ch. 3 (negative lookups) |
 | indexed field value → primary keys | a second LSM (`lsm`) | Ch. 3 (secondary index) |
 | tagged records, evolved on read | `wire` | Ch. 4 (encoding/evolution) |
 | key → shard | consistent hashing (`chash`) | Ch. 6 (partitioning) |
-| read-set validation at commit | the version map `vers` | Ch. 7 (OCC / SSI) |
+| snapshot reads + read-set validation | the version chains | Ch. 7 (snapshot isolation / SSI) |
+| N replicas, quorum W/R, siblings | `quorum` + `crdt` + `vclock` | Ch. 5 (leaderless replication) |
+| atomic commit across shards | `tpc_*` | Ch. 9 (two-phase commit) |
 
-Records are wire-style field lists (`[ [tag value] … 0 ]`). A read passes the
-record through the reader schema, so a row written before a field existed still
-loads with that field's default — schema evolution, live. The Bloom filter
-shortcuts a guaranteed miss so a lookup for an absent key touches no run at all.
-The secondary index keeps a posting list of primary keys per field value, updated
-on every put and delete. And a transaction reads a consistent snapshot — free,
-because a `db` value is immutable — then commits only if nothing it *read* changed
-underneath it; that read-set validation is what turns snapshot isolation
-serializable and refuses write skew.
+### Storage, durability, and MVCC
 
-`db_sample` is a ready database (three users, indexed on a "city" field), so every
-example runs as a one-liner:
+The primary store maps each key to a **version chain**: a list of `[ts value]`
+pairs, newest first, where a value is a record or the tombstone `%tomb`. A write
+prepends a new version; nothing is overwritten. That single representation buys
+three DDIA ideas at once:
+
+- **Snapshot isolation (Ch.7).** A reader at snapshot timestamp `T` sees the newest
+  version with `ts <= T` — a consistent point in time, with *time-travel* for free.
+- **Durability and crash recovery (Ch.3).** Every put/delete is appended to a
+  write-ahead log *before* it touches the store, so the log is the source of truth
+  and the in-memory state is a cache. `db_recover` replays the log onto a fresh db
+  and reconstructs every chain, the index, the Bloom filter, and the clock.
+- **Deletes that respect history.** A delete appends a `%tomb` version rather than
+  erasing, so an old snapshot still sees the row while new reads see absence.
 
 ```
-(db_get (db_sample 0) %u1)                 :: primary read -> [%rec [[1 %alice] [[2 %nyc] 0]]]
-(db_get (db_sample 0) %u9)                 :: %absent — and the Bloom filter skipped the store
-(db_skipped (db_sample 0) %u9)             :: 1 = the read was skipped entirely
+(db_get (db_sample 0) %u1)                       :: -> [%rec [[1 %alice] [[2 %nyc] 0]]]
+(db_get (db_sample 0) %u9)                        :: %absent — Bloom skipped the store
+:: MVCC time-travel: write a new version, then read an OLD snapshot
+(db_getat (db_put (db_sample 0) %u1 [[1 %alice2] 0]) %u1 1)   :: -> the original alice
+(db_history (db_put (db_sample 0) %u1 [[1 %alice2] 0]) %u1)   :: -> a 2-version chain
+:: crash recovery: the write-ahead log replays onto an empty db
+(db_get (db_recover (db_open 2 0 4) (db_wal (db_sample 0))) %u3)  :: -> carol, rebuilt from the log
+(len (db_wal (db_sample 0)))                      :: 3 logged mutations
+```
+
+### Indexing, encoding, partitioning
+
+The Bloom filter shortcuts a guaranteed miss so a lookup for an absent key touches
+no run at all. The secondary index keeps a posting list of primary keys per field
+value, and `db_reindex` moves a key between posting lists when its indexed field
+changes — so the index stays correct under updates and deletes, not just inserts.
+Records are wire field lists read through a reader schema (schema evolution), and a
+consistent-hash ring routes a key to its shard.
+
+```
 (map (fn [r] -> (head r)) (db_query (db_sample 0) %nyc))   :: secondary index -> [%u3 %u1]
-(map (fn [r] -> (head r)) (db_query (db_delete (db_sample 0) %u1) %nyc))  :: delete updates the index -> [%u3]
-(map (fn [e] -> (head e)) (db_range (db_sample 0) %u1 %u2)):: primary range scan -> [%u1 %u2]
-:: schema evolution: a row with no field 3, read through a schema that expects one
-(db_get (db_put (db_open 2 [[1 0] [[2 0] [[3 %zz] 0]]] 4) %u1 [[1 %alice] [[2 %nyc] 0]]) %u1)
+:: update u1's city nyc -> sfo; the index follows the change
+(map (fn [r] -> (head r)) (db_query (db_put (db_sample 0) %u1 [[1 %alice] [[2 %sfo] 0]]) %nyc))  :: -> [%u3]
+(map (fn [e] -> (head e)) (db_range (db_sample 0) %u1 %u2))    :: primary range scan -> [%u1 %u2]
 (db_route (ch_build [%n1 [%n2 [%n3 0]]] 16 65536) %u1 65536)   :: which shard owns u1
-:: a transaction commits while its read set holds...
-(head (db_commit (db_sample 0) (db_sample 0) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))  :: %commit
-:: ...but aborts once a key it read has changed (write skew prevented)
-(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] 0]) in
-  (head (db_commit cur snap [%u1 0] [[%u2 [[1 %bz] 0]] 0])))                    :: %abort
+:: schema evolution: a row with no field 3, read through a schema that supplies its default
+(db_get (db_put (db_open 2 [[1 0] [[2 0] [[3 %zz] 0]]] 4) %u1 [[1 %alice] [[2 %nyc] 0]]) %u1)
+  :: -> [%rec [[1 %alice] [[2 %nyc] [[3 %zz] 0]]]]
 ```
 
-Run the whole demo with `latte ddia db`.
+A secondary index can be **local** (document-partitioned: each shard indexes its own
+rows, and a field query must scatter/gather across all shards) or **global**
+(term-partitioned: the index itself is partitioned by field value, so a field query
+routes to one shard but a write must update a remote index partition). `db.lat`'s
+index is local; the routing function shows where a global partition would live.
+
+### Serializable transactions
+
+`db_begin` takes the current timestamp as a read snapshot (free — a `db` value is
+immutable). A transaction reads through that snapshot with `db_txget` and, at commit,
+is validated: if any key it *read* has a committed version newer than the snapshot,
+it aborts (first-committer-wins). That read-set check is what refuses write skew.
+It is the validation mechanism at the heart of serializable snapshot isolation,
+applied to the read set; it does not track the full graph of rw-antidependencies a
+production SSI scheduler would, so it can abort some schedules that were in fact
+serializable — safe, but conservative.
+
+```
+:: a snapshot read is stable: a write committed after begin is invisible to it
+(let d = (db_sample 0) in let s = (db_begin d) in (db_txget (db_put d %u1 [[1 %changed] 0]) s %u1))
+  :: -> [%rec [[1 %alice] ..]]  (still the snapshot's value)
+:: a transaction whose read set still holds commits...
+(head (db_commit (db_sample 0) (db_begin (db_sample 0)) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))  :: %commit
+:: ...but if u1 changed after the snapshot, the transaction that read it aborts
+(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] 0]) in
+  (head (db_commit cur (db_begin snap) [%u1 0] [[%u2 [[1 %bz] 0]] 0])))                     :: %abort
+```
+
+### Leaderless replication (Dynamo-style)
+
+`clu_*` builds a cluster of N replicas with quorum parameters W and R. Each replica
+holds, per key, an **MV-Register** CRDT — a set of causally-maximal `[value, vector
+clock]` entries. A write stamps a vector clock and lands on W replicas; a read
+merges the registers from R replicas. When `W + R > N` the write and read sets
+overlap, so a read is guaranteed to see the latest write. Concurrent writes that do
+not descend from one another survive as **siblings** for the application to resolve;
+a later coordinated write supersedes them. **Read repair** writes the merged result
+back across the read set, healing stale replicas.
+
+```
+(clu_strong (clu_sample 0))                               :: 0 = W+R>N, reads see latest
+(clu_get (clu_put (clu_sample 0) %k %v1 %n0) %k)          :: -> [%val %v1]
+:: two blind concurrent writes from different nodes -> siblings
+(clu_get (clu_putblind (clu_putblind (clu_sample 0) %k %va %n0) %k %vb %n1) %k)  :: -> [%siblings [%vb %va]]
+:: a coordinated read-modify-write descends from both and collapses them
+(clu_get (clu_put (clu_putblind (clu_putblind (clu_sample 0) %k %va %n0) %k %vb %n1) %k %vc %n0) %k)  :: -> [%val %vc]
+```
+
+### Atomic commit across shards
+
+When a transaction spans partitions, `tpc_*` runs two-phase commit: every
+participant votes (`%yes`/`%no`) and the coordinator commits iff the vote is
+unanimous. Like the raft module it is the safety skeleton — the uniform-decision
+guarantee — without networking, timeouts, or a coordinator-recovery log.
+
+```
+(head (tpc_run [%sA [%sB [%sC 0]]] (fn [s] -> %yes)))                              :: %commit
+(head (tpc_run [%sA [%sB [%sC 0]]] (fn [s] -> if (s == %sB) then %no else %yes)))  :: %abort
+```
+
+Run the whole tour with `latte ddia db`.
 
 **In an interview**
-- *Why is a snapshot free here?* Because the database is an immutable value:
-  "begin" just keeps a reference to the current `db`, and any number of readers
-  share it without locks. A real engine recreates this with MVCC version chains.
-- *What does the Bloom filter buy?* It converts most negative lookups — the common
-  case for a write-heavy key space — into a single bit test instead of a read
-  across every sorted run. The cost is a tunable false-positive rate (a deleted key
-  may still test "possibly present", costing one wasted read, never a wrong answer).
-- *Where would this engine differ from production?* The layers here are honest but
-  separate; a real LSM unifies the value store, secondary index, and version
-  metadata into shared segments, and commit validation runs against a concurrency
-  manager rather than a per-key version map. The *reasoning*, though, is identical.
+- *Why version chains?* They unify three things a database needs anyway: snapshot
+  isolation (read at a timestamp), MVCC reads without read locks, and a natural
+  place for tombstones. Snapshots are free because a `db` value is immutable.
+- *Why is W+R>N enough?* It forces the write quorum and the read quorum to share at
+  least one replica, so a read always contacts someone who saw the latest write. It
+  does not by itself resolve *concurrent* writes — that is what the vector clocks and
+  siblings are for.
+- *Where would this differ from production?* Honest simplifications: the whole
+  version chain is stored as one LSM value rather than one entry per version, so
+  `db_compact` merges LSM segments but does **not** garbage-collect old versions —
+  a real MVCC engine drops versions no open snapshot can still see, while here a
+  chain grows for the life of the key; the Bloom filter cannot un-set a deleted key
+  (a tunable false positive, never a wrong answer); the secondary index is local
+  (the global/term-partitioned variant is described but not run across shards); and
+  2PC is the safety core without failure handling, like raft. The *reasoning* in
+  each layer is the real thing.
+
+This module also exercises three small Latte features added for it: short-circuit
+`and`/`or` (lazy in the second operand, so a guard never evaluates an unsafe right
+side), multi-binding `let` (`let a = x, b = (f a) in …`), and the `aget`/`aput`/
+`akeys` association-list helpers and `nub` in `std` (see `latte-language.md`).
 
 ---
 
@@ -816,3 +923,127 @@ so they coexist in one flat scope: `dh_` (hashing), `bloom_`, `lsm_`, `bt_`,
 database), and `lk_` (the definition-lookup tool). Read any of them with
 `System.Open <name>` in the GUI or `latte eval --lib name=lib/name.lat "…"` from
 the shell.
+
+## The text-frame front end (Db.Tool)
+
+In the System GUI, the **Db** header link opens `Db.Tool` — an editable command
+sheet over the composed database. Its buttons run query arms that return tagged
+HTML (`[%html cord]`) and embed a live view wherever you click:
+
+- **[Show the database state]** runs `db.db_dash0`, whose arm `db_dash` scans the
+  key range with `db_range` and tabulates each key's name, city, and MVCC version
+  count, with the write-ahead-log length beneath.
+- An **add-a-row** control has `key`, `name`, and `city` fields feeding
+  `db.db_dash (db_put (db_sample 0) $key [[1 $name] [[2 $city] 0]]) %u0 %u9` — a
+  functional update of the (immutable) sample, re-rendered.
+- A **query** control feeds `db.db_queryhtml (db_sample 0) $qcity`, listing every
+  live row whose indexed city equals the field (the secondary index).
+- A **time-travel** control feeds `db.db_historyhtml …`, showing the full MVCC
+  version chain of one key, newest first (a tombstone reads "(deleted)").
+
+The render arms are in `lib/db.lat`: `db_dash` / `db_dash0`, `db_queryhtml`, and
+`db_historyhtml`, with helpers `db_rec` (unwrap a `[pk [%rec fields]]` entry),
+`db_trow` / `db_rows`, `db_queryli`, and `db_verli`. They build HTML cords with the
+`std` toolkit (`catall`, `numtext`) and read fields through `db_field`. Edit a
+field and click, edit a command line (records and ballots are typed inline because
+`[field: …]` values cannot contain `]`) and middle-click it, or edit the arms and
+**Compile**; **Store** persists your sheet to `text/db-tool.md`, overriding the
+built-in one next run.
+
+## The database, applied: a symbol index for code navigation
+
+The composed database is not only a demo — it backs a real navigation tool for the
+system's own code. `lib/symbols.lat` (`import db`) treats every arm of every loaded
+library as a record `[ [1 name] [2 module] [3 arity] ]`, stored under the unique key
+`module.name` and indexed on the name (field 1). Three questions become database
+operations:
+
+- **who defines `name`?** — a secondary-index query (`sy_defs` / `sy_modulesof`).
+- **is `name` shadowed?** — that query returns more than one module (`sy_shadowed`).
+  This matters because the whole system shares one flat scope: `transpose`, for
+  instance, is defined in `plan`, `nn`, and `fin`, so the library loaded last wins
+  and silently shadows the others. The index makes that visible.
+- **how did `module.name` change?** — its MVCC version chain (`sy_history`). Because
+  Compile re-registers a module's arms at runtime, re-indexing a redefined arm is
+  just another versioned write the store already records (`sy_redefine`).
+
+`sy_sample` builds a small index with a deliberate three-way collision on `dot`;
+`latte ddia symbols` runs the queries. Try them in the shell:
+
+    :: how many modules define dot, and which ones
+    latte eval '(sy_count (sy_sample 0) %dot)'
+    latte eval '(sy_modulesof (sy_sample 0) %dot)'
+    :: 0 = shadowed (more than one definer); gross has a single definer
+    latte eval '(sy_shadowed (sy_sample 0) %dot)'
+    :: recompiling an arm appends an MVCC version
+    latte eval '(sy_revisions (sy_redefine (sy_sample 0) %plan %dot 9) %plan %dot)'
+
+### In the GUI: the Sym tool and a better System.Def
+
+The **Sym** header link opens `Sym.Tool`: type a name and `sym <name>` embeds a live
+table of every loaded module that defines it, with arities and a shadow warning. The
+host (`/api/symbols`) hands the name's definers to `symbols.lat`, which indexes and
+renders them; scoping each request to one name's definers keeps the immutable build
+small and fast.
+
+The same idea improves the existing **System.Def** (the header's ≡ Def, or
+`System.Def <name>`): it used to print the first module that happened to define a
+highlighted name. It now reports *every* module that defines it and which one wins by
+load order — so a name resolving to an unexpected definition is no longer a mystery:
+
+    transpose is defined in 3 modules: plan, nn, fin
+    fin wins (loaded last); the rest are shadowed in the shared scope.
+
+    module fin
+
+      transpose = fn [rows] -> …
+
+## The database, applied: financial data for visualization and training — `lib/findb.lat`
+
+The symbol index stores *code* in the database; `findb.lat` stores *data* in it —
+a window of financial price bars — and then puts the stored data to work twice:
+once for visualization, once for training a model. It is built on `lib/db.lat`
+(the composed database) and `lib/stats.lat` (the statistics library), and every
+number it reports is read back out of the store, not kept on the side.
+
+A bar is a record `[ [1 day] [2 close] [3 dir] ]` keyed `d<i>` and indexed on the
+day field, so each posting list holds one bar and loading a window stays cheap:
+
+    :: load a list of closes into the store, then read day 3 back out
+    latte eval '(fd_close (fd_load (fd_prices 0)) 3)'
+    :: the whole window, read one point at a time from the database
+    latte eval '(fd_closes (fd_sample 0) 12)'
+
+**Visualization.** `fd_spark` reads the stored closes and returns an `[%svg …]`
+sparkline; the GUI embeds it live. The data path is the point: the polyline is
+drawn from what the database returns, not from a Rust array.
+
+    latte eval '(fd_spark (fd_sample 0) 12)'      :: -> [%svg <polyline …>]
+
+**Training.** `fd_fit` reads the window, turns it into daily returns, and fits a
+lag-1 least-squares line — tomorrow's return regressed on today's — returning
+`[slope intercept correlation]`. A negative slope is mean reversion; the
+correlation is its strength. This is a (small) model trained entirely on data
+pulled from the store, with the regression supplied by `stats.lat`:
+
+    latte eval '(fd_fit_of (fd_prices 0))'        :: -> [slope intercept corr]
+    latte eval '(fd_forecast_of (fd_prices 0))'   :: next-day return prediction
+
+**Corrections are versioned.** Re-storing a bar is an MVCC write, so a fix keeps
+the prior reading in history — the audit trail the database already gives every
+key:
+
+    :: correct day 0, then count the versions on that key (= 2)
+    latte eval '(len (fd_history (fd_correct (fd_sample 0) 0 (npos 101000) 0) 0))'
+
+`fd_dash` assembles the sparkline, the summary statistics (mean, standard
+deviation, realized volatility, up-moves), the fitted model, and the next-day
+forecast into one `[%html …]` dashboard. The **Findb** header link and the
+`findb market=… n=…` command run it over a live market window: the host fetches
+the last *n* closes, loads them into the store, and renders what it reads back
+(`/api/findb`). One honest limit: the immutable store is built in the
+interpreter, so a window is tens of bars — a dashboard's worth — while the full
+multi-year series stays in the Rust path behind the Chart tool. Assembling the
+page would have been quadratic, too, because cords are big-integers and a
+left-folded concatenation re-shifts the whole accumulator each step; `std.catbal`
+pairs cords and halves the list instead, so the dashboard builds in O(n log n).

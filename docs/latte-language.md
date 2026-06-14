@@ -114,6 +114,23 @@ let a = (head p) in
 let b = (tail p) in
 (add a b)
 ```
+A single `let` may bind several names at once, separated by commas; the bindings
+are sequential (each sees the ones before it), which keeps a deep pipeline readable
+instead of a tower of nested `let`s:
+```
+let a = 10, b = (add a 5), c = (mul b 2) in c   :: 30
+```
+
+### Short-circuit `and` / `or`
+```
+(and a b)     :: 0 (true) iff both are true; b is evaluated only if a is true
+(or  a b)     :: 0 (true) iff either is true; b is evaluated only if a is false
+```
+These are lazy in their second operand (they desugar to `if`), so a guard never
+evaluates an unsafe right-hand side:
+```
+(and (gt n 0) (safe (sub n 1)))   :: (safe ..) runs only when n > 0
+```
 
 ### Case (tag dispatch)
 Matches a value against cord tags, with `_` as the default; arms are separated by `;` and the

@@ -66,8 +66,7 @@ pub fn cmd_ddia(args: &[String]) {
     println!("Designing Data-Intensive Applications — techniques in Latte (lib/*.lat)");
     if all {
         println!("topics: bloom lsm btree vclock crdt lamport chash quorum wire mapred merkle");
-        println!("        mvcc hll cms stream raft db lookup");
-        println!("        mvcc hll cms stream raft");
+        println!("        mvcc hll cms stream raft db lookup acplan symbols stats findb");
     }
 
     if all || topic == "bloom" {
@@ -245,22 +244,42 @@ pub fn cmd_ddia(args: &[String]) {
     }
 
     if all || topic == "db" {
-        head("A composed database (Ch.3–7)",
-             "LSM storage + Bloom + secondary index + schema evolution + partitioning + OCC transactions");
-        row("get u1 (primary read)", "(db_get (db_sample 0) %u1)");
+        head("A composed database (Ch.3–9)",
+             "LSM + WAL recovery + Bloom + secondary index + MVCC snapshots + SSI + leaderless replication + 2PC");
+        row("get u1 (point read)", "(db_get (db_sample 0) %u1)");
         row("get u9 (Bloom -> absent, store skipped)", "(db_get (db_sample 0) %u9)");
-        row("Bloom skipped the read? (1 = yes)", "(db_skipped (db_sample 0) %u9)");
         row("query city=nyc (secondary index)", "(map (fn [r] -> (head r)) (db_query (db_sample 0) %nyc))");
-        row("delete u1, re-query nyc", "(map (fn [r] -> (head r)) (db_query (db_delete (db_sample 0) %u1) %nyc))");
+        row("update u1 nyc->sfo, re-query nyc", "(map (fn [r] -> (head r)) (db_query (db_put (db_sample 0) %u1 [[1 %alice] [[2 %sfo] 0]]) %nyc))");
         row("range scan [u1,u2]", "(map (fn [e] -> (head e)) (db_range (db_sample 0) %u1 %u2))");
+        // schema evolution (Ch.4): an old row read through a schema that expects a new field
         let rs = "[[1 0] [[2 0] [[3 %zz] 0]]]";
         row("schema evolution: field 3 defaults",
             &format!("(db_get (db_put (db_open 2 {} 4) %u1 [[1 %alice] [[2 %nyc] 0]]) %u1)", rs));
-        row("partition route u1 (3-node ring)", "(db_route (ch_build [%n1 [%n2 [%n3 0]]] 16 65536) %u1 65536)");
+        // MVCC: a write adds a version; an old snapshot still sees the old value
+        let bumped = "(db_put (db_sample 0) %u1 [[1 %alice2] [[2 %la] 0]])";
+        row("MVCC time-travel: read u1 at snapshot ts=1", &format!("(db_getat {} %u1 1)", bumped));
+        row("MVCC: read u1 at the latest snapshot", &format!("(db_get {} %u1)", bumped));
+        // durability: the write-ahead log replays onto a fresh db
+        row("WAL length after the sample's writes", "(len (db_wal (db_sample 0)))");
+        row("crash recovery: replay WAL, read u3", "(db_get (db_recover (db_open 2 0 4) (db_wal (db_sample 0))) %u3)");
+        // serializable transactions
+        row("snapshot read ignores a later write",
+            "(let d = (db_sample 0) in let s = (db_begin d) in (db_txget (db_put d %u1 [[1 %changed] 0]) s %u1))");
         row("txn commit (read set still valid)",
-            "(head (db_commit (db_sample 0) (db_sample 0) [%u1 0] [[%u4 [[1 %dave] [[2 %nyc] 0]]] 0]))");
+            "(head (db_commit (db_sample 0) (db_begin (db_sample 0)) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))");
         row("write skew -> abort (u1 changed)",
-            "(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] [[2 %sfo] 0]]) in (head (db_commit cur snap [%u1 0] [[%u2 [[1 %bz] [[2 %nyc] 0]]] 0])))");
+            "(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] 0]) in (head (db_commit cur (db_begin snap) [%u1 0] [[%u2 [[1 %bz] 0]] 0])))");
+        // partitioning + replication + atomic commit
+        row("partition route u1 (3-node ring)", "(db_route (ch_build [%n1 [%n2 [%n3 0]]] 16 65536) %u1 65536)");
+        row("leaderless: W+R>N is strong? (0=yes)", "(clu_strong (clu_sample 0))");
+        row("quorum read after a write", "(clu_get (clu_put (clu_sample 0) %k %v1 %n0) %k)");
+        row("two concurrent blind writes -> siblings",
+            "(clu_get (clu_putblind (clu_putblind (clu_sample 0) %k %va %n0) %k %vb %n1) %k)");
+        row("a coordinated write collapses the siblings",
+            "(clu_get (clu_put (clu_putblind (clu_putblind (clu_sample 0) %k %va %n0) %k %vb %n1) %k %vc %n0) %k)");
+        row("2PC: all shards vote yes -> commit", "(head (tpc_run [%sA [%sB [%sC 0]]] (fn [s] -> %yes)))");
+        row("2PC: one shard votes no -> abort",
+            "(head (tpc_run [%sA [%sB [%sC 0]]] (fn [s] -> if (s == %sB) then %no else %yes)))");
     }
 
     if all || topic == "lookup" {
@@ -269,6 +288,71 @@ pub fn cmd_ddia(args: &[String]) {
         row("lk_lookup sample for b (sig + body)", "(lk_lookup (lk_sample 0) %b)");
         row("lk_lookup sample for a (doc + def)", "(lk_lookup (lk_sample 0) %a)");
         row("missing name -> %none", "(lk_lookup (lk_sample 0) %z)");
+    }
+
+    if all || topic == "acplan" {
+        head("Accountable planning (Materialist Economics, Part 3)",
+             "quadratic vote -> final demand -> Leontief plan -> labour values, vouchers, accountability (built on plan)");
+        // 2. democratic job creation via quadratic voting
+        row("QV cost of ballot [0 0 2 4] (4+16)", "(qv_cost [0 [0 [2 [4 0]]]])");
+        row("affordable on a 30-credit budget? (0=yes)", "(qv_afford 30 [0 [0 [2 [4 0]]]])");
+        row("tally three ballots -> votes/category", "(qv_tally (ap_ballots 0))");
+        row("final demand vector (scaled x1000)", "(ap_demand (qv_tally (ap_ballots 0)))");
+        // 3. accountable planning: feed the vote into the I/O computation
+        row("balanced targets iron/coal/corn/bread", "(ap_targetsof (ap_sample 0))");
+        row("turnpike residual x-(y+Ax) (~0 = converged)",
+            "(ap_residual (ap_tech 0) (ap_targetsof (ap_sample 0)) (ap_demandof (ap_sample 0)))");
+        row("labour values per unit (scaled)", "(ap_valuesof (ap_sample 0))");
+        row("total social labour the plan needs", "(ap_labourof (ap_sample 0))");
+        // 6. intermediate goods at labour-time cost
+        row("embodied labour in 5 corn (no margin)", "(ap_embodied (ap_valuesof (ap_sample 0)) 2 5000)");
+        row("deliver 5 corn: consumer debited to",
+            "(led_bal (ap_deliver (vou_issue 0 %housing 10000) %housing %works (ap_valuesof (ap_sample 0)) 2 5000) %housing)");
+        // 5. labour vouchers (non-circulating) and the MELT price bridge
+        row("voucher: issue 8h, redeem 3h -> held", "(vou_held (vou_redeem (vou_issue 0 %ann 8000) %ann 3000) %ann)");
+        row("predicted prices = values x MELT",
+            "(ap_prices (ap_valuesof (ap_sample 0)) (ap_melt 36400000 (mul (ap_labourof (ap_sample 0)) 1000)))");
+        // 3/7/8. accountability: which voted-for goods are under-supplied
+        row("under-supplied beyond margin (bread short)",
+            "(ap_undersupplied (ap_targetsof (ap_sample 0)) [1041 [2908 [15000 [10000 0]]]] 1000)");
+    }
+
+    if all || topic == "symbols" {
+        head("A database-backed symbol index (code navigation on db)",
+             "every arm is a record [name module arity] indexed by name; who-defines / shadowing / MVCC redefinition history become db ops");
+        row("modules that define `dot` (secondary-index query)", "(sy_modulesof (sy_sample 0) %dot)");
+        row("how many define `dot`", "(sy_count (sy_sample 0) %dot)");
+        row("is `dot` shadowed in the flat scope? (0=yes)", "(sy_shadowed (sy_sample 0) %dot)");
+        row("is `gross` shadowed? (1=no, single definer)", "(sy_shadowed (sy_sample 0) %gross)");
+        row("arity recorded for plan.dot", "(sy_arityin (sy_sample 0) %plan %dot)");
+        // MVCC: recompiling an arm at runtime is just another versioned write
+        row("redefine plan.dot, then count its revisions", "(sy_revisions (sy_redefine (sy_sample 0) %plan %dot 9) %plan %dot)");
+    }
+
+    if all || topic == "stats" {
+        head("A statistics library on signed fixed-point lists (lib/stats.lat)",
+             "mean/variance/std, median/quantile, covariance/correlation, least-squares regression, z-scores — the shared home ta/fin/findb route through");
+        row("mean of the sample [2 4 4 4 5 5 7 9]", "(st_mean (st_sample 0))");
+        row("population standard deviation (= 2)", "(st_std (st_sample 0))");
+        row("median (= 4.5)", "(st_median (st_sample 0))");
+        row("first quartile (type-7 interpolation)", "(st_quantile (st_sample 0) (ndiv (nint 1) (nint 4)))");
+        // a perfectly linear series y = 2x + 1: correlation 1, slope 2, intercept 1
+        let xs = "[ (nint 1) [ (nint 2) [ (nint 3) [ (nint 4) 0 ] ] ] ]";
+        let ys = "[ (nint 3) [ (nint 5) [ (nint 7) [ (nint 9) 0 ] ] ] ]";
+        row("correlation of x and 2x+1 (= 1.0)", &format!("(st_corr {} {})", xs, ys));
+        row("least-squares line [slope intercept]", &format!("(st_linreg {} {})", xs, ys));
+        row("predict that line at x = 10 (= 21)", &format!("(st_predict (st_linreg {} {}) (nint 10))", xs, ys));
+    }
+
+    if all || topic == "findb" {
+        head("Financial price data in the database (lib/findb.lat on lib/db.lat)",
+             "a price window is stored as records, read back for an SVG sparkline (visualization) and a lag-1 regression (training), summarised with stats.lat");
+        row("up moves in the 12-bar sample window", "(fd_updays_of (fd_prices 0))");
+        row("[mean std] of the stored closes", "(fd_stats_of (fd_prices 0))");
+        row("realized volatility (std of returns)", "(fd_vol_of (fd_prices 0))");
+        row("lag-1 model [slope intercept correlation]", "(fd_fit_of (fd_prices 0))");
+        // MVCC: correcting a stored bar keeps the previous reading in its history
+        row("a corrected bar keeps 2 versions in history", "(len (fd_history (fd_correct (fd_sample 0) 0 (npos 101000) 0) 0))");
     }
 
     if all {
@@ -307,22 +391,104 @@ mod tests {
     }
 
     #[test]
-    fn db_delete_updates_secondary_index() {
-        // deleting u1 (nyc) leaves only u3 under the nyc posting list, and the row is gone
-        let d = "(db_delete (db_sample 0) %u1)";
-        assert_eq!(run(&format!("(db_get {} %u1)", d)).unwrap(), crate::knot::cord("absent"));
-        assert_eq!(n(&format!("(len (db_query {} %nyc))", d)), 1);
+    fn db_secondary_index_follows_updates() {
+        // moving u1 from nyc to sfo must remove it from the nyc posting list and add it to sfo
+        let d = "(db_put (db_sample 0) %u1 [[1 %alice] [[2 %sfo] 0]])";
+        assert_eq!(n(&format!("(len (db_query {} %nyc))", d)), 1); // only u3 left in nyc
+        assert_eq!(n(&format!("(len (db_query {} %sfo))", d)), 2); // u2 and now u1
+    }
+
+    #[test]
+    fn db_mvcc_snapshot_time_travel() {
+        // u1 is written at ts=1, then overwritten later; an old snapshot still sees the old value
+        let d = "(db_put (db_sample 0) %u1 [[1 %alice2] 0])";
+        // at snapshot ts=1, u1's name field is the original alice
+        assert_eq!(run(&format!("(tail (w_find (tail (db_getat {} %u1 1)) 1))", d)).unwrap(),
+                   crate::knot::cord("alice"));
+        // at the latest snapshot it is alice2
+        assert_eq!(run(&format!("(tail (w_find (tail (db_get {} %u1)) 1))", d)).unwrap(),
+                   crate::knot::cord("alice2"));
+        // the version chain records both versions
+        assert_eq!(n(&format!("(len (db_history {} %u1))", d)), 2);
+    }
+
+    #[test]
+    fn db_wal_recovery_reproduces_state() {
+        // replaying the write-ahead log onto a fresh db reproduces reads, deletes included
+        let recovered = "(db_recover (db_open 2 0 4) (db_wal (db_delete (db_sample 0) %u1)))";
+        assert_eq!(run(&format!("(db_get {} %u1)", recovered)).unwrap(), crate::knot::cord("absent"));
+        assert_eq!(run(&format!("(head (db_get {} %u3))", recovered)).unwrap(), crate::knot::cord("rec"));
+        // every mutation was logged: 3 puts + 1 delete
+        assert_eq!(n("(len (db_wal (db_delete (db_sample 0) %u1)))"), 4);
     }
 
     #[test]
     fn db_transactions_prevent_write_skew() {
         // a transaction whose read set still holds commits
-        let ok = "(head (db_commit (db_sample 0) (db_sample 0) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))";
+        let ok = "(head (db_commit (db_sample 0) (db_begin (db_sample 0)) [%u1 0] [[%u4 [[1 %dave] 0]] 0]))";
         assert_eq!(run(ok).unwrap(), crate::knot::cord("commit"));
-        // a transaction that read u1 aborts once u1 has changed underneath it (write skew)
+        // a transaction that read u1 aborts once u1 has a newer committed version (write skew)
         let skew = "(let snap = (db_sample 0) in let cur = (db_put snap %u1 [[1 %alx] 0]) in \
-                     (head (db_commit cur snap [%u1 0] [[%u2 [[1 %bz] 0]] 0])))";
+                     (head (db_commit cur (db_begin snap) [%u1 0] [[%u2 [[1 %bz] 0]] 0])))";
         assert_eq!(run(skew).unwrap(), crate::knot::cord("abort"));
+    }
+
+    #[test]
+    fn db_leaderless_quorum_and_siblings() {
+        // W+R>N gives a consistent quorum read
+        assert_eq!(n("(clu_strong (clu_sample 0))"), 0);
+        // a write then a quorum read returns that value
+        assert_eq!(run("(head (clu_get (clu_put (clu_sample 0) %k %v1 %n0) %k))").unwrap(),
+                   crate::knot::cord("val"));
+        // two concurrent blind writes from different nodes surface as two siblings
+        let sib = "(clu_get (clu_putblind (clu_putblind (clu_sample 0) %k %va %n0) %k %vb %n1) %k)";
+        assert_eq!(run(&format!("(head {})", sib)).unwrap(), crate::knot::cord("siblings"));
+        assert_eq!(n(&format!("(len (tail {}))", sib)), 2);
+        // a later coordinated write supersedes both, collapsing the conflict
+        let fixed = "(clu_get (clu_put (clu_putblind (clu_putblind (clu_sample 0) %k %va %n0) %k %vb %n1) %k %vc %n0) %k)";
+        assert_eq!(run(&format!("(head {})", fixed)).unwrap(), crate::knot::cord("val"));
+        // read repair heals replicas without inventing a spurious sibling
+        let repaired = "(clu_get (clu_repair (clu_put (clu_sample 0) %k %v1 %n0) %k) %k)";
+        assert_eq!(run(&format!("(head {})", repaired)).unwrap(), crate::knot::cord("val"));
+    }
+
+    #[test]
+    fn db_two_phase_commit_is_atomic() {
+        // unanimous yes commits; a single no aborts the whole transaction
+        assert_eq!(run("(head (tpc_run [%a [%b [%c 0]]] (fn [s] -> %yes)))").unwrap(),
+                   crate::knot::cord("commit"));
+        assert_eq!(run("(head (tpc_run [%a [%b [%c 0]]] (fn [s] -> if (s == %b) then %no else %yes)))").unwrap(),
+                   crate::knot::cord("abort"));
+    }
+
+    #[test]
+    fn db_schema_evolution_on_read() {
+        // a row written without field 3, read through a schema that expects it, gets the default
+        let d = "(db_put (db_open 2 [[1 0] [[2 0] [[3 %zz] 0]]] 4) %u1 [[1 %alice] [[2 %nyc] 0]])";
+        assert_eq!(run(&format!("(tail (w_find (tail (db_get {} %u1)) 3))", d)).unwrap(),
+                   crate::knot::cord("zz"));
+        // and the fields the row does carry are untouched
+        assert_eq!(run(&format!("(tail (w_find (tail (db_get {} %u1)) 1))", d)).unwrap(),
+                   crate::knot::cord("alice"));
+    }
+
+    #[test]
+    fn db_range_scan_and_compaction() {
+        // a primary-key range scan rides the LSM's sorted order
+        assert_eq!(n("(len (db_range (db_sample 0) %u1 %u2))"), 2);
+        // reads still resolve after the store and index are compacted
+        assert_eq!(run("(head (db_get (db_compact (db_sample 0)) %u3))").unwrap(),
+                   crate::knot::cord("rec"));
+        assert_eq!(n("(len (db_query (db_compact (db_sample 0)) %nyc))"), 2);
+    }
+
+    #[test]
+    fn db_snapshot_read_is_stable() {
+        // db_txget reads through the transaction's snapshot, so a write committed after
+        // the snapshot is invisible to it (repeatable read / snapshot isolation)
+        let e = "(let d = (db_sample 0) in let snap = (db_begin d) in \
+                  let d2 = (db_put d %u1 [[1 %changed] 0]) in (tail (w_find (tail (db_txget d2 snap %u1)) 1)))";
+        assert_eq!(run(e).unwrap(), crate::knot::cord("alice"));
     }
 
     #[test]
@@ -336,6 +502,110 @@ mod tests {
                    crate::knot::num(0)); // first returned line is the comment
         // a missing name yields %none
         assert_eq!(run(&format!("(lk_lookup {} %zzz)", s)).unwrap(), crate::knot::cord("none"));
+    }
+
+    #[test]
+    fn acplan_quadratic_voting_aggregates_demand() {
+        assert_eq!(n("(qv_cost [0 [0 [2 [4 0]]]])"), 20);          // 2^2 + 4^2
+        assert_eq!(n("(qv_afford 30 [0 [0 [2 [4 0]]]])"), 0);       // affordable
+        assert_eq!(n("(qv_afford 15 [0 [0 [2 [4 0]]]])"), 1);       // not affordable
+        // three ballots tally to corn=6, bread=12 votes
+        assert_eq!(n("(nth (qv_tally (ap_ballots 0)) 2)"), 6);
+        assert_eq!(n("(nth (qv_tally (ap_ballots 0)) 3)"), 12);
+        // the tally becomes the final-demand vector (scaled into fixed point)
+        assert_eq!(n("(nth (ap_demand (qv_tally (ap_ballots 0))) 3)"), 12000);
+    }
+
+    #[test]
+    fn acplan_plan_converges_and_balances() {
+        // the contractive affine transform reaches its fixed point: residual is 0
+        assert_eq!(n("(ap_residual (ap_tech 0) (ap_targetsof (ap_sample 0)) (ap_demandof (ap_sample 0)))"), 0);
+        // bread is a pure final good, so its target equals the voted demand (12 units)
+        assert_eq!(n("(nth (ap_targetsof (ap_sample 0)) 3)"), 12000);
+        // the plan mobilises a positive amount of social labour
+        assert!(n("(ap_labourof (ap_sample 0))") > 0);
+        // the invariant Σ v·y = Σ l·x holds to within fixed-point rounding (< 0.1%)
+        let vy = n("(div (ap_dot (ap_valuesof (ap_sample 0)) (ap_demandof (ap_sample 0))) 1000)");
+        let lx = n("(ap_labourof (ap_sample 0))");
+        let diff = if vy > lx { vy - lx } else { lx - vy };
+        assert!(diff * 1000 < lx);
+    }
+
+    #[test]
+    fn acplan_labour_ledger_conserves_at_cost() {
+        // delivering an intermediate good moves embodied labour from consumer to producer
+        // with NO margin, so the two balances still sum to the consumer's original budget
+        let led = "(ap_deliver (vou_issue 0 %housing 10000) %housing %works (ap_valuesof (ap_sample 0)) 2 5000)";
+        let hz = n(&format!("(led_bal {} %housing)", led));
+        let wz = n(&format!("(led_bal {} %works)", led));
+        assert_eq!(hz + wz, 10000);
+        assert!(wz > 0);
+        assert_eq!(n("(ap_cheaper 1100 1147)"), 0); // the cheaper facility is chosen
+    }
+
+    #[test]
+    fn acplan_vouchers_and_accountability() {
+        // a labour voucher is issued, partly redeemed, and the rest remains outstanding
+        assert_eq!(n("(vou_held (vou_redeem (vou_issue 0 %ann 8000) %ann 3000) %ann)"), 5000);
+        assert_eq!(n("(vou_total (vou_issue (vou_issue 0 %ann 8000) %bo 6000))"), 14000);
+        // when production matches the plan, every demanded good is met
+        assert_eq!(n("(ap_met (ap_targetsof (ap_sample 0)) (ap_targetsof (ap_sample 0)))"), 0);
+        // bread (index 3) short beyond the margin is flagged (the collectivisation trigger)
+        assert_eq!(n("(head (ap_undersupplied (ap_targetsof (ap_sample 0)) [1041 [2908 [15000 [10000 0]]]] 1000))"), 3);
+    }
+
+    #[test]
+    fn symbols_index_finds_definers_and_shadowing() {
+        // `dot` is defined in three modules; the secondary-index query returns all three
+        assert_eq!(n("(sy_count (sy_sample 0) %dot)"), 3);
+        assert_eq!(n("(sy_shadowed (sy_sample 0) %dot)"), 0);            // 0 = shadowed
+        assert_eq!(n("(sy_shadowed (sy_sample 0) %gross)"), 1);         // single definer, not shadowed
+        assert_eq!(n("(sy_count (sy_sample 0) %values)"), 2);
+        // a name nothing defines has no definers
+        assert_eq!(n("(sy_count (sy_sample 0) %nosuchname)"), 0);
+        // the modules of `dot` include plan (membership, regardless of posting-list order)
+        assert_eq!(run("(any (fn [m] -> (m == %plan)) (sy_modulesof (sy_sample 0) %dot))").unwrap(),
+                   crate::knot::num(0));
+    }
+
+    #[test]
+    fn symbols_index_records_redefinition_history() {
+        // the recorded arity is readable for a specific module's definition
+        assert_eq!(n("(sy_arityin (sy_sample 0) %plan %gross)"), 3);
+        // recompiling an arm (same module.name) appends an MVCC version
+        assert_eq!(n("(sy_revisions (sy_sample 0) %plan %dot)"), 1);
+        assert_eq!(n("(sy_revisions (sy_redefine (sy_sample 0) %plan %dot 9) %plan %dot)"), 2);
+        // the newest version carries the new arity, the old one is still in history
+        assert_eq!(n("(sy_arityin (sy_redefine (sy_sample 0) %plan %dot 9) %plan %dot)"), 9);
+    }
+
+    #[test]
+    fn stats_descriptive_and_regression() {
+        // sample [2 4 4 4 5 5 7 9]: mean 5.0, population std 2.0, median 4.5
+        assert_eq!(n("(tail (st_mean (st_sample 0)))"), 5000);
+        assert_eq!(n("(head (st_std (st_sample 0)))"), 0);      // sign 0 = positive
+        assert_eq!(n("(tail (st_std (st_sample 0)))"), 2000);   // = 2.000
+        assert_eq!(n("(tail (st_median (st_sample 0)))"), 4500);
+        // a perfectly linear series y = 2x + 1: correlation 1, slope 2, intercept 1
+        let xs = "[ (nint 1) [ (nint 2) [ (nint 3) [ (nint 4) 0 ] ] ] ]";
+        let ys = "[ (nint 3) [ (nint 5) [ (nint 7) [ (nint 9) 0 ] ] ] ]";
+        assert_eq!(n(&format!("(tail (st_corr {} {}))", xs, ys)), 1000);            // 1.0
+        assert_eq!(n(&format!("(tail (nth (st_linreg {} {}) 0))", xs, ys)), 2000);  // slope 2
+        assert_eq!(n(&format!("(tail (nth (st_linreg {} {}) 1))", xs, ys)), 1000);  // intercept 1
+        assert_eq!(n(&format!("(tail (st_predict (st_linreg {} {}) (nint 10)))", xs, ys)), 21000); // 21
+    }
+
+    #[test]
+    fn findb_store_read_visualize_train() {
+        // the 12-bar sample window: 6 up-moves, mean close 108.000 read back from the store
+        assert_eq!(n("(fd_updays_of (fd_prices 0))"), 6);
+        assert_eq!(n("(tail (head (fd_stats_of (fd_prices 0))))"), 108000);
+        // the lag-1 model is trained on returns derived from the stored closes (slope sign here is +)
+        assert_eq!(n("(head (nth (fd_fit_of (fd_prices 0)) 0))"), 0);
+        // VISUALIZATION: the sparkline is a valid [%svg ...] noun built from the stored series
+        assert_eq!(run("(head (fd_spark (fd_sample 0) 12))").unwrap(), crate::knot::cord("svg"));
+        // MVCC: correcting a stored bar keeps the previous reading in its version history
+        assert_eq!(n("(len (fd_history (fd_correct (fd_sample 0) 0 (npos 101000) 0) 0))"), 2);
     }
 
     #[test]

@@ -1,0 +1,80 @@
+:: ===========================================================================
+:: stats.lat — descriptive and inferential statistics for Latte, over lists of
+:: SIGNED FIXED-POINT numbers (num.lat's [sign magnitude] pairs, scale 1000). It
+:: builds on the jetted n* arithmetic, so it stays fast, and it is the shared home
+:: for the statistics the rest of the system used to re-derive inline: ta.lat and
+:: fin.lat now route their standard deviation / standardization through here, and
+:: findb.lat summarises a price series with it. Arms are prefixed `st_`.
+::
+:: Population vs sample: `st_var`/`st_std` divide by n; `st_vars`/`st_stds` by n−1.
+:: Correlation, covariance, and regression use the population forms (the ÷n cancels
+:: in the ratios). A "column" is a list; `st_colstats` returns one [mean std] pair
+:: per column for z-score feature standardization.
+:: ===========================================================================
+import std
+import num
+core stats
+  :: ---- counts and central tendency ----------------------------------------
+  st_n    = fn [xs] -> (len xs)
+  st_sum  = fn [xs] -> (nsum xs)
+  st_mean = fn [xs] -> (nmean xs)
+
+  :: sum of squared deviations from the mean — the core of variance
+  st_ss = fn [xs] ->
+    let m = (nmean xs) in
+    (nsum (map (fn [v] -> let d = (nsub v m) in (nmul d d)) xs))
+  :: variance and standard deviation, population (÷n) and sample (÷(n−1))
+  st_var  = fn [xs] -> (ndiv (st_ss xs) (npos (mul (len xs) 1000)))
+  st_vars = fn [xs] -> (ndiv (st_ss xs) (npos (mul (sub (len xs) 1) 1000)))
+  st_std  = fn [xs] -> (nsqrt (st_var xs))
+  st_stds = fn [xs] -> (nsqrt (st_vars xs))
+
+  :: ---- extremes ------------------------------------------------------------
+  st_min   = fn [xs] -> (foldl (fn [a v] -> (nmin a v)) (head xs) (tail xs))
+  st_max   = fn [xs] -> (foldl (fn [a v] -> (nmax a v)) (head xs) (tail xs))
+  st_range = fn [xs] -> (nsub (st_max xs) (st_min xs))
+
+  :: ---- order statistics: sort by signed less-than, then median / quantile --
+  :: insert x into an ascending list (recursive, so the sort is a fold of inserts)
+  st_insert = fn [x sorted] ->
+    if (sorted == 0) then [ x 0 ]
+    else if (nlt x (head sorted)) then [ x sorted ]
+    else [ (head sorted) (st_insert x (tail sorted)) ]
+  st_sort = fn [xs] -> (foldl (fn [acc x] -> (st_insert x acc)) 0 xs)
+  st_median = fn [xs] ->
+    let s = (st_sort xs), n = (len xs), h = (div n 2) in
+    if ((mod n 2) == 1) then (nth s h)
+    else (ndiv (nadd (nth s (sub h 1)) (nth s h)) (nint 2))
+  :: the q-quantile, q an n-value in [0,1], linearly interpolated (type-7)
+  st_quantile = fn [xs q] ->
+    let s = (st_sort xs), n = (len xs) in
+    let pos = (nmul q (nint (sub n 1))) in
+    let i = (div (tail pos) 1000) in
+    if (gte (add i 1) n) then (nth s (sub n 1))
+    else let lo = (nth s i), hi = (nth s (add i 1)), frac = (nsub pos (nint i)) in
+      (nadd lo (nmul frac (nsub hi lo)))
+
+  :: ---- association and regression ------------------------------------------
+  :: population covariance: mean of (x−x̄)(y−ȳ) over the paired series
+  st_cov = fn [xs ys] ->
+    let mx = (nmean xs), my = (nmean ys) in
+    (nmean (map (fn [p] -> (nmul (nsub (head p) mx) (nsub (tail p) my))) (zip xs ys)))
+  :: Pearson correlation in [−1,1]
+  st_corr = fn [xs ys] -> (ndiv (st_cov xs ys) (nmul (st_std xs) (st_std ys)))
+  :: ordinary-least-squares line  y = slope·x + intercept
+  st_slope     = fn [xs ys] -> (ndiv (st_cov xs ys) (st_var xs))
+  st_intercept = fn [xs ys] -> (nsub (nmean ys) (nmul (st_slope xs ys) (nmean xs)))
+  st_linreg    = fn [xs ys] -> [ (st_slope xs ys) [ (st_intercept xs ys) 0 ] ]
+  st_predict   = fn [line x] -> (nadd (nmul (nth line 0) x) (nth line 1))
+
+  :: ---- standardization (z-scores) ------------------------------------------
+  :: standardize one value given a mean and standard deviation (s≈0 -> just centre)
+  st_zscore = fn [m s x] -> if (nlt s [0 1]) then (nsub x m) else (ndiv (nsub x m) s)
+  :: standardize a whole list against its own mean and std
+  st_standardize = fn [xs] -> let m = (nmean xs), s = (st_std xs) in (map (fn [x] -> (st_zscore m s x)) xs)
+  :: one [mean std] pair per column — the fit step of feature standardization
+  st_colstats = fn [cols] -> (map (fn [c] -> [ (st_mean c) (st_std c) ]) cols)
+
+  :: ---- a sample series so every arm runs as a one-liner -------------------
+  st_sample = fn [_] -> [ (nint 2) [ (nint 4) [ (nint 4) [ (nint 4) [ (nint 5) [ (nint 5) [ (nint 7) [ (nint 9) 0 ] ] ] ] ] ] ] ]
+end

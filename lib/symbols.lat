@@ -1,0 +1,91 @@
+:: ===========================================================================
+:: symbols.lat — a SYMBOL INDEX for the system's own code, built on the composed
+:: database (lib/db.lat).  Every arm of every loaded library is a record
+::   [ [1 name] [2 module] [3 arity] ]
+:: stored under the unique key `module.name` and indexed on field 1 (the name).
+:: This turns three code-navigation questions into database operations:
+::
+::   who defines `name`?        -> a secondary-index query on the name        (sy_defs)
+::   is `name` shadowed?         -> that query returns more than one module     (sy_shadowed)
+::   how did `module.name` change? -> the key's MVCC version chain               (sy_history)
+::
+:: The last question matters here because the whole system shares one flat scope:
+:: when several libraries define the same arm (the way `dot`, `step`, and `values`
+:: live in plan AND tensor AND ml), the last one loaded wins and silently shadows
+:: the rest.  An index over the surface makes that visible instead of mysterious;
+:: and because Compile re-registers a module's arms at runtime, re-indexing a
+:: redefined arm is just another versioned write the MVCC store already records.
+:: Arms are prefixed `sy_`.
+:: ===========================================================================
+import std
+import db
+core symbols
+  :: a symbol record: name, defining module, arity (parameter count; 0 for a value)
+  sy_rec = fn [name module arity] -> [ [1 name] [ [2 module] [ [3 arity] 0 ] ] ]
+  :: the unique primary key `module.name`
+  sy_key = fn [module name] -> (cat (cat module ".") name)
+
+  :: an empty index: a database indexed on field 1 (the symbol name); a high LSM
+  :: flush threshold keeps building an index over the whole codebase cheap.
+  sy_index = fn [_] -> (db_open 1 0 256)
+  :: record one arm `name` of arity `arity` defined in `module`
+  sy_put = fn [idx module name arity] -> (db_put idx (sy_key module name) (sy_rec name module arity))
+  :: build an index from a list of [module name arity] triples
+  sy_build = fn [triples] ->
+    (foldl (fn [idx t] -> (sy_put idx (nth t 0) (nth t 1) (nth t 2))) (sy_index 0) triples)
+
+  :: ---- queries --------------------------------------------------------------
+  :: every record (newest first) whose symbol name is `name` — the definers
+  sy_defs = fn [idx name] -> (db_query idx name)
+  :: just the modules that define `name`
+  sy_modulesof = fn [idx name] -> (map (fn [e] -> (db_field (db_rec e) 2)) (sy_defs idx name))
+  :: how many modules define `name`
+  sy_count = fn [idx name] -> (len (sy_defs idx name))
+  :: loobean 0 if `name` is multiply defined (shadowed in the flat scope)
+  sy_shadowed = fn [idx name] -> (lt 1 (sy_count idx name))
+  :: the arity recorded for a specific module's definition of `name` (%absent if none)
+  sy_arityin = fn [idx module name] ->
+    let g = (db_get idx (sy_key module name)) in
+    if (g == %absent) then %absent else (db_field (tail g) 3)
+
+  :: ---- runtime redefinition (Compile re-registers an arm) -------------------
+  :: re-index a redefined arm: same key, a new MVCC version
+  sy_redefine = fn [idx module name arity] -> (sy_put idx module name arity)
+  :: the version history of one module's arm — every redefinition, newest first
+  sy_history = fn [idx module name] -> (db_history idx (sy_key module name))
+  sy_revisions = fn [idx module name] -> (len (sy_history idx module name))
+
+  :: ---- a small sample index, with a deliberate three-way collision -----------
+  :: `dot` is defined in plan, tensor, and ml (exactly the real shadowing that
+  :: makes a flat-scope name resolve to whichever library loaded last).
+  sy_sample = fn [_] ->
+    (sy_build [ [ %plan [ %dot [ 2 0 ] ] ]
+                [ [ %tensor [ %dot [ 2 0 ] ] ]
+                  [ [ %ml [ %dot [ 2 0 ] ] ]
+                    [ [ %plan [ %gross [ 3 0 ] ] ]
+                      [ [ %plan [ %values [ 2 0 ] ] ]
+                        [ [ %ml [ %values [ 2 0 ] ] ]
+                          [ [ %db [ %db_get [ 2 0 ] ] ] 0 ] ] ] ] ] ] ])
+
+  :: ---- text-frame front end -------------------------------------------------
+  :: a row per defining module of `name`
+  sy_trow = fn [e] ->
+    (catall [ "<tr><td><code>" (db_field (db_rec e) 2) "</code></td><td align=right>"
+              (numtext (db_field (db_rec e) 3)) "</td></tr>" 0 ])
+  sy_rows = fn [es] -> (catall (map (fn [e] -> (sy_trow e)) es))
+  :: the shadow warning line shown when more than one module defines the name
+  sy_warn = fn [idx name] ->
+    if (sy_shadowed idx name)
+    then (catall [ "<p style=\"color:#8d1f1f\">&#9888; shadowed: " (numtext (sy_count idx name))
+                   " modules define <code>" name "</code> &mdash; in one flat scope the last loaded wins</p>" 0 ])
+    else ""
+  :: the report for one name: which modules define it, with arities, + the warning
+  sy_html = fn [idx name] ->
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">symbol <code>" name "</code></h3>"
+        "<table class=\"m\"><tr><th align=left>module</th><th>arity</th></tr>"
+        (sy_rows (sy_defs idx name))
+        "</table>" (sy_warn idx name) "</div>" 0 ]) ]
+  :: query the built-in sample index by name
+  sy_dash = fn [name] -> (sy_html (sy_sample 0) name)
+end

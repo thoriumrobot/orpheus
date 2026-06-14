@@ -94,7 +94,11 @@ core crdt
     [ [val vc] (filter (fn [e] -> (not ((vc_le (tail e) vc) == 0))) reg) ]
   mv_maximal = fn [e u] ->
     (all (fn [f] -> (not ((vc_compare (tail e) (tail f)) == %before))) u)
-  mv_merge  = fn [a b] -> let u = (append a b) in (filter (fn [e] -> (mv_maximal e u)) u)
+  :: merge two registers: keep the causally-maximal values, and (since a register is
+  :: a SET) collapse entries that are exactly equal — e.g. the same version arriving
+  :: from two replicas during read repair. Genuinely concurrent values, differing in
+  :: payload or clock, both survive as siblings.
+  mv_merge  = fn [a b] -> let u = (append a b) in (nub (filter (fn [e] -> (mv_maximal e u)) u))
   mv_values = fn [reg] -> (map (fn [e] -> (head e)) reg)
   mv_conflict = fn [reg] -> (gt (len reg) 1)        :: 0 = siblings present
 end

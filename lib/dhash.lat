@@ -45,7 +45,7 @@ core dhash
   :: bit i of n: 1 if set, 0 if clear (NOT a loobean — 1 means "set")
   dh_bit = fn [n i] -> (mod (div n (pow 2 i)) 2)
   :: set bit i of n (idempotent: setting an already-set bit is a no-op)
-  dh_set = fn [n i] -> if ((dh_bit n i) == 1) then n else (add n (pow 2 i))
+  dh_set = fn [n i] -> let p = (pow 2 i) in if ((mod (div n p) 2) == 1) then n else (add n p)
   :: number of set bits (population count)
   dh_popcount = fn [n] ->
     loop with [x = n, c = 0] :

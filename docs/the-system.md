@@ -56,9 +56,15 @@ Documents under `docs/` open as plain editable frames with `System.Edit <name>`
 
 ## Tools are texts
 
-The header links (Trade, Charts, Finance, Plan, Trace, Derive, Debug, Conlang,
-GPU, Net, News, Forge, Format, Docs) open **tool texts** — editable command
-sheets, exactly Oberon's `Draw.Tool` idea.
+The header links (Trade, Charts, Finance, Plan, Acplan, Db, Sym, Findb, Trace, Derive,
+Debug, Conlang, GPU, Net, News, Forge, Format, Docs) open **tool texts** — editable
+command sheets, exactly Oberon's `Draw.Tool` idea. (Acplan drives the accountable-planning
+tool — quadratic vote → plan → vouchers → audit — Db drives the composed database —
+state, index queries, MVCC history — Sym is a database-backed symbol index over
+the system's own code: which modules define a name, with shadowing flagged — and
+Findb stores a window of market prices in that same database and reads it back for a
+sparkline and a lag-1 model. They embed live HTML returned by pure-Latte arms in
+`lib/acplan.lat`, `lib/db.lat`, `lib/symbols.lat`, and `lib/findb.lat`.)
 
 ## Tools in pure Latte — Rust is not required
 
@@ -196,9 +202,12 @@ ones and `CloseTrack` restores what was beneath (the hierarchy is
   instead of piling into one.
 - **`System.Def`** (or the header's ≡ Def) looks up the definition of the
   **highlighted** function: select a name in any viewer and run it, and its doc
-  comment and body are fetched from whichever module defines it and printed to the
-  Log. The search itself is a Latte program (`lib/lookup.lat`); see
-  `data-intensive.md`.
+  comment and body are fetched and printed to the Log. When several libraries define
+  the same name — common in the one flat scope — it reports *all* of them and which
+  one wins by load order, then shows the winner's definition, so a name resolving to
+  an unexpected body is no longer a mystery. The extractor is a Latte program
+  (`lib/lookup.lat`); the **Sym** tool makes the same who-defines-what query
+  interactive, backed by the database (`lib/symbols.lat`); see `data-intensive.md`.
 
 ## The desktop
 

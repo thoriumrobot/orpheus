@@ -1,0 +1,301 @@
+:: ===========================================================================
+:: acplan.lat — ACCOUNTABLE PLANNING.  A self-contained tool implementing the
+:: proposal in "Materialist Economics, Part 3: Accountable Planning" (Snapshots
+:: of the Labyrinth, 2026), built on the Cockshott & Cottrell planning algorithm
+:: that `lib/plan.lat` also uses.  The plan originates with the people and the
+:: planners are accountable to them; the chain is:
+::
+::    quadratic vote  ->  final-demand vector  ->  input-output computation
+::                    ->  balanced production targets + labour values
+::                    ->  labour-time cost accounting + labour vouchers
+::                    ->  accountability check (are the demanded goods produced?)
+::
+:: Fixed point: every quantity is an integer scaled by 1000 (0.4 is 400).
+:: Quadratic-voting credits and vote counts are plain integers (not scaled).
+:: A `technology` is a list of recipes — recipe_j is column j of the input matrix
+:: A, the amounts of each good needed to make one unit of good j; `l` is the
+:: vector of direct labour per unit.  Every arm is namespaced (qv_ voting, ap_
+:: planning & accountability, led_ the labour ledger, vou_ vouchers) so the tool
+:: composes into the global scope without clashing with the numeric libraries.
+:: ===========================================================================
+import std
+core acplan
+  ap_scale = fn [_] -> 1000
+
+  :: ---- fixed-point linear algebra (the contractive affine transform) --------
+  :: Σ_i a_i b_i over two equal-length fixed-point vectors (scaled^2 result)
+  ap_dot = fn [v w] ->
+    loop with [a = v, b = w, acc = 0] :
+      if (a == 0) then acc else again((tail a), (tail b), (add acc (mul (head a) (head b)))) end
+  :: elementwise sum of two equal-length vectors
+  ap_vadd = fn [p q] ->
+    loop with [x = p, y = q, acc = 0] :
+      if (x == 0) then (reverse acc) else again((tail x), (tail y), [ (add (head x) (head y)) acc ]) end
+  :: for each recipe (column of A), dot with v then rescale (round to nearest)
+  ap_matvec = fn [v recipes] ->
+    loop with [r = recipes, acc = 0] :
+      if (r == 0) then (reverse acc)
+      else again((tail r), [ (div (add (ap_dot v (head r)) 500) (ap_scale 0)) acc ]) end
+  ap_heads = fn [m] -> (map (fn [r] -> head r) m)
+  ap_tails = fn [m] -> (map (fn [r] -> tail r) m)
+  ap_transpose = fn [m] ->
+    loop with [cur = m, acc = 0] :
+      if ((head cur) == 0) then (reverse acc) else again((ap_tails cur), [ (ap_heads cur) acc ]) end
+
+  :: =========================================================================
+  :: 2. DEMOCRATIC JOB CREATION — quadratic voting (Lalley & Weyl 2018)
+  :: -------------------------------------------------------------------------
+  :: Every citizen gets an equal budget of vote credits.  A ballot allocates a
+  :: number of votes to each goods category; casting n votes on one category
+  :: costs n*n credits.  The quadratic cost captures the INTENSITY of a
+  :: preference and protects minorities: concentrating votes is dear, so no bloc
+  :: can cheaply dominate every category, while an intense minority can pour its
+  :: whole budget into the one category it needs most.  A ballot is a vector of
+  :: vote counts, one per category.
+  qv_cost     = fn [ballot] -> (foldl (fn [a n] -> (add a (mul n n))) 0 ballot)
+  qv_afford   = fn [budget ballot] -> (lte (qv_cost ballot) budget)
+  :: the marginal credit price of the k-th vote on a category is 2k-1 (rising)
+  qv_marginal = fn [k] -> (sub (mul 2 k) 1)
+  :: TALLY: aggregate every citizen's ballot into society's total votes per
+  :: category — the popular will, the raw final demand.
+  qv_tally    = fn [ballots] -> (foldl (fn [a b] -> (ap_vadd a b)) (head ballots) (tail ballots))
+
+  :: the FINAL DEMAND VECTOR: the vote tally read as quantities of finished goods
+  :: the population wants produced (scaled into the planner's fixed point).
+  ap_demand = fn [tally] -> (map (fn [v] -> (mul v (ap_scale 0))) tally)
+
+  :: =========================================================================
+  :: 3. ACCOUNTABLE PLANNING — feed the final demand into the I/O computation
+  :: -------------------------------------------------------------------------
+  :: The bureau takes the final-demand vector set by the vote and runs the
+  :: contractive affine transform x <- y + A*x to balanced gross production
+  :: targets, and v <- l + v*A to labour values.  Both converge because a viable
+  :: economy nets a surplus (Hawkins-Simon); ~20 passes suffice.
+  ap_targets = fn [tech demand iters] ->
+    let at = (ap_transpose tech) in
+    loop with [x = demand, k = 0] :
+      if (k == iters) then x else again((ap_vadd demand (ap_matvec x at)), +(k)) end
+  ap_values = fn [tech l iters] ->
+    loop with [v = l, k = 0] :
+      if (k == iters) then v else again((ap_vadd l (ap_matvec v tech)), +(k)) end
+
+  :: the residual x - (y + A*x): zero at the fixed point, so its max entry gauges
+  :: how far the turnpike iteration has converged.
+  ap_anorm = fn [tech x] -> (ap_matvec x (ap_transpose tech))
+  ap_residual = fn [tech x demand] ->
+    let want = (ap_vadd demand (ap_anorm tech x)) in
+    (maximum (loop with [a = x, b = want, acc = 0] :
+      if (a == 0) then (reverse acc)
+      else let d = if (lt (head a) (head b)) then (sub (head b) (head a)) else (sub (head a) (head b)) in
+        again((tail a), (tail b), [ d acc ])
+      end))
+
+  :: total SOCIAL LABOUR a plan needs = Σ l_i x_i = Σ v_i y_i (equal at the fixed
+  :: point); this is the labour the government sector must mobilise.
+  ap_labour = fn [l x] -> (div (ap_dot l x) (ap_scale 0))
+
+  :: a whole plan in one call: popular demand, targets, labour values, total
+  :: labour.  Returns [ demand targets values labour ].
+  ap_plan = fn [tech l ballots iters] ->
+    let demand = (ap_demand (qv_tally ballots)),
+        targets = (ap_targets tech demand iters),
+        vals = (ap_values tech l iters),
+        lab = (ap_labour l targets) in
+    [ demand [ targets [ vals [ lab 0 ] ] ] ]
+  ap_demandof  = fn [p] -> (nth p 0)
+  ap_targetsof = fn [p] -> (nth p 1)
+  ap_valuesof  = fn [p] -> (nth p 2)
+  ap_labourof  = fn [p] -> (nth p 3)
+
+  :: ---- triage under a labour budget: maximise social harmony ----------------
+  :: When the labour budget L cannot meet every target, allocate it to maximise
+  :: Σ h(r_i), h(r) = 1-(1-r)^2 (concave), where r_i is fulfilment and cost_i =
+  :: v_i*y_i.  Marginal harmony per unit labour is 2(1-r_i)/cost_i; the optimum
+  :: equalises marginals, so we repeatedly move a parcel from the lowest-marginal
+  :: good to the highest.  This is the "necessary, not total" triage.
+  ap_fulfil = fn [li cost] ->
+    if (cost == 0) then 1000
+    else let r = (div (add (mul li 1000) (div cost 2)) cost) in if (lt 1000 r) then 1000 else r
+  ap_marg1 = fn [li cost] ->
+    if (cost == 0) then 0
+    else (div (add (mul (sub 1000 (ap_fulfil li cost)) 2000000) (div cost 2)) cost)
+  ap_margs = fn [ls costs] ->
+    loop with [l = ls, c = costs, acc = 0] :
+      if (l == 0) then (reverse acc) else again((tail l), (tail c), [ (ap_marg1 (head l) (head c)) acc ]) end
+  ap_idxmax = fn [xs] ->
+    loop with [c = xs, i = 0, bi = 0, bv = 0] :
+      if (c == 0) then bi
+      else if (lt bv (head c)) then again((tail c), +(i), i, (head c))
+      else again((tail c), +(i), bi, bv) end
+  ap_idxmin = fn [xs ls delta] ->
+    loop with [c = xs, l = ls, i = 0, bi = 0, bv = 4000000000] :
+      if (c == 0) then bi
+      else if (lt (head c) bv) then
+        if (lt (head l) delta) then again((tail c), (tail l), +(i), bi, bv)
+        else again((tail c), (tail l), +(i), i, (head c))
+      else again((tail c), (tail l), +(i), bi, bv) end
+  ap_setn = fn [xs i v] ->
+    loop with [c = xs, k = 0, acc = 0] :
+      if (c == 0) then (reverse acc) else again((tail c), +(k), [ (if (k == i) then v else (head c)) acc ]) end
+  ap_costs = fn [vals demand] ->
+    loop with [v = vals, y = demand, acc = 0] :
+      if (v == 0) then (reverse acc)
+      else again((tail v), (tail y), [ (div (mul (head v) (head y)) (ap_scale 0)) acc ]) end
+  ap_allocate = fn [vals demand budget iters] ->
+    let costs = (ap_costs vals demand),
+        total = (foldl (fn [a c] -> (add a c)) 0 costs),
+        init = (map (fn [c] -> if (total == 0) then 0 else (div (mul c budget) total)) costs),
+        delta = (div budget 200) in
+    loop with [ls = init, k = 0] :
+      if (k == iters) then ls
+      else let m = (ap_margs ls costs), hi = (ap_idxmax m), lo = (ap_idxmin m ls delta) in
+        if (hi == lo) then ls
+        else again((ap_setn (ap_setn ls lo (sub (nth ls lo) delta)) hi (add (nth ls hi) delta)), +(k))
+    end
+
+  :: =========================================================================
+  :: 6. COORDINATION OF INTERMEDIATE PRODUCTION — the labour-time ledger
+  :: -------------------------------------------------------------------------
+  :: Projects needing the same intermediate good pool support for a shared
+  :: facility and are billed at LABOUR-TIME COST, no profit margin.  When a
+  :: facility delivers `qty` of good `g`, the embodied labour v_g*qty is debited
+  :: from the consumer's labour budget and credited to the producer.  These are
+  :: accounting entries tracking embodied labour, not circulating tokens.
+  ap_embodied  = fn [vals g qty] -> (div (mul (nth vals g) qty) (ap_scale 0))
+  led_new      = fn [_] -> 0
+  led_bal      = fn [led who] -> (aget led who 0)
+  :: deliver: debit the consumer (overspending a fixed budget underflows loudly),
+  :: credit the producer — no margin added anywhere.
+  led_transfer = fn [led from to amt] ->
+    let led1 = (aput led from (sub (led_bal led from) amt)) in
+    (aput led1 to (add (led_bal led1 to) amt))
+  ap_deliver   = fn [led consumer producer vals g qty] ->
+    (led_transfer led consumer producer (ap_embodied vals g qty))
+  :: a project switches to whichever facility costs less labour per unit; the
+  :: dearer one must improve or close (0 if A is at least as cheap as B).
+  ap_cheaper   = fn [costA costB] -> (lte costA costB)
+
+  :: =========================================================================
+  :: 5. LABOUR VOUCHERS AND THE PRICE MECHANISM
+  :: -------------------------------------------------------------------------
+  :: MELT — the Monetary Expression of Labour-Time — is money per labour hour; a
+  :: good's predicted price is its labour value times the MELT (the empirical
+  :: labour-value/price regularity).
+  ap_melt   = fn [money labour] -> if (labour == 0) then 0 else (div (mul money (ap_scale 0)) labour)
+  ap_prices = fn [vals m] -> (map (fn [v] -> (div (mul v m) (ap_scale 0))) vals)
+
+  :: Labour vouchers do NOT circulate (Marx, Gotha Programme).  A voucher records
+  :: the labour a worker contributed; it is redeemed once for goods and cancelled.
+  :: It cannot be lent, invested, or accumulated — note there is deliberately no
+  :: `vou_transfer`, which is precisely what breaks the M-C-M' accumulation circuit.
+  vou_new    = fn [_] -> 0
+  vou_held   = fn [pool worker] -> (aget pool worker 0)
+  vou_issue  = fn [pool worker hours] -> (aput pool worker (add (vou_held pool worker) hours))
+  vou_redeem = fn [pool worker hours] -> (aput pool worker (sub (vou_held pool worker) hours))
+  vou_total  = fn [pool] -> (foldl (fn [a v] -> (add a v)) 0 (avals pool))
+
+  :: =========================================================================
+  :: 3 / 7 / 8. ACCOUNTABILITY — are the demanded goods being produced?
+  :: -------------------------------------------------------------------------
+  :: Per good, the shortfall is how far production falls below target; if a good
+  :: stays short by more than a statutory margin after the subsidised period,
+  :: that is the legal trigger for assigning/expropriating the means of
+  :: production to meet the demand the people voted for.
+  ap_short1 = fn [target made] -> if (lt made target) then (sub target made) else 0
+  ap_shortfalls = fn [targets made] ->
+    loop with [t = targets, m = made, acc = 0] :
+      if (t == 0) then (reverse acc) else again((tail t), (tail m), [ (ap_short1 (head t) (head m)) acc ]) end
+  :: loobean 0 if EVERY demanded good is being produced to target
+  ap_met = fn [targets made] -> (all (fn [s] -> (s == 0)) (ap_shortfalls targets made))
+  :: the goods (by index) under-supplied beyond `margin` — the collectivisation trigger
+  ap_undersupplied = fn [targets made margin] ->
+    (map (fn [p] -> (head p))
+      (filter (fn [p] -> (lt margin (tail p)))
+        (enumerate (ap_shortfalls targets made))))
+
+  :: =========================================================================
+  :: FIXTURES — a small iron / coal / corn / bread economy so the tool runs as a
+  :: one-liner.  recipe_j (column j of A) lists inputs to make one unit of good j:
+  ::   0 iron   1 coal   2 corn   3 bread        (all coefficients scaled x1000)
+  :: -------------------------------------------------------------------------
+  ap_tech = fn [_] ->
+    [ [   0 [ 200 [   0 [ 0 0 ] ] ] ]        :: make iron:  0.2 coal
+      [ [ 100 [   0 [   0 [ 0 0 ] ] ] ]      :: make coal:  0.1 iron
+        [ [  50 [ 100 [ 200 [ 0 0 ] ] ] ]    :: make corn:  0.05 iron, 0.1 coal, 0.2 corn (seed)
+          [ [ 0 [ 100 [ 500 [ 0 0 ] ] ] ] 0 ] ] ] ]   :: make bread: 0.1 coal, 0.5 corn
+  :: direct labour hours per unit: iron 1.0, coal 0.5, corn 0.8, bread 0.3
+  ap_labourvec = fn [_] -> [ 1000 [ 500 [ 800 [ 300 0 ] ] ] ]
+  :: three citizens vote (budget 30 credits) on the consumption goods corn & bread:
+  ::   c1 [0 0 2 4] cost 20   c2 [0 0 3 3] cost 18   c3 [0 0 1 5] cost 26
+  ap_ballots = fn [_] -> [ [ 0 [ 0 [ 2 [ 4 0 ] ] ] ] [ [ 0 [ 0 [ 3 [ 3 0 ] ] ] ] [ [ 0 [ 0 [ 1 [ 5 0 ] ] ] ] 0 ] ] ]
+  :: the whole accountable plan from those votes (40 turnpike iterations)
+  ap_sample = fn [_] -> (ap_plan (ap_tech 0) (ap_labourvec 0) (ap_ballots 0) 40)
+
+  :: =========================================================================
+  :: TEXT-FRAME FRONT END — arms that return [%html cord] embed as a live object
+  :: wherever their command runs (a text, the Log).  Drive them from Acplan.Tool:
+  :: edit the vote / iteration / money fields and click, or edit these arms and
+  :: Compile.  The whole front end is customizable Latte + markdown, nothing else.
+  :: -------------------------------------------------------------------------
+  ap_goodnames = fn [_] -> [ "iron" "coal" "corn" "bread" 0 ]
+  :: build one aggregate ballot that votes `corn` on good 2 and `bread` on good 3
+  ap_quickvote = fn [corn bread] -> [ [ 0 [ 0 [ corn [ bread 0 ] ] ] ] 0 ]
+
+  ap_th = fn [_] ->
+    "<tr><th align=left>good</th><th>final demand</th><th>target</th><th>labour value</th><th>price</th></tr>"
+  ap_trow = fn [name d t v p] ->
+    (catall [ "<tr><td>" name "</td><td align=right>" (fixtext d) "</td><td align=right>" (fixtext t)
+              "</td><td align=right>" (fixtext v) "</td><td align=right>" (fixtext p) "</td></tr>" 0 ])
+  ap_rows = fn [names ds ts vs ps] ->
+    loop with [n = names, d = ds, t = ts, v = vs, p = ps, acc = 0] :
+      if (n == 0) then acc
+      else again((tail n), (tail d), (tail t), (tail v), (tail p),
+                 (cat acc (ap_trow (head n) (head d) (head t) (head v) (head p))))
+    end
+
+  :: the dashboard: a plan computed from `ballots` (a list of ballots) at `iters`
+  :: turnpike passes, priced through a voucher money supply of `money` units.
+  ap_dash = fn [ballots iters money] ->
+    let plan = (ap_plan (ap_tech 0) (ap_labourvec 0) ballots iters),
+        demand = (ap_demandof plan),
+        targets = (ap_targetsof plan),
+        vals = (ap_valuesof plan),
+        labour = (ap_labourof plan),
+        melt = (ap_melt money labour),
+        prices = (ap_prices vals melt),
+        resid = (ap_residual (ap_tech 0) targets demand) in
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Accountable plan</h3>"
+        "<p style=\"color:#8a8676;margin:.2em 0\">quadratic vote &rarr; final demand &rarr; Leontief targets &rarr; labour values &middot; vouchers &middot; accountability</p>"
+        "<table class=\"m\">" (ap_th 0) (ap_rows (ap_goodnames 0) demand targets vals prices)
+        "</table><p>total social labour <b>" (fixtext labour) "</b> hours &middot; MELT <b>" (fixtext melt)
+        "</b> per hour &middot; turnpike residual " (numtext resid) " (0 = converged)</p></div>" 0 ]) ]
+
+  :: one-click dashboard from the built-in three-citizen sample
+  ap_dash0 = fn [_] -> (ap_dash (ap_ballots 0) 40 36400)
+
+  :: accountability view: compare the plan's targets against what was `produced`,
+  :: flagging every good that falls short (under-supply is the collectivisation trigger).
+  ap_auditrow = fn [name short] ->
+    (catall [ "<tr><td>" name "</td><td align=right>" (fixtext short)
+              (if (short == 0) then "</td><td style=\"color:#1a6e2a\">met</td></tr>"
+               else "</td><td style=\"color:#8d1f1f\">SHORT</td></tr>") 0 ])
+  ap_auditrows = fn [names shorts] ->
+    loop with [n = names, s = shorts, acc = 0] :
+      if (n == 0) then acc
+      else again((tail n), (tail s), (cat acc (ap_auditrow (head n) (head s))))
+    end
+  ap_audit = fn [produced] ->
+    let targets = (ap_targetsof (ap_sample 0)),
+        shorts = (ap_shortfalls targets produced),
+        under = (ap_undersupplied targets produced 0) in
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Accountability audit</h3>"
+        "<table class=\"m\"><tr><th align=left>good</th><th>shortfall</th><th>status</th></tr>"
+        (ap_auditrows (ap_goodnames 0) shorts)
+        "</table><p style=\"color:#8a8676\">goods under target: " (numtext (len under))
+        " &mdash; under-supply past the statutory margin is the legal trigger to reassign the means of production</p></div>" 0 ]) ]
+  :: scalar-argument audit so the front end can drive it from plain number fields
+  :: (the produced amounts of iron/coal/corn/bread, in the same x1000 units as the targets)
+  ap_audit4 = fn [iron coal corn bread] -> (ap_audit [ iron [ coal [ corn [ bread 0 ] ] ] ])
+end

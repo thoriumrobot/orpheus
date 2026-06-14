@@ -307,12 +307,27 @@ impl Parser {
 
     fn parse_let(&mut self) -> Result<Ast, String> {
         self.eat_kw("let")?;
-        let name = self.ident()?;
-        self.eat(&Tok::Assign)?;
-        let val = self.expr()?;
+        // one or more comma-separated bindings, evaluated in sequence (each binding
+        // sees the ones before it): `let a = x, b = (f a) in body` desugars to
+        // nested lets. Keeps deep pipelines readable instead of a `let ... in` stack.
+        let mut binds: Vec<(String, Ast)> = Vec::new();
+        loop {
+            let name = self.ident()?;
+            self.eat(&Tok::Assign)?;
+            let val = self.expr()?;
+            binds.push((name, val));
+            if matches!(self.peek(), Some(Tok::Comma)) {
+                self.next();
+                continue;
+            }
+            break;
+        }
         self.eat_kw("in")?;
-        let body = self.expr()?;
-        Ok(Ast::Let(name, Box::new(val), Box::new(body)))
+        let mut body = self.expr()?;
+        for (name, val) in binds.into_iter().rev() {
+            body = Ast::Let(name, Box::new(val), Box::new(body));
+        }
+        Ok(body)
     }
 
     fn parse_if(&mut self) -> Result<Ast, String> {
@@ -532,6 +547,24 @@ impl Parser {
                             }
                         }
                         self.eat(&Tok::RParen)?;
+                        // Short-circuit boolean connectives: `and`/`or` are lazy in
+                        // their second operand (loobean 0 = true), so a guard like
+                        // (and (gt i 0) (safe (sub i 1))) never evaluates the right
+                        // side when the left already decides. Desugar to `if`, the
+                        // language's only lazy form, at parse time — no first-class
+                        // use of `and`/`or` exists, so this is transparent.
+                        if name == "and" && args.len() == 2 {
+                            let mut it = args.into_iter();
+                            let a = it.next().unwrap();
+                            let b = it.next().unwrap();
+                            return Ok(Ast::If(Box::new(a), Box::new(b), Box::new(Ast::Lit(1))));
+                        }
+                        if name == "or" && args.len() == 2 {
+                            let mut it = args.into_iter();
+                            let a = it.next().unwrap();
+                            let b = it.next().unwrap();
+                            return Ok(Ast::If(Box::new(a), Box::new(Ast::Lit(0)), Box::new(b)));
+                        }
                         Ok(Ast::Call(name, args))
                     }
                 }
@@ -773,6 +806,14 @@ pub const RAFT_LAT: &str = include_str!("../lib/raft.lat");
 pub const DB_LAT: &str = include_str!("../lib/db.lat");
 /// Definition-lookup tool (the engine behind the GUI's `System.Def`), via `import lookup`.
 pub const LOOKUP_LAT: &str = include_str!("../lib/lookup.lat");
+/// Accountable planning (quadratic voting + Leontief planning + labour vouchers), via `import acplan`.
+pub const ACPLAN_LAT: &str = include_str!("../lib/acplan.lat");
+/// A database-backed symbol index for code navigation (who defines a name, shadowing, MVCC redefinition history), via `import symbols`.
+/// A statistics library (mean, variance, std, median, quantile, covariance, correlation, regression, z-scores) on signed fixed-point lists, via `import stats`.
+pub const STATS_LAT: &str = include_str!("../lib/stats.lat");
+pub const SYMBOLS_LAT: &str = include_str!("../lib/symbols.lat");
+/// Financial/trading price data stored in the composed database, read back for visualization (an SVG sparkline) and training (a lag-1 regression), via `import findb`.
+pub const FINDB_LAT: &str = include_str!("../lib/findb.lat");
 
 
 fn builtin_lib(name: &str) -> Option<&'static str> {
@@ -819,6 +860,10 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "raft" => Some(RAFT_LAT),
         "db" => Some(DB_LAT),
         "lookup" => Some(LOOKUP_LAT),
+        "acplan" => Some(ACPLAN_LAT),
+        "stats" => Some(STATS_LAT),
+        "symbols" => Some(SYMBOLS_LAT),
+        "findb" => Some(FINDB_LAT),
         _ => None,
     }
 }
@@ -893,10 +938,10 @@ pub fn runtime_lib_names() -> Vec<String> {
 /// scope without manual `import`s (later libraries shadow earlier ones on name clashes).
 pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
+        "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1006,10 +1051,10 @@ pub fn store_package(src: &str) -> Result<std::path::PathBuf, String> {
 /// The fixed set of built-in library names (sorted) — for listing the system's own modules.
 pub fn builtin_lib_names() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "tensor", "ml", "plot", "vec", "chess", "chessml",
+        "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb",
     ]
     .iter()
     .map(|s| s.to_string())

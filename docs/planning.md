@@ -107,3 +107,10 @@ the political question. The tool computes; it does not adjudicate that debate.
 - Shalizi, C., "In Soviet Union, Optimization Problem Solves You", 2012.
 - Cockshott, P., "Plan balancing algorithms — reply to some criticisms", blog, 2018.
 - Cockshott & Cottrell, "Mises, Kantorovich and Economic Computation" (MPRA 6063).
+
+## See also
+
+For a democratic front-end to this same computation — where the final demand is set by
+a quadratic vote rather than handed in, and production is costed in labour vouchers and
+audited against the plan — see `docs/accountable-planning.md` (the `acplan` tool, `latte
+ddia acplan`), which implements *Materialist Economics, Part 3: Accountable Planning*.

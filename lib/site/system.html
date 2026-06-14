@@ -134,6 +134,10 @@
     <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart" target="_blank">↗</a>
     <a href="#" onclick="openTool('Fin');return false" title="financial-ML tool text">Finance</a><a class="pg" href="/fin" target="_blank">↗</a>
     <a href="#" onclick="openTool('Plan');return false" title="economic-planning tool text">Plan</a><a class="pg" href="/plan" target="_blank">↗</a>
+    <a href="#" onclick="openTool('Acplan');return false" title="accountable-planning tool text: quadratic vote → plan → vouchers → audit">Acplan</a>
+    <a href="#" onclick="openTool('Db');return false" title="database tool text: state, queries, MVCC history">Db</a>
+    <a href="#" onclick="openTool('Sym');return false" title="symbol index: which modules define a name, shadowing, arities (db-backed)">Sym</a>
+    <a href="#" onclick="openTool('Findb');return false" title="financial price data in the database: sparkline, statistics, lag-1 model">Findb</a>
     <a href="#" onclick="openTool('Trace');return false" title="ray-tracer tool text">Trace</a>
     <a href="#" onclick="openTool('Derive');return false" title="Ligurian derivation tool text">Derive</a><a class="pg" href="/derive" target="_blank">↗</a>
     <a href="#" onclick="openTool('Debug');return false" title="the Loom call-tracer debugger">Debug</a>
@@ -621,7 +625,7 @@ function renderLine(text){
   return d;
 }
 function looksLikeCommand(t){
-  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
+  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|sym|findb|acplan\.|db\.|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
 }
 /* serialize ONE rendered line back to markdown */
 function lineToMarkdown(node){
@@ -691,10 +695,23 @@ function setTextContent(v, md){
       v.rich.appendChild(ph);
       while(i<lines.length && lines[i].trim()!=='```') i++;
       i++;
-      (function(ph,cmd){ runObjectCommand(cmd, function(html, isText, isErr){
-        if(isText) ph.innerHTML='<span class="note">'+esc(html)+'</span>';
-        else ph.innerHTML=html;
-      }); })(ph,cmd);
+      (function(ph,cmd){
+        var handled = runObjectCommand(cmd, function(html, isText, isErr){
+          if(isText) ph.innerHTML='<span class="note">'+esc(html)+'</span>';
+          else ph.innerHTML=html;
+        });
+        // Module.arm / eval / bare-expr commands aren't object commands — run them
+        // through the system (exactly as typing them would) so db.*, findb arms,
+        // and any package arm rehydrate live inside a text too.
+        if(!handled){
+          post('/api/run', cmd, function(out){
+            var r = richOut(out);
+            if(r){ ph.innerHTML = r.body; return; }
+            var isErr=/^!|error/i.test(out);
+            ph.innerHTML='<pre style="margin:0;font:12px/1.5 inherit;white-space:pre-wrap'+(isErr?';color:#8d1f1f':'')+'">'+esc(out)+'</pre>';
+          });
+        }
+      })(ph,cmd);
       void line;
       continue;
     }
@@ -1016,6 +1033,28 @@ function runObjectCommand(line, done){
       });
       return true;
     }
+    case 'sym': case 'symbol':
+      // the database-backed symbol index: which loaded modules define a name,
+      // their arities, and a shadow warning. Built live in lib/symbols.lat over
+      // the name's definers (see /api/symbols and System.Def).
+      fetch('/api/symbols?name='+encodeURIComponent(rest.trim()))
+        .then(function(r){ return r.text(); })
+        .then(function(h){ done(h, false); })
+        .catch(function(e){ done('symbol lookup: '+e, true, true); });
+      return true;
+    case 'findb': case 'fdb': {
+      // financial price data stored in the composed database (lib/findb.lat): a
+      // recent window is loaded into the store, then read back for an SVG sparkline
+      // + summary statistics + a lag-1 regression model (see /api/findb).
+      var fm = (rest.match(/market\s*=\s*([a-z0-9]+)/i)||[])[1];
+      var fcount = (rest.match(/\bn\s*=\s*(\d+)/i)||[])[1];
+      if(!fm || !fcount){ var fp = rest.trim().split(/\s+/); if(!fm) fm = fp[0]||'btc'; if(!fcount) fcount = fp[1]||'24'; }
+      fetch('/api/findb?market='+encodeURIComponent(fm)+'&n='+encodeURIComponent(fcount))
+        .then(function(r){ return r.text(); })
+        .then(function(h){ done(h, false); })
+        .catch(function(e){ done('findb: '+e, true, true); });
+      return true;
+    }
     default: return false; // not an object command
   }
 }
@@ -1218,6 +1257,7 @@ function exec(line, fromViewer, ctx){
              trade:'Trade.Out',advise:'Trade.Out',fin:'Fin.Out',gpu:'Gpu.Out',
              derive:'Derive.Out',plan:'Plan.Out',drawing:'Draw.Out',
              phono:'Phono.Out',soundlib:'Sound.Out',soundchanges:'Sound.Out',
+             sym:'Sym.Out',symbol:'Sym.Out',findb:'Findb.Out',fdb:'Findb.Out',
              debug:'Debug.Out',trace2:'Debug.Out'};
   if(OUT[headTok]){
     if(sink){
@@ -1556,6 +1596,100 @@ var TOOLS = {
 '\n'+
 'For a larger or saved economy, the /plan page has a full editor; the spec\n'+
 'format and the calculation debate are in the manual above.\n',
+ Acplan:
+'# Acplan.Tool — accountable planning\n'+
+'*Materialist Economics, Part 3*: the people vote on what to produce (quadratic\n'+
+'voting), the vote becomes the final-demand vector, the Leontief computation\n'+
+'(x = y + A\u00b7x) turns it into balanced production targets and labour values,\n'+
+'and the plan is priced in labour vouchers and audited. All arithmetic in\n'+
+'lib/acplan.lat; each button embeds a live dashboard below it.\n'+
+'\n'+
+'[The three-citizen sample plan](run: acplan.ap_dash0) [Open the manual](run: System.Edit accountable-planning)\n'+
+'\n'+
+'## Vote, then plan\n'+
+'A single aggregate ballot: how many votes the electorate casts for corn and for\n'+
+'bread (the two consumption goods). Iterations is the turnpike pass count; money\n'+
+'is the voucher supply that sets the MELT (money per labour hour).\n'+
+'corn votes [field: corn=6]  bread votes [field: bread=12]  iterations [field: iters=40]  money supply [field: money=36400]\n'+
+'[Plan from this vote](run: acplan.ap_dash (ap_quickvote $corn $bread) $iters $money)\n'+
+'\n'+
+'## Accountability audit\n'+
+'Enter what each industry actually produced (in the same \u00d71000 units the\n'+
+'targets use: 12000 = 12 units). Any good below its target is flagged SHORT —\n'+
+'the legal trigger to reassign the means of production.\n'+
+'iron [field: piron=1041]  coal [field: pcoal=2908]  corn [field: pcorn=15000]  bread [field: pbread=10000]\n'+
+'[Audit production](run: acplan.ap_audit4 $piron $pcoal $pcorn $pbread)\n'+
+'\n'+
+'## Full electorate (edit the ballots)\n'+
+'Each ballot is [iron coal corn bread] votes; quadratic cost is the sum of\n'+
+'squares. Middle-click to run with three custom citizens:\n'+
+'acplan.ap_dash [ [0 [0 [2 [4 0]]]] [ [0 [0 [3 [3 0]]]] [ [0 [0 [1 [5 0]]]] 0 ] ] ] 40 36400\n',
+ Db:
+'# Db.Tool — the composed database\n'+
+'LSM storage + write-ahead-log recovery + Bloom filter + secondary index + MVCC\n'+
+'snapshots + serializable transactions, all in lib/db.lat. Each button embeds a\n'+
+'live view below it. The sample is three users keyed u1\u2013u3, indexed on city.\n'+
+'\n'+
+'[Show the database state](run: db.db_dash0) [Open the manual](run: System.Edit data-intensive) [Interactive tutorial](run: System.OpenText database-tutorial)\n'+
+'\n'+
+'## Add a row (a functional update — the sample is immutable)\n'+
+'key [field: key=%u4]  name [field: name=%dave]  city [field: city=%nyc]\n'+
+'[Add row & show state](run: db.db_dash (db_put (db_sample 0) $key [[1 $name] [[2 $city] 0]]) %u0 %u9)\n'+
+'\n'+
+'## Query the secondary index\n'+
+'city [field: qcity=%nyc]\n'+
+'[Query by city](run: db.db_queryhtml (db_sample 0) $qcity)\n'+
+'\n'+
+'## Time-travel — the MVCC version history of one key\n'+
+'Updating u1 adds a version; the old snapshot is still readable. Here u1 is moved\n'+
+'to a new city, then its whole history is shown (newest first):\n'+
+'key [field: hkey=%u1]\n'+
+'[Version history](run: db.db_historyhtml (db_put (db_sample 0) %u1 [[1 %alice2] [[2 %la] 0]]) $hkey)\n'+
+'\n'+
+'Field values can\u2019t contain `]`, so list arguments (records, ballots) are\n'+
+'typed into the command lines directly — edit any line above and middle-click it.\n',
+ Sym:
+'# Sym.Tool - the symbol index\n'+
+'Every arm of every loaded library, indexed by name in the composed database\n'+
+'(lib/symbols.lat). Ask which modules define a name: when more than one does they\n'+
+'share one flat scope, so the last library loaded WINS and silently shadows the\n'+
+'rest. Each lookup embeds a live table below it.\n'+
+'\n'+
+'name [field: name=transpose]\n'+
+'[Look up symbol](run: sym $name)\n'+
+'\n'+
+'## Known collisions in the live system\n'+
+'[sym transpose](run: sym transpose) [sym matvec](run: sym matvec) [sym square](run: sym square) [sym db_get single](run: sym db_get)\n'+
+'\n'+
+'## The curated sample index (pure Latte, no host scan)\n'+
+'A small hand-built index with a deliberate three-way collision on dot, queried\n'+
+'entirely in Latte through the database:\n'+
+'[Sample: dot](run: symbols.sy_dash %dot) [Sample: gross single](run: symbols.sy_dash %gross)\n'+
+'\n'+
+'## System.Def\n'+
+'Highlight any name in a viewer and run System.Def (the header bar). It now reports\n'+
+'every module that defines the name and which one wins by load order, not just the\n'+
+'first match. The same index idea, applied to the live full system.\n',
+ Findb:
+'# Findb.Tool \u2014 financial data in the database\n'+
+'A recent price window is stored as records in the composed database (lib/findb.lat\n'+
+'on lib/db.lat), then read back out for an SVG sparkline, summary statistics, and a\n'+
+'lag-1 regression model \u2014 the stored data drives both the visualization and the\n'+
+'training. The statistics come from lib/stats.lat. Keep the window small: the\n'+
+'immutable store is built in the interpreter, so this is a dashboard\u2019s worth of\n'+
+'bars, not the multi-year history (that lives behind the Chart tool).\n'+
+'\n'+
+'market [field: market=btc]  bars [field: n=24]\n'+
+'[Load & analyse](run: findb market=$market n=$n) [Ethereum, 30 bars](run: findb market=eth n=30)\n'+
+'\n'+
+'## The Latte sample window (stored, read back, analysed in-language)\n'+
+'Twelve closes loaded into the store, then summarised straight from Latte:\n'+
+'[Sample dashboard](run: findb.fd_dash (fd_sample 0) 12) [Just the sparkline](run: findb.fd_spark (fd_sample 0) 12)\n'+
+'\n'+
+'## The model trained on the stored data\n'+
+'A least-squares fit of tomorrow\u2019s return on today\u2019s over the stored window,\n'+
+'returned as [slope intercept correlation] (a negative slope is mean reversion):\n'+
+'[Fit the lag-1 model](run: findb.fd_fit (fd_sample 0) 12)\n',
  Trace:
 '# Trace.Tool — the ray tracer\n'+
 'Written in Latte, Anvil-compiled: checkered ground, sky, key + fill lights, shadows,\n'+

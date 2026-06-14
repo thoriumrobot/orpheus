@@ -1,0 +1,150 @@
+:: ===========================================================================
+:: findb.lat — financial/trading price data stored in the composed database
+:: (lib/db.lat), then read back out for VISUALIZATION (an SVG sparkline) and for
+:: TRAINING a small model (a lag-1 regression on returns), summarised with the
+:: statistics library (lib/stats.lat). A bar is a record
+::    [ [1 day] [2 close] [3 dir] ]      close an n-value, dir 0=up 1=down
+:: keyed by day (`d<i>`) and indexed on the day field, so each posting list holds
+:: one bar and loading a window stays cheap. The series is then genuinely READ
+:: FROM THE DATABASE (a point read per day) for everything downstream — the db is
+:: the single source of truth, and MVCC lets a bar be corrected with history.
+:: A recent window (tens of bars) is the intended scale: the immutable store is
+:: built in the interpreter, so this is a live dashboard's worth of data, not the
+:: whole multi-year history (that stays in the Rust series behind /api/marketchart).
+:: Arms are prefixed `fd_`.
+:: ===========================================================================
+import std
+import db
+import stats
+core findb
+  :: ---- the bar record and the store ----------------------------------------
+  fd_key = fn [day] -> (cat "d" (numtext day))
+  fd_rec = fn [day close dir] -> [ [1 day] [ [2 close] [ [3 dir] 0 ] ] ]
+  :: a store indexed on the day field (unique keys -> singleton posting lists)
+  fd_open = fn [_] -> (db_open 1 0 4096)
+  fd_put  = fn [fd day close dir] -> (db_put fd (fd_key day) (fd_rec day close dir))
+
+  :: load a list of closes (n-values) into the database, tagging each bar up/down
+  :: relative to the previous close. Returns the database.
+  fd_load = fn [closes] ->
+    loop with [c = closes, day = 0, prev = (head closes), fd = (fd_open 0)] :
+      if (c == 0) then fd
+      else let cl = (head c) in
+        let dir = (if (nlt cl prev) then 1 else 0) in
+        again((tail c), (add day 1), cl, (fd_put fd day cl dir))
+    end
+
+  :: ---- reading the series BACK OUT of the database --------------------------
+  :: the bar stored for a day, or %absent
+  fd_bar    = fn [fd day] -> (db_get fd (fd_key day))
+  fd_close  = fn [fd day] -> (db_field (tail (fd_bar fd day)) 2)
+  fd_dir    = fn [fd day] -> (db_field (tail (fd_bar fd day)) 3)
+  :: the close series for days [0,n) read one point at a time from the store
+  fd_closes = fn [fd n] ->
+    loop with [day = 0, acc = 0] :
+      if (day == n) then (reverse acc)
+      else again((add day 1), [ (fd_close fd day) acc ])
+    end
+  :: the raw fixed-point magnitudes (positive prices) — for plotting / counting
+  fd_mags = fn [fd n] -> (map (fn [c] -> (tail c)) (fd_closes fd n))
+  :: simple daily returns (in %, ×1000) from the stored closes
+  fd_returns = fn [fd n] ->
+    let cs = (fd_closes fd n) in
+    loop with [c = cs, acc = 0] :
+      if ((tail c) == 0) then (reverse acc)
+      else let a = (head c), b = (head (tail c)) in
+        again((tail c), [ (nmul (nint 100) (ndiv (nsub b a) a)) acc ])
+    end
+
+  :: ---- MVCC: correcting a bar keeps the old reading in history -------------
+  fd_correct = fn [fd day close dir] -> (fd_put fd day close dir)
+  fd_history = fn [fd day] -> (db_history fd (fd_key day))
+
+  :: ---- analytics, computed on a close series (read once from the database) --
+  :: simple daily returns (%, ×1000) of a close list
+  fd_rets_of = fn [cs] ->
+    loop with [c = cs, acc = 0] :
+      if ((tail c) == 0) then (reverse acc)
+      else let a = (head c), b = (head (tail c)) in
+        again((tail c), [ (nmul (nint 100) (ndiv (nsub b a) a)) acc ])
+    end
+  fd_stats_of = fn [cs] -> [ (st_mean cs) (st_std cs) ]          :: [ mean std ]
+  fd_vol_of   = fn [cs] -> (st_std (fd_rets_of cs))               :: realized vol
+  :: up days = closes that rose vs the previous one
+  fd_updays_of = fn [cs] ->
+    loop with [c = cs, n = 0] :
+      if ((tail c) == 0) then n
+      else again((tail c), (if (nlt (head c) (head (tail c))) then (add n 1) else n))
+    end
+  :: TRAINING: a lag-1 least-squares fit of tomorrow's return on today's, over the
+  :: returns derived from the stored closes. [ slope intercept correlation ];
+  :: a negative slope is mean reversion, the correlation its strength. Covariance,
+  :: variance, and the means are each computed once and shared.
+  fd_fitrs = fn [rs] ->
+    let x = (take (sub (len rs) 1) rs), y = (tail rs) in
+    let mx = (nmean x), my = (nmean y) in
+    let cov = (st_cov x y), vx = (st_var x), sy = (st_std y) in
+    let slope = (ndiv cov vx) in
+    [ slope [ (nsub my (nmul slope mx)) [ (ndiv cov (nmul (nsqrt vx) sy)) 0 ] ] ]
+  fd_fit_of = fn [cs] -> (fd_fitrs (fd_rets_of cs))
+  :: prediction for the day after the last close, given the fitted line and returns
+  fd_fcastrs = fn [line rs] -> (st_predict [ (nth line 0) [ (nth line 1) 0 ] ] (nth rs (sub (len rs) 1)))
+  fd_forecast_of = fn [cs] -> let rs = (fd_rets_of cs) in (fd_fcastrs (fd_fitrs rs) rs)
+
+  :: database-reading wrappers (read the whole window once, then analyse)
+  fd_returns = fn [fd n] -> (fd_rets_of (fd_closes fd n))
+  fd_stats   = fn [fd n] -> (fd_stats_of (fd_closes fd n))
+  fd_vol     = fn [fd n] -> (fd_vol_of (fd_closes fd n))
+  fd_updays  = fn [fd n] -> (fd_updays_of (fd_closes fd n))
+  fd_fit     = fn [fd n] -> (fd_fit_of (fd_closes fd n))
+  fd_forecast = fn [fd n] -> (fd_forecast_of (fd_closes fd n))
+
+  :: ---- VISUALIZATION: an SVG sparkline of a close series -------------------
+  fd_pt = fn [i y lo span n] ->
+    let px = (div (mul i 318) (max 1 (sub n 1))) in
+    let py = (sub 58 (div (mul (sub y lo) 56) span)) in
+    (catall [ (numtext (add px 1)) "," (numtext (add py 1)) 0 ])
+  fd_sparkof = fn [ys] ->
+    let n = (len ys) in
+    let lo = (foldl (fn [a v] -> (min a v)) (head ys) (tail ys)) in
+    let hi = (foldl (fn [a v] -> (max a v)) (head ys) (tail ys)) in
+    let span = (max 1 (sub hi lo)) in
+    [ %svg (catbal [
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"60\" viewBox=\"0 0 320 60\">"
+        "<polyline fill=\"none\" stroke=\"#5059c8\" stroke-width=\"1.5\" points=\""
+        (joincords " " (map (fn [p] -> (fd_pt (head p) (tail p) lo span n)) (enumerate ys)))
+        "\"/></svg>" 0 ]) ]
+  :: the magnitudes (positive prices) of a close list, for plotting
+  fd_magsof = fn [cs] -> (map (fn [c] -> (tail c)) cs)
+  fd_spark = fn [fd n] -> (fd_sparkof (fd_magsof (fd_closes fd n)))
+
+  :: ---- a dashboard: read the window once, then sparkline + stats + model ---
+  fd_dashof = fn [cs] ->
+    let rs = (fd_rets_of cs) in
+    let st = (fd_stats_of cs), line = (fd_fitrs rs) in
+    let spark = (tail (fd_sparkof (fd_magsof cs))) in
+    [ %html (catbal [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Price window from the database</h3>"
+        "<p style=\"color:#8a8676;margin:.2em 0\">" (numtext (len cs)) " bars stored as records, read back from the store &middot; lib/findb.lat on lib/db.lat</p>"
+        spark
+        "<table class=\"m\"><tr><th align=left>statistic</th><th>value</th></tr>"
+        "<tr><td>mean close</td><td align=right>" (fixsigned (head st)) "</td></tr>"
+        "<tr><td>std dev (close)</td><td align=right>" (fixsigned (tail st)) "</td></tr>"
+        "<tr><td>realized vol (return %)</td><td align=right>" (fixsigned (st_std rs)) "</td></tr>"
+        "<tr><td>up days / total</td><td align=right>" (numtext (fd_updays_of cs)) " / " (numtext (len cs)) "</td></tr>"
+        "<tr><td>lag-1 slope (mean reversion &lt; 0)</td><td align=right>" (fixsigned (nth line 0)) "</td></tr>"
+        "<tr><td>return autocorrelation</td><td align=right>" (fixsigned (nth line 2)) "</td></tr>"
+        "<tr><td>next-day forecast (%)</td><td align=right>" (fixsigned (fd_fcastrs line rs)) "</td></tr>"
+        "</table></div>" 0 ]) ]
+  fd_dash = fn [fd n] -> (fd_dashof (fd_closes fd n))
+
+  :: render a signed fixed-point n-value [s mag] as text, with a leading minus
+  fixsigned = fn [x] -> if ((head x) == 1) then (cat "-" (fixtext (tail x))) else (fixtext (tail x))
+
+  :: ---- a sample window so every arm runs as a one-liner -------------------
+  :: twelve closes (n-values) with a clear up-then-down shape
+  fd_prices = fn [_] ->
+    [ (npos 100000) [ (npos 102000) [ (npos 105000) [ (npos 104000) [ (npos 108000) [ (npos 111000)
+      [ (npos 109000) [ (npos 112000) [ (npos 115000) [ (npos 113000) [ (npos 110000) [ (npos 107000) 0 ] ] ] ] ] ] ] ] ] ] ] ]
+  fd_sample = fn [_] -> (fd_load (fd_prices 0))
+end

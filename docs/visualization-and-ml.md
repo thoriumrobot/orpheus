@@ -361,6 +361,25 @@ has no easy linear signal at this horizon. `latte fin gold` also writes `gold-fi
 out-of-sample equity of the strategy against buy-and-hold. The deliverable is a working, leak-aware
 pipeline — not a profit machine, and the tool says so.
 
+### Statistics and the database, shared
+
+Two pieces sit underneath this pipeline. `lib/stats.lat` is a statistics library
+on signed fixed-point lists — mean, variance, standard deviation, median and
+quantiles, covariance, Pearson correlation, least-squares regression, and z-score
+standardization. It is the shared home for the numbers the pipeline used to derive
+inline: `fin.lat`'s `nstd` and per-column `colstats` (the z-score fit) and
+`ta.lat`'s `nstd` now route through `st_std`/`st_colstats`, so there is one tested
+implementation instead of three copies.
+
+`lib/findb.lat` then stores a price window *in the composed database* (`lib/db.lat`)
+and reads it back to drive both halves of this document at once: an `[%svg]`
+sparkline (visualization) and a lag-1 least-squares model on the returns
+(training), each computed from what the store returns, each summarised with
+`stats.lat`. The **Findb** tool and `findb market=… n=…` run it over a live market
+window; `latte ddia findb` runs the sample. See
+[data-intensive.md](data-intensive.md) for the storage details and the honest note
+on why the window is kept small.
+
 ---
 
 ## A graphics library (`lib/gfx.lat`)

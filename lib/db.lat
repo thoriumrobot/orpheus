@@ -1,31 +1,31 @@
 :: ===========================================================================
-:: db.lat — a small but real DATABASE assembled from the data-intensive parts.
+:: db.lat — a database assembled from the data-intensive parts, deep enough to
+:: show the techniques the way Designing Data-Intensive Applications presents them.
+:: It is the through-line of DDIA Parts I–II in one module. The layers:
 ::
-:: Each technique in this collection is a layer of a database; this module wires
-:: them into one engine so you can watch them cooperate (DDIA, the whole arc):
+::   STORAGE (Ch.3)        an LSM-tree holds primary key -> a VERSION CHAIN.
+::   DURABILITY (Ch.3)     every mutation is appended to a write-ahead log first;
+::                         db_recover replays the log onto a fresh db (crash recovery).
+::   NEGATIVE LOOKUPS(Ch3) a Bloom filter answers "definitely absent" before any read.
+::   SECONDARY INDEX (Ch3) a second LSM maps an indexed field value -> primary keys,
+::                         kept correct as rows are updated and deleted.
+::   ENCODING (Ch.4)       values are tagged records, evolved through a reader schema.
+::   PARTITIONING (Ch.6)   a consistent-hash ring routes a key to its shard; the
+::                         local-vs-global secondary-index trade-off is spelled out.
+::   MVCC (Ch.7)           each key keeps a chain of [ts value] versions. A reader at
+::                         snapshot timestamp T sees the newest version with ts <= T —
+::                         a consistent snapshot, and time-travel for free.
+::   SERIALIZABLE TXNS(Ch7) a transaction reads at its snapshot and commits only if no
+::                         key it READ has a newer committed version (SSI / first-
+::                         committer-wins) — which is what stops write skew.
+::   LEADERLESS REPL.(Ch5) clu_* : N replicas, quorum W/R, version-vector conflict
+::                         detection (siblings) via the MV-Register CRDT, and read repair.
+::   ATOMIC COMMIT (Ch.9)  tpc_* : two-phase commit — a transaction across shards
+::                         commits iff every participant votes yes.
 ::
-::   * STORAGE   (Ch.3) — an LSM-tree holds primary key -> record.
-::   * NEGATIVE LOOKUPS (Ch.3) — a Bloom filter answers "definitely absent" before
-::                  the engine ever touches a run, so a miss costs no read.
-::   * SECONDARY INDEX (Ch.3) — a second LSM maps an indexed field's value -> the
-::                  list of primary keys that carry it, so you can query by non-key.
-::   * ENCODING  (Ch.4) — values are tagged records; reads pass them through a
-::                  reader schema, so an old row missing a new field gets a default
-::                  and a row with an unknown field still loads (schema evolution).
-::   * PARTITIONING (Ch.6) — a consistent-hash ring routes a key to its shard.
-::   * TRANSACTIONS (Ch.7) — optimistic concurrency control: a transaction reads a
-::                  consistent snapshot (free, because a db value is immutable) and
-::                  commits only if nothing it READ changed underneath it. That
-::                  read-set validation is what makes snapshot isolation serializable
-::                  and is what stops write skew.
-::
-:: A db value is the 7-tuple [ store index bloom idxtag rschema ts vers ]:
-::   store   = primary LSM (pk -> record)        index = secondary LSM (fieldval -> [pk..])
-::   bloom   = Bloom filter over primary keys     idxtag = which record field is indexed
-::   rschema = reader schema for evolution        ts     = monotonic write counter
-::   vers    = assoc list pk -> last-write ts (the per-key version OCC validates against)
-:: A record is a wire-style field list: [ [tag value] [tag value] .. 0 ].
-:: Arms prefixed `db_`.
+:: A db value is [ store index bloom idxtag rschema ts wal ].
+:: A record is a wire field list [ [tag value] .. 0 ]. A version chain is a list of
+:: [ts value] pairs, newest first; value is a record or the atom %tomb (a deletion).
 :: ===========================================================================
 import std
 import dhash
@@ -33,120 +33,270 @@ import lsm
 import bloom
 import wire
 import chash
+import vclock
+import crdt
+import quorum
 core db
   :: ---- the db tuple and its accessors --------------------------------------
-  db_make = fn [store index bloom idxtag rschema ts vers] ->
-    [ store [ index [ bloom [ idxtag [ rschema [ ts [ vers 0 ] ] ] ] ] ] ]
+  db_make = fn [store index bloom idxtag rschema ts wal] ->
+    [ store [ index [ bloom [ idxtag [ rschema [ ts [ wal 0 ] ] ] ] ] ] ]
   db_store   = fn [d] -> (nth d 0)
   db_index   = fn [d] -> (nth d 1)
   db_bloom   = fn [d] -> (nth d 2)
   db_idxtag  = fn [d] -> (nth d 3)
   db_rschema = fn [d] -> (nth d 4)
   db_ts      = fn [d] -> (nth d 5)
-  db_vers    = fn [d] -> (nth d 6)
+  db_wal     = fn [d] -> (nth d 6)
 
-  :: open a database: index field `idxtag`, evolve reads through `rschema`
-  :: (pass 0 for no schema), LSM flush threshold `thresh`.
+  :: open a database: index field `idxtag`, evolve reads through `rschema` (0 = none),
+  :: LSM flush threshold `thresh`.
   db_open = fn [idxtag rschema thresh] ->
     (db_make (lsm_new thresh) (lsm_new thresh) (bloom_make 1024 4) idxtag rschema 0 0)
 
-  :: ---- tiny helpers --------------------------------------------------------
-  :: the value of field `tag` in a record (0 if the record has no such field)
-  db_field = fn [rec tag] -> let f = (w_find rec tag) in if (f == 0) then 0 else (tail f)
-  :: unwrap an lsm result: [%val v] -> v, %absent -> 0
-  db_unwrap = fn [g] -> if (g == %absent) then 0 else (tail g)
-  :: a per-key version map is an assoc list [ [pk ts] .. 0 ]
-  db_vget = fn [vers pk] ->
-    loop with [c = vers] :
-      if (c == 0) then 0
-      else if ((head (head c)) == pk) then (tail (head c))
+  :: ---- MVCC version chains (Ch.7) ------------------------------------------
+  :: a chain is [ [ts val] .. ] newest first. The value visible at snapshot `ts` is
+  :: the newest version stamped at or before it.
+  chain_at = fn [chain ts] ->
+    loop with [c = chain] :
+      if (c == 0) then %none
+      else if (lte (head (head c)) ts) then (tail (head c))
       else again((tail c))
     end
-  db_vset = fn [vers pk ts] ->
-    loop with [c = vers, acc = 0] :
-      if (c == 0) then [ [pk ts] (reverse acc) ]
-      else if ((head (head c)) == pk) then (append (reverse acc) [ [pk ts] (tail c) ])
-      else again((tail c), [ (head c) acc ])
-    end
-  :: add / drop a primary key from a secondary-index posting list
-  db_addpk = fn [pks pk] -> if ((member pk pks) == 0) then pks else [ pk pks ]
-  db_delpk = fn [pks pk] -> (filter (fn [x] -> if (x == pk) then 1 else 0) pks)
+  :: the latest commit timestamp on a chain (0 if empty) — the per-key version SSI checks
+  chain_ts = fn [chain] -> if (chain == 0) then 0 else (head (head chain))
 
-  :: ---- writes --------------------------------------------------------------
-  :: insert/overwrite record `rec` under primary key `pk`. Updates the primary
-  :: store, the Bloom filter, the secondary index posting list, and the version map.
+  :: ---- tiny helpers --------------------------------------------------------
+  :: the value of field `tag` in a record, or %none if the record lacks it
+  db_field = fn [rec tag] -> let f = (w_find rec tag) in if (f == 0) then %none else (tail f)
+  :: unwrap an lsm result: [%val v] -> v, %absent -> 0
+  db_unwrap = fn [g] -> if (g == %absent) then 0 else (tail g)
+  :: the version chain stored under a key (0 if the key was never written)
+  db_chain = fn [d pk] -> (db_unwrap (lsm_get (db_store d) pk))
+  :: the latest commit timestamp for a key (0 if absent)
+  db_keyts = fn [d pk] -> (chain_ts (db_chain d pk))
+
+  :: secondary-index posting lists: indexed field value -> list of primary keys
+  db_idxget = fn [index fv] -> (db_unwrap (lsm_get index fv))
+  db_addpk  = fn [pks pk] -> if ((member pk pks) == 0) then pks else [ pk pks ]
+  db_delpk  = fn [pks pk] -> (filter (fn [x] -> if (x == pk) then 1 else 0) pks)
+  db_idxadd = fn [index fv pk] -> (lsm_put index fv (db_addpk (db_idxget index fv) pk))
+  db_idxdel = fn [index fv pk] -> (lsm_put index fv (db_delpk (db_idxget index fv) pk))
+  :: move `pk` from its old indexed value's posting list to the new one. Deleting a
+  :: row (newrec %tomb) only removes it; a new row (oldrec %none) only adds it.
+  db_reindex = fn [index idxtag pk oldrec newrec] ->
+    let oldfv = if (or (oldrec == %none) (oldrec == %tomb)) then %none else (db_field oldrec idxtag),
+        newfv = if (or (newrec == %none) (newrec == %tomb)) then %none else (db_field newrec idxtag),
+        i1 = if (oldfv == %none) then index else (db_idxdel index oldfv pk) in
+    if (newfv == %none) then i1 else (db_idxadd i1 newfv pk)
+
+  :: ---- the core state transition (no logging) ------------------------------
+  :: append a new version to `pk` at timestamp `ts`, refresh the Bloom filter, and
+  :: keep the secondary index in step. `op` is %put (val is the record) or %del.
+  db_apply = fn [d op pk val ts] ->
+    let oldchain = (db_chain d pk),
+        oldrec = (chain_at oldchain (db_ts d)),
+        storeval = if (op == %put) then val else %tomb,
+        store2 = (lsm_put (db_store d) pk [ [ts storeval] oldchain ]),
+        bloom2 = (bloom_add (db_bloom d) pk),
+        index2 = (db_reindex (db_index d) (db_idxtag d) pk oldrec storeval) in
+    (db_make store2 index2 bloom2 (db_idxtag d) (db_rschema d) ts (db_wal d))
+
+  :: ---- durability: write-ahead log (Ch.3) ----------------------------------
+  :: a log entry is [ op pk val ts ]. We append to the log BEFORE applying, so the
+  :: log is the source of truth; the in-memory state is a cache the log can rebuild.
+  db_logentry = fn [d e] ->
+    (db_make (db_store d) (db_index d) (db_bloom d) (db_idxtag d) (db_rschema d) (db_ts d)
+             (append (db_wal d) [ e 0 ]))
+
+  :: ---- writes (log, then apply) --------------------------------------------
   db_put = fn [d pk rec] ->
     let ts1 = (add (db_ts d) 1) in
-    let store2 = (lsm_put (db_store d) pk rec) in
-    let bloom2 = (bloom_add (db_bloom d) pk) in
-    let fv = (db_field rec (db_idxtag d)) in
-    let cur = (db_unwrap (lsm_get (db_index d) fv)) in
-    let index2 = (lsm_put (db_index d) fv (db_addpk cur pk)) in
-    let vers2 = (db_vset (db_vers d) pk ts1) in
-    (db_make store2 index2 bloom2 (db_idxtag d) (db_rschema d) ts1 vers2)
-
-  :: delete a key: write a tombstone in the primary store and remove the key from
-  :: its secondary posting list. (The Bloom filter cannot un-set a bit, so a
-  :: deleted key may still "test possibly-present" — a false positive that costs
-  :: one wasted store read, never a wrong answer.)
+    (db_apply (db_logentry d [ %put [ pk [ rec [ ts1 0 ] ] ] ]) %put pk rec ts1)
+  :: delete: append a tombstone version (MVCC keeps the history). The Bloom filter
+  :: cannot un-set a bit, so a deleted key may still test "possibly present" — at
+  :: worst one wasted read of a chain whose visible version is the tombstone.
   db_delete = fn [d pk] ->
-    let rec = (db_unwrap (lsm_get (db_store d) pk)) in
-    let fv = (db_field rec (db_idxtag d)) in
-    let store2 = (lsm_del (db_store d) pk) in
-    let cur = (db_unwrap (lsm_get (db_index d) fv)) in
-    let index2 = (lsm_put (db_index d) fv (db_delpk cur pk)) in
     let ts1 = (add (db_ts d) 1) in
-    (db_make store2 index2 (db_bloom d) (db_idxtag d) (db_rschema d) ts1 (db_vset (db_vers d) pk ts1))
+    (db_apply (db_logentry d [ %del [ pk [ %tomb [ ts1 0 ] ] ] ]) %del pk %tomb ts1)
 
-  :: ---- reads ---------------------------------------------------------------
-  :: point read. The Bloom filter shortcuts a guaranteed miss (no store read at
-  :: all); otherwise fetch the record and, if a reader schema is set, evolve it.
-  db_get = fn [d pk] ->
-    if ((bloom_test (db_bloom d) pk) == 1) then %absent           :: definitely absent
-    else let g = (lsm_get (db_store d) pk) in
-      if (g == %absent) then %absent
-      else let rec = (tail g) in
-        if ((db_rschema d) == 0) then [ %rec rec ] else [ %rec (w_read rec (db_rschema d)) ]
+  :: CRASH RECOVERY: replay a write-ahead log onto a fresh db. Replaying in order
+  :: reconstructs every chain, the index, the Bloom filter, and the ts counter —
+  :: so (db_recover (db_open ..) (db_wal d)) reads identically to `d`.
+  db_recover = fn [d0 wal] ->
+    (foldl (fn [d e] -> (db_apply d (nth e 0) (nth e 1) (nth e 2) (nth e 3))) d0 wal)
 
-  :: did the Bloom filter let us skip the store entirely for this key? (0 = skipped)
+  :: ---- reads (MVCC snapshot) -----------------------------------------------
+  :: read `pk` as of snapshot timestamp `ts`. The Bloom filter shortcuts a key that
+  :: was never written; a tombstone or a not-yet-existing version reads as %absent.
+  db_getat = fn [d pk ts] ->
+    if ((bloom_test (db_bloom d) pk) == 1) then %absent
+    else let chain = (db_chain d pk) in
+      if (chain == 0) then %absent
+      else let v = (chain_at chain ts) in
+        if (or (v == %none) (v == %tomb)) then %absent
+        else if ((db_rschema d) == 0) then [ %rec v ] else [ %rec (w_read v (db_rschema d)) ]
+  :: a point read at the latest committed snapshot
+  db_get = fn [d pk] -> (db_getat d pk (db_ts d))
+  :: did the Bloom filter skip the store entirely for this key? (0 = skipped)
   db_skipped = fn [d pk] -> (bloom_test (db_bloom d) pk)
+  :: the full version history of a key (newest first) — MVCC made visible
+  db_history = fn [d pk] -> (db_chain d pk)
 
-  :: secondary-index query: every record whose indexed field equals `fv`
+  :: secondary-index query: every live record whose indexed field equals `fv`
   db_query = fn [d fv] ->
-    let pks = (db_unwrap (lsm_get (db_index d) fv)) in
-    (map (fn [pk] -> [ pk (db_get d pk) ]) pks)
-
-  :: primary-key range scan [lo, hi] (rides the LSM's sorted order)
-  db_range = fn [d lo hi] -> (lsm_range (db_store d) lo hi)
-
-  :: merge segments in both the primary store and the secondary index
+    (map (fn [pk] -> [ pk (db_get d pk) ]) (db_idxget (db_index d) fv))
+  :: primary-key range scan [lo, hi], each key resolved to its visible record
+  db_range = fn [d lo hi] ->
+    (map (fn [e] -> [ (head e) (db_get d (head e)) ]) (lsm_range (db_store d) lo hi))
+  :: merge LSM segments in the primary store and the secondary index
   db_compact = fn [d] ->
     (db_make (lsm_compact (db_store d)) (lsm_compact (db_index d)) (db_bloom d)
-             (db_idxtag d) (db_rschema d) (db_ts d) (db_vers d))
+             (db_idxtag d) (db_rschema d) (db_ts d) (db_wal d))
 
-  :: ---- partitioning (Ch.6): route a key to its shard on a consistent-hash ring
+  :: ---- serializable transactions (Ch.7): snapshot isolation + SSI -----------
+  :: begin = take the current timestamp as the read snapshot (free: a db is immutable).
+  db_begin = fn [d] -> (db_ts d)
+  :: a transaction reads through its snapshot, so it sees a consistent point in time
+  db_txget = fn [d snap pk] -> (db_getat d pk snap)
+  :: SSI VALIDATION: 0 (conflict) if any key the transaction READ has a committed
+  :: version newer than the snapshot — i.e. someone wrote it while we ran.
+  db_validate = fn [d snap readset] -> (any (fn [pk] -> (gt (db_keyts d pk) snap)) readset)
+  :: COMMIT: `writeset` is a list of [pk rec]. Apply the writes only if the read set
+  :: still holds; otherwise abort. This refuses the write skew that plain snapshot
+  :: isolation would wave through (first committer wins).
+  db_commit = fn [d snap readset writeset] ->
+    if ((db_validate d snap readset) == 0) then [ %abort d ]
+    else [ %commit (foldl (fn [dd w] -> (db_put dd (head w) (tail w))) d writeset) ]
+
+  :: ---- partitioning (Ch.6) -------------------------------------------------
+  :: route a key to its shard on a consistent-hash ring. A LOCAL (document-
+  :: partitioned) secondary index lives on each shard and a query by field must
+  :: scatter/gather across all shards; a GLOBAL (term-partitioned) index is itself
+  :: partitioned by field value, so a field query routes to one shard but a write
+  :: must update a remote index partition. `db_idx*` here is a local index; routing
+  :: shows where a global index partition would live.
   db_route = fn [ring pk ringsize] -> (ch_lookup ring pk ringsize)
 
-  :: ---- transactions (Ch.7): optimistic concurrency control ------------------
-  :: A snapshot is just the immutable db value at begin — capturing it is free.
-  db_begin = fn [d] -> d
-  :: the version a reader observed for a key under some db
-  db_readts = fn [d pk] -> (db_vget (db_vers d) pk)
-  :: VALIDATE: did any key in `readset` change between the snapshot and now?
-  :: 0 = a read key advanced -> the transaction saw stale data and must abort.
-  db_validate = fn [cur snap readset] ->
-    (any (fn [pk] -> (gt (db_readts cur pk) (db_readts snap pk))) readset)
-  :: COMMIT a transaction: `writes` is a list of [pk rec]. If the read set still
-  :: holds, apply the writes to the *current* db; otherwise abort. This refuses
-  :: the write skew that plain snapshot isolation would wave through.
-  db_commit = fn [cur snap readset writes] ->
-    if ((db_validate cur snap readset) == 0) then [ %abort cur ]
-    else [ %commit (foldl (fn [d w] -> (db_put d (head w) (tail w))) cur writes) ]
+  :: ===========================================================================
+  :: LEADERLESS REPLICATION (Ch.5): N replicas, quorum W/R, version-vector siblings
+  :: ---------------------------------------------------------------------------
+  :: A replica is an assoc map pk -> MV-Register (a CRDT set of causally-maximal
+  :: [value vclock] entries). A cluster is [ replicas [ n [ w r ] ] ].
+  clu_pack = fn [reps n w r] -> [ reps [ n [ w [ r 0 ] ] ] ]
+  clu_make = fn [n w r] -> (clu_pack 0 n w r)
+  clu_reps = fn [c] -> (nth c 0)
+  clu_n    = fn [c] -> (nth c 1)
+  clu_w    = fn [c] -> (nth c 2)
+  clu_r    = fn [c] -> (nth c 3)
+  :: does this config guarantee a read sees the latest write? 0 = yes (W+R>N).
+  clu_strong = fn [c] -> (q_overlap (clu_n c) (clu_w c) (clu_r c))
 
-  :: ---- a ready-made database so examples run as one-liners ------------------
-  :: indexes field 2 (a "city"); two users in nyc, one in sfo.
+  :: the register for `pk` on one replica (empty if absent)
+  clu_repof = fn [reps i] -> (aget reps i 0)
+  clu_regof = fn [rep pk] -> (aget rep pk (mv_new 0))
+  :: merge the registers for `pk` across a set of replicas (indices `idxs`)
+  clu_merge = fn [reps idxs pk] ->
+    (foldl (fn [acc i] -> (mv_merge acc (clu_regof (clu_repof reps i) pk))) (mv_new 0) idxs)
+  :: index lists for the write quorum (first W) and the read quorum (last R) — they
+  :: overlap exactly when W + R > N, which is what makes a quorum read consistent.
+  clu_wset = fn [c] -> (range (clu_w c))
+  clu_rset = fn [c] -> (map (fn [i] -> (add i (sub (clu_n c) (clu_r c)))) (range (clu_r c)))
+
+  :: write [val vc] into the registers of the replicas in `idxs`
+  clu_spread = fn [reps idxs pk val vc] ->
+    (foldl (fn [rs i] -> (aput rs i (aput (clu_repof rs i) pk (mv_set (clu_regof (clu_repof rs i) pk) val vc))))
+           reps idxs)
+
+  :: a coordinated, causally-aware write at node `node`: read the current merged vclock
+  :: across the write quorum, advance the writer's own counter, and store it on W
+  :: replicas. Because it descends from what it saw, it SUPERSEDES prior versions.
+  clu_put = fn [c pk val node] ->
+    let reps = (clu_reps c),
+        seen = (clu_merge reps (clu_wset c) pk),
+        base = (foldl (fn [acc e] -> (vc_merge acc (tail e))) (vc_new 0) seen),
+        vc = (vc_inc base node),
+        reps2 = (clu_spread reps (clu_wset c) pk val vc) in
+    (clu_pack reps2 (clu_n c) (clu_w c) (clu_r c))
+  :: a BLIND write (no read first), e.g. an offline client: stamps a fresh vclock at
+  :: `node`. Two blind writes from different nodes are concurrent -> siblings.
+  clu_putblind = fn [c pk val node] ->
+    let reps2 = (clu_spread (clu_reps c) (clu_wset c) pk val (vc_inc (vc_new 0) node)) in
+    (clu_pack reps2 (clu_n c) (clu_w c) (clu_r c))
+
+  :: a quorum READ: merge the read set's registers. One causally-dominant version ->
+  :: [%val v]; several concurrent versions -> [%siblings [..]]; nothing -> %absent.
+  clu_get = fn [c pk] ->
+    let reg = (clu_merge (clu_reps c) (clu_rset c) pk) in
+    if (reg == 0) then %absent
+    else if ((mv_conflict reg) == 0) then [ %siblings (mv_values reg) ]
+    else [ %val (head (mv_values reg)) ]
+  :: READ REPAIR: write the merged register back across the read set, healing
+  :: replicas that were stale or missing (anti-entropy on the read path).
+  clu_repair = fn [c pk] ->
+    let reg = (clu_merge (clu_reps c) (clu_rset c) pk),
+        reps2 = (foldl (fn [rs i] -> (aput rs i (aput (clu_repof rs i) pk reg))) (clu_reps c) (clu_rset c)) in
+    (clu_pack reps2 (clu_n c) (clu_w c) (clu_r c))
+
+  :: ===========================================================================
+  :: ATOMIC COMMIT across shards (Ch.9): two-phase commit, the safety core
+  :: ---------------------------------------------------------------------------
+  :: Each participant votes by running `prepfn` (-> %yes or %no). The coordinator
+  :: commits iff EVERY vote is yes; one no aborts the whole transaction. This is the
+  :: atomicity guarantee (uniform decision); like the raft module it is the protocol
+  :: skeleton, without the networking, timeouts, or coordinator-recovery log.
+  tpc_votes  = fn [nodes prepfn] -> (map prepfn nodes)
+  tpc_decide = fn [votes] -> if (all (fn [v] -> (v == %yes)) votes) then %commit else %abort
+  tpc_run    = fn [nodes prepfn] -> let votes = (tpc_votes nodes prepfn) in [ (tpc_decide votes) votes ]
+
+  :: ---- ready-made fixtures so every example runs as a one-liner -------------
+  :: a database indexed on field 2 (a "city"); three users, two in nyc.
   db_sample = fn [_] ->
     (db_put (db_put (db_put (db_open 2 0 4) %u1 [ [1 %alice] [ [2 %nyc] 0 ] ])
                     %u2 [ [1 %bob] [ [2 %sfo] 0 ] ])
             %u3 [ [1 %carol] [ [2 %nyc] 0 ] ])
+  :: a 3-replica cluster with W=R=2 (so W+R>N: a quorum read sees the latest write).
+  clu_sample = fn [_] -> (clu_make 3 2 2)
+
+  :: =========================================================================
+  :: TEXT-FRAME FRONT END — arms returning [%html cord] embed as a live object
+  :: wherever their command runs.  Drive them from Db.Tool: edit the key / name /
+  :: city / query fields and click, or edit these arms and Compile.  A range or
+  :: query entry is [pk [%rec fields]]; `db_rec` unwraps it to the raw fields.
+  :: -------------------------------------------------------------------------
+  db_rec = fn [e] -> (tail (tail e))
+  db_trow = fn [d e] ->
+    let pk = (head e), f = (db_rec e) in
+    (catall [ "<tr><td><code>" pk "</code></td><td>" (db_field f 1) "</td><td>" (db_field f 2)
+              "</td><td align=right>" (numtext (len (db_history d pk))) "</td></tr>" 0 ])
+  db_rows = fn [d es] -> (catall (map (fn [e] -> (db_trow d e)) es))
+  :: the state dashboard: every key in [lo,hi] with its visible record and version count
+  db_dash = fn [d lo hi] ->
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Database</h3>"
+        "<p style=\"color:#8a8676;margin:.2em 0\">LSM &middot; write-ahead log &middot; Bloom filter &middot; secondary index &middot; MVCC versions</p>"
+        "<table class=\"m\"><tr><th align=left>key</th><th align=left>name</th><th align=left>city</th><th>versions</th></tr>"
+        (db_rows d (db_range d lo hi))
+        "</table><p style=\"color:#8a8676\">write-ahead log entries: " (numtext (len (db_wal d))) "</p></div>" 0 ]) ]
+  db_dash0 = fn [_] -> (db_dash (db_sample 0) %u0 %u9)
+
+  :: a secondary-index query rendered as a list — every live row whose city = fv
+  db_queryli = fn [e] ->
+    (catall [ "<li><code>" (head e) "</code> &mdash; " (db_field (db_rec e) 1) " (" (db_field (db_rec e) 2) ")</li>" 0 ])
+  db_queryhtml = fn [d fv] ->
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><b>secondary-index query &middot; city = " fv "</b><ul style=\"margin:.3em 0\">"
+        (catall (map (fn [e] -> (db_queryli e)) (db_query d fv)))
+        "</ul></div>" 0 ]) ]
+
+  :: the MVCC version history of one key, newest first (time-travel made visible)
+  db_verli = fn [ver] ->
+    let ts = (head ver), f = (tail ver) in
+    (catall [ "<li>ts " (numtext ts) ": "
+              (if (f == %tomb) then "(deleted)" else (catall [ (db_field f 1) " / " (db_field f 2) 0 ]))
+              "</li>" 0 ])
+  db_historyhtml = fn [d pk] ->
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><b>version history of <code>" pk "</code></b> (MVCC, newest first)<ol style=\"margin:.3em 0\">"
+        (catall (map (fn [ver] -> (db_verli ver)) (db_history d pk)))
+        "</ol></div>" 0 ]) ]
 end

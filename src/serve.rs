@@ -431,6 +431,37 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                     b"highlight a function name first (letters, digits, '_', '.')".to_vec()),
             }
         }
+        // GET /api/symbols?name=dot  ->  the database-backed symbol report: which
+        // loaded modules define the name, their arities, and a shadowing warning.
+        // The host hands every library's surface to lib/symbols.lat (built on the
+        // composed database) and renders the [%html] result it returns.
+        ("GET", "/api/symbols") => {
+            match query_param(&req.query, "name").map(|n| n.trim().to_string()) {
+                Some(name) if is_ident(&name) => {
+                    simple(200, "text/html; charset=utf-8", symbol_index_html(&name).into_bytes())
+                }
+                _ => simple(400, "text/plain; charset=utf-8",
+                    b"name a symbol (letters, digits, '_')".to_vec()),
+            }
+        }
+        // GET /api/findb?market=btc&n=24  ->  a database-backed price dashboard:
+        // load the last n closes of the market into lib/findb.lat's store (built on
+        // the composed database), read them back for an SVG sparkline + summary
+        // statistics + a lag-1 regression model, and return the [%html] it renders.
+        ("GET", "/api/findb") => {
+            let market = query_param(&req.query, "market")
+                .map(|m| m.trim().to_lowercase())
+                .unwrap_or_else(|| "btc".to_string());
+            let n = query_param(&req.query, "n")
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(24);
+            if !market.is_empty() && market.chars().all(|c| c.is_ascii_alphanumeric()) {
+                simple(200, "text/html; charset=utf-8", findb_dash_html(&market, n).into_bytes())
+            } else {
+                simple(400, "text/plain; charset=utf-8",
+                    b"market must be alphanumeric (e.g. btc, eth)".to_vec())
+            }
+        }
         // Compile a module's source into the running system and persist it to disk if possible.
         // This is the GUI's edit -> compile -> run loop applied to the system's own modules.
         // ---- TEXTS: the user's documents-with-objects, saved under <root>/text/ ----
@@ -1776,23 +1807,26 @@ fn lib_dir(root: &str) -> Option<std::path::PathBuf> {
 /// module it lives in. The host's only job is to split each module into line cords,
 /// hand them to the Latte tool, and render the line cords it hands back.
 fn lookup_definition(name: &str, root: &str) -> String {
-    // gather every module name the same way /api/sources does
-    let mut names: Vec<String> = crate::latte::builtin_lib_names();
-    names.extend(crate::latte::runtime_lib_names());
-    if let Some(dir) = lib_dir(root) {
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("lat") {
-                    if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
-                        names.push(stem.to_string());
+    // gather module names in LOAD ORDER (the eval scope's concatenation order, so a
+    // later library shadows an earlier one), then any disk libs not already present.
+    let mut names: Vec<String> = crate::latte::all_libs();
+    {
+        let mut seen: std::collections::HashSet<String> = names.iter().cloned().collect();
+        if let Some(dir) = lib_dir(root) {
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) == Some("lat") {
+                        if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+                            if seen.insert(stem.to_string()) {
+                                names.push(stem.to_string());
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    names.sort();
-    names.dedup();
 
     // a Latte string-literal for a single source line (escape \  "  tab)
     fn quote_line(line: &str) -> String {
@@ -1810,50 +1844,165 @@ fn lookup_definition(name: &str, root: &str) -> String {
         q
     }
 
-    for modname in &names {
-        let src = match crate::latte::library_source(modname) {
+    // does `modname` define a top-level arm `name`? (the `  name` + space/'=' prefilter)
+    let module_defines = |modname: &str| -> bool {
+        crate::latte::library_source(modname)
+            .map(|src| {
+                src.lines().any(|l| {
+                    l.strip_prefix("  ")
+                        .and_then(|r| r.strip_prefix(name))
+                        .map(|rest| rest.starts_with(' ') || rest.starts_with('='))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+
+    // every module that defines the name, in load order; the LAST one wins in the
+    // shared flat scope, so report the others as shadowed (the database-backed
+    // Symbols tool, lib/symbols.lat, makes the same fact queryable in-system).
+    let definers: Vec<String> = names.into_iter().filter(|m| module_defines(m)).collect();
+    let winner = match definers.last() {
+        Some(w) => w.clone(),
+        None => return format!("no definition found for '{}'", name),
+    };
+    let header = if definers.len() > 1 {
+        format!(
+            "{} is defined in {} modules: {}\n{} wins (loaded last); the rest are shadowed in the shared scope.\n\n",
+            name,
+            definers.len(),
+            definers.join(", "),
+            winner
+        )
+    } else {
+        String::new()
+    };
+
+    // extract the winning definition with the lookup tool (lk_lookup over its source)
+    let src = match crate::latte::library_source(&winner) {
+        Some(s) => s,
+        None => return format!("no definition found for '{}'", name),
+    };
+    let mut list = String::from("0");
+    for line in src.lines().rev() {
+        list = format!("[ {} {} ]", quote_line(line), list);
+    }
+    let expr = format!("(lk_lookup {} {})", list, quote_line(name));
+    let n = match crate::latte::run_with_libs(&expr, &["std", "lookup"]) {
+        Ok(n) => n,
+        Err(e) => return format!("lookup error: {}", e),
+    };
+    let mut out = String::new();
+    let mut cur = &n;
+    while let Some((head, tail)) = cur.as_cell() {
+        if let Some(a) = head.as_atom() {
+            out.push_str(&String::from_utf8_lossy(a.bytes_le()));
+            out.push('\n');
+        }
+        cur = tail;
+    }
+    format!("{}module {}\n\n{}", header, winner, out.trim_end())
+}
+
+/// Build the symbol-index triples `[ [ %mod [ %name [ arity 0 ] ] ] .. 0 ]` for just
+/// the modules that define `name` — the system hands that small slice of its surface
+/// to the database (lib/symbols.lat), which indexes and renders it. Scoping to one
+/// name keeps the per-request index tiny, so the immutable db build stays cheap.
+fn name_symbol_triples(name: &str) -> String {
+    fn arm_arity(body: &str) -> usize {
+        let b = body.trim_start();
+        if let Some(rest) = b.strip_prefix("fn ").map(|r| r.trim_start()) {
+            if let Some(inner) = rest.strip_prefix('[') {
+                if let Some(end) = inner.find(']') {
+                    return inner[..end].split_whitespace().count();
+                }
+            }
+        }
+        0
+    }
+    let head = format!("  {} = ", name);
+    let mut items: Vec<(String, usize)> = Vec::new();
+    for modname in crate::latte::all_libs() {
+        let src = match crate::latte::library_source(&modname) {
             Some(s) => s,
             None => continue,
         };
-        // cheap pre-filter: does some line begin `  name` then a space or '='?
-        let defines = src.lines().any(|l| {
-            if let Some(rest) = l.strip_prefix("  ").and_then(|r| r.strip_prefix(name)) {
-                rest.starts_with(' ') || rest.starts_with('=')
-            } else {
-                false
-            }
-        });
-        if !defines {
-            continue;
-        }
-        // build  (lk_lookup [ "l0" [ "l1" [ ... 0 ] ] ] "name")  and run the tool
-        let mut list = String::from("0");
-        for line in src.lines().rev() {
-            list = format!("[ {} {} ]", quote_line(line), list);
-        }
-        let expr = format!("(lk_lookup {} {})", list, quote_line(name));
-        let n = match crate::latte::run_with_libs(&expr, &["std", "lookup"]) {
-            Ok(n) => n,
-            Err(e) => return format!("lookup error: {}", e),
-        };
-        // %none -> not in this module; otherwise decode the list of line cords
-        if let Some(a) = n.as_atom() {
-            if a.bytes_le() == b"none" {
-                continue;
+        for line in src.lines() {
+            if let Some(body) = line.strip_prefix(&head) {
+                items.push((modname.clone(), arm_arity(body)));
+                break; // one definition per module
             }
         }
-        let mut out = String::new();
-        let mut cur = &n;
-        while let Some((head, tail)) = cur.as_cell() {
-            if let Some(a) = head.as_atom() {
-                out.push_str(&String::from_utf8_lossy(a.bytes_le()));
-                out.push('\n');
-            }
-            cur = tail;
-        }
-        return format!("module {}\n\n{}", modname, out.trim_end());
     }
-    format!("no definition found for '{}'", name)
+    let mut triples = String::from("0");
+    for (m, ar) in items.iter().rev() {
+        triples = format!("[ [ %{} [ %{} [ {} 0 ] ] ] {} ]", m, name, ar, triples);
+    }
+    triples
+}
+
+/// The `[%html cord]` body of a render result (or None if the noun isn't tagged html).
+fn extract_html(n: &N) -> Option<String> {
+    if let Knot::Cell(h, t) = &**n {
+        if let (Knot::Atom(tag), Knot::Atom(body)) = (&**h, &**t) {
+            if tag.as_cord().as_deref() == Some("html") {
+                if let Some(s) = body.as_text() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The database-backed symbol report for `name`: index its definers with
+/// lib/symbols.lat (built on the composed database) and render the result.
+fn symbol_index_html(name: &str) -> String {
+    let triples = name_symbol_triples(name);
+    if triples == "0" {
+        return format!("<p>no loaded module defines <code>{}</code></p>", html_escape(name));
+    }
+    let expr = format!("(sy_html (sy_build {}) %{})", triples, name);
+    let libs = crate::latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    match crate::latte::run_with_libs(&expr, &refs) {
+        Ok(n) => extract_html(&n)
+            .unwrap_or_else(|| format!("<p>no symbol named <code>{}</code></p>", html_escape(name))),
+        Err(e) => format!("<p>symbol lookup error: {}</p>", html_escape(&e)),
+    }
+}
+
+/// A database-backed price dashboard for the last `n` bars of `market`: load the
+/// window into lib/findb.lat's store (on the composed database), then read it back
+/// for the sparkline + statistics + the fitted lag-1 model it renders as [%html].
+fn findb_dash_html(market: &str, n: usize) -> String {
+    let n = n.clamp(8, 60);
+    let (closes, _span, label) = match crate::marketdata::closes_market(market, false) {
+        Ok(v) => v,
+        Err(e) => return format!("<p>no market data for <code>{}</code>: {}</p>",
+            html_escape(market), html_escape(&e)),
+    };
+    if closes.len() < 3 {
+        return "<p>not enough price history to analyse</p>".to_string();
+    }
+    let n = n.min(closes.len());
+    let window = &closes[closes.len() - n..];
+    // a Latte list of n-values [0 magnitude]; the embedded series is ×100, the
+    // num library is ×1000, so scale each close up by 10.
+    let mut lit = String::from("0");
+    for &c in window.iter().rev() {
+        let mag = c.max(0) * 10;
+        lit = format!("[ [0 {}] {} ]", mag, lit);
+    }
+    let expr = format!("(fd_dash (fd_load {}) {})", lit, n);
+    let libs = crate::latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    let body = match crate::latte::run_with_libs(&expr, &refs) {
+        Ok(nn) => extract_html(&nn)
+            .unwrap_or_else(|| "<p>could not render the price dashboard</p>".to_string()),
+        Err(e) => format!("<p>findb error: {}</p>", html_escape(&e)),
+    };
+    format!("<p style=\"font:600 13px system-ui;margin:.1em 0\">{}</p>{}", html_escape(&label), body)
 }
 
 /// The documentation directory (`docs/`), a sibling of the library directory.

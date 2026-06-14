@@ -13,6 +13,7 @@
 :: at fixed-point precision.
 :: ===========================================================================
 import nn
+import stats
 core fin
   :: ---- feature engineering ------------------------------------------------
   :: simple returns in percent:  r_t = 100·(p_t − p_{t-1})/p_{t-1}
@@ -103,8 +104,8 @@ core fin
   heads = fn [rows] -> (map (fn [r] -> (head r)) rows)
   tails = fn [rows] -> (map (fn [r] -> (tail r)) rows)
   transpose = fn [rows] -> loop with [rs = rows, out = 0] : if ((head rs) == 0) then (reverse out) else again((tails rs), [ (heads rs) out ]) end
-  nstd = fn [c] -> let m = (nmean c) in (nsqrt (nmean (map (fn [v] -> let d = (nsub v m) in (nmul d d)) c)))
-  colstats = fn [cols] -> (map (fn [c] -> [ (nmean c) (nstd c) ]) cols)   :: per-column [mean std]
+  nstd = fn [c] -> (st_std c)
+  colstats = fn [cols] -> (st_colstats cols)   :: per-column [mean std], via stats.lat
   zrow = fn [stats row] ->
     (zipwith (fn [st x] -> let m = (head st) in let s = (tail st) in
        if (nlt s [0 1]) then (nsub x m) else (ndiv (nsub x m) s)) stats row)

@@ -16,6 +16,7 @@
 :: ===========================================================================
 import std
 import num
+import stats
 core ta
   :: ---- windows over a chronological list ----------------------------------
   lastn = fn [n ps] -> (drop (sub (len ps) (min n (len ps))) ps)
@@ -76,9 +77,8 @@ core ta
 
   :: ---- Bollinger %B ---------------------------------------------------------
   :: %B = (p - (m - 2s)) / (4s): 0 at the lower band, 1000 at the upper.
-  nstd = fn [xs] ->
-    let m = (nmean xs) in
-    (nsqrt (nmean (map (fn [v] -> let d = (nsub v m) in (nmul d d)) xs)))
+  :: population standard deviation — the statistics live in stats.lat now
+  nstd = fn [xs] -> (st_std xs)
   boll = fn [n ps] ->
     let w = (lastn n ps) in
     let m = (nmean w) in
