@@ -1,0 +1,114 @@
+:: ===========================================================================
+:: design.lat — DATA-STRUCTURE DESIGN, the "implement a structure with these
+:: operations at this complexity" interview tier. The skill being tested is not an
+:: algorithm but a REPRESENTATION choice: pick state so that each required operation
+:: is cheap. Each structure below is the canonical question in its family.
+::
+::   MIN-STACK        push/pop/top AND getMin, all O(1)         (augment each node)
+::   QUEUE FROM STACKS a FIFO queue built from two LIFO stacks  (amortised O(1))
+::   LRU CACHE        get/put with capacity + evict least-recently-used
+::
+:: Latte values are immutable, so every "mutating" operation RETURNS the new
+:: structure rather than changing one in place — the caller threads it along. A stack
+:: is just a list with the top at the head; pushing is `[ x stack ]`, popping is `tail`.
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B`
+:: takes A when c is 0; `filter p xs` keeps elements where `p x` is 0.   Arms `dz_`.
+:: ===========================================================================
+import std
+core design
+
+  :: =========================================================================
+  :: MIN-STACK — a stack that also reports its minimum in O(1)
+  :: =========================================================================
+  :: The naive minimum is an O(n) scan. The trick: store alongside each value the
+  :: minimum of the whole stack AT THE MOMENT IT WAS PUSHED. Then the current minimum
+  :: is always just the pair on top, and it stays correct through pops because each
+  :: level remembers its own era's minimum. Each node is the pair [value minSoFar].
+  dz_msnew = fn [_] -> 0                              :: the empty min-stack is nil
+
+  :: push x: the new minimum is x itself if the stack was empty, otherwise the smaller
+  :: of x and the previous top's stored minimum. We prepend the pair [x newMin].
+  dz_mspush = fn [st x] ->
+    let nm = (if (st == 0) then x else (min x (tail (head st)))) in
+    [ [ x nm ] st ]
+
+  dz_mspop = fn [st] -> (tail st)                    :: pop = drop the top node
+  dz_mstop = fn [st] -> (head (head st))             :: the top value (head of the top pair)
+  dz_msmin = fn [st] -> (tail (head st))             :: the current minimum (O(1)!) — tail of the top pair
+
+  :: =========================================================================
+  :: QUEUE FROM TWO STACKS — FIFO from two LIFO stacks
+  :: =========================================================================
+  :: A single stack reverses order; TWO stacks reverse it twice, restoring FIFO.
+  :: `in` receives new arrivals; `out` releases them. When `out` runs dry we flip the
+  :: whole `in` stack onto `out`, which reverses it so the oldest element is now on top.
+  :: Each element is flipped exactly once, so although a single dequeue can cost O(n),
+  :: the AMORTISED cost per operation is O(1). State is the pair [in out].
+  dz_qnew = fn [_] -> [ 0 0 ]                         :: [inStack outStack], both empty
+
+  :: enqueue: just push onto the in-stack (head of the pair).
+  dz_enq = fn [q x] -> [ [ x (head q) ] (tail q) ]
+
+  :: normalise: if the out-stack is empty, flip the in-stack onto it (reversing order),
+  :: so the front of the queue sits on top of `out`. A no-op when `out` already has items.
+  dz_qnorm = fn [q] ->
+    if ((tail q) == 0) then [ 0 (reverse (head q)) ] else q
+
+  :: dequeue: normalise, then the queue front is the top of `out`. Returns
+  :: [frontValue newQueue]. (Assumes the queue is non-empty.)
+  dz_deq = fn [q] ->
+    let q2 = (dz_qnorm q) in
+    [ (head (tail q2)) [ (head q2) (tail (tail q2)) ] ]
+
+  :: peek at the front without removing it.
+  dz_qpeek = fn [q] -> (head (tail (dz_qnorm q)))
+
+  :: is the queue empty? (both stacks empty) — loobean 0 = yes.
+  dz_qempty = fn [q] -> if (and ((head q) == 0) ((tail q) == 0)) then 0 else 1
+
+  :: =========================================================================
+  :: LRU CACHE — get/put in a fixed capacity, evicting the least-recently-used
+  :: =========================================================================
+  :: The cache keeps its entries in RECENCY ORDER, most-recently-used at the front.
+  :: Every access (get or put) moves the touched key to the front; when a put overflows
+  :: the capacity, the entry at the BACK — the least recently used — falls off. (A real
+  :: O(1) implementation pairs a hash map with a doubly-linked list; here the recency
+  :: list is a plain list, which keeps the logic legible.) State is [capacity entries],
+  :: each entry a [key value] pair. We treat value 0 as "absent" for demo simplicity.
+  dz_lrunew = fn [cap] -> [ cap 0 ]                   :: [capacity, entries] (entries newest-first)
+
+  :: the keys in recency order (front = most recent) — a window into the cache state.
+  dz_lrukeys = fn [c] -> (map (fn [e] -> (head e)) (tail c))
+
+  :: drop any entry whose key is k (filter keeps pred==0, so we return 1 to remove k).
+  dz_lrudrop = fn [ents k] -> (filter (fn [e] -> (if ((head e) == k) then 1 else 0)) ents)
+
+  :: put k=v: remove any existing entry for k, prepend [k v] as most-recent, then keep
+  :: only the `cap` most-recent entries — `take cap` discards the least-recently-used tail.
+  dz_lruput = fn [c k v] ->
+    let cap = (head c) in
+    let ents = [ [ k v ] (dz_lrudrop (tail c) k) ] in
+    [ cap (take cap ents) ]
+
+  :: get k: look the key up in the entries (assoc lookup); returns the value, or 0 if
+  :: the key is absent / was evicted.
+  dz_lruget = fn [c k] -> (aget (tail c) k 0)
+
+  :: touch k: the recency update a real `get` performs — if present, move k to the front
+  :: so it is now the most-recently-used and last to be evicted.
+  dz_lrutouch = fn [c k] ->
+    let v = (aget (tail c) k 0) in
+    if (v == 0) then c                                :: a miss leaves the cache unchanged
+    else [ (head c) [ [ k v ] (dz_lrudrop (tail c) k) ] ]
+
+  :: =========================================================================
+  :: ready-made sample builders so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  :: a min-stack after pushing 5, 2, 7, 1 (its minimum is 1, top is 1).
+  dz_ms0 = fn [_] -> (dz_mspush (dz_mspush (dz_mspush (dz_mspush (dz_msnew 0) 5) 2) 7) 1)
+  :: a queue after enqueuing 1, 2, 3 (front is 1).
+  dz_q0  = fn [_] -> (dz_enq (dz_enq (dz_enq (dz_qnew 0) 1) 2) 3)
+  :: a capacity-2 LRU after putting a=1, b=2, c=3 (a is evicted; keys end up [c b]).
+  dz_lru0 = fn [_] -> (dz_lruput (dz_lruput (dz_lruput (dz_lrunew 2) %a 1) %b 2) %c 3)
+end

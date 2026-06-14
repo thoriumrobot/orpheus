@@ -462,6 +462,52 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                     b"market must be alphanumeric (e.g. btc, eth)".to_vec())
             }
         }
+        // The PERSISTENT database (src/dbservice.rs): named databases backed by an
+        // on-disk write-ahead log, surviving restarts. op = dash|get|query|history|list
+        // (GET) or put|delete (POST, record expression in the body).
+        ("GET", "/api/db") => {
+            let svc = crate::dbservice::service();
+            let mut s = svc.lock().unwrap();
+            let name = query_param(&req.query, "name").unwrap_or_default();
+            let key = query_param(&req.query, "key").unwrap_or_default();
+            let field = query_param(&req.query, "field").unwrap_or_default();
+            let op = query_param(&req.query, "op").unwrap_or_else(|| "dash".into());
+            if op != "list" && !is_db_name(&name) {
+                return simple(400, "text/plain; charset=utf-8", b"name must be alphanumeric".to_vec());
+            }
+            let body = match op.as_str() {
+                "list" => Ok(s.list().into_iter()
+                    .map(|(n, k, w)| format!("{}  ({} keys, {} log entries)", n, k, w))
+                    .collect::<Vec<_>>().join("\n")),
+                "get" => s.get(&name, &key),
+                "query" => s.query_html(&name, &field),
+                "history" => s.history_html(&name, &key),
+                _ => s.dash_html(&name),
+            };
+            match body {
+                Ok(t) => simple(200, "text/plain; charset=utf-8", t.into_bytes()),
+                Err(e) => simple(200, "text/plain; charset=utf-8", format!("db error: {}", e).into_bytes()),
+            }
+        }
+        ("POST", "/api/db") => {
+            let svc = crate::dbservice::service();
+            let mut s = svc.lock().unwrap();
+            let name = query_param(&req.query, "name").unwrap_or_default();
+            let key = query_param(&req.query, "key").unwrap_or_default();
+            let op = query_param(&req.query, "op").unwrap_or_else(|| "put".into());
+            if !is_db_name(&name) || key.is_empty() {
+                return simple(400, "text/plain; charset=utf-8", b"need an alphanumeric name and a key".to_vec());
+            }
+            let rec = String::from_utf8_lossy(&req.body).trim().to_string();
+            let r = match op.as_str() {
+                "delete" => s.delete(&name, &key).map(|_| format!("deleted {} from {}", key, name)),
+                _ => s.put(&name, &key, &rec).map(|_| format!("stored {} in {}", key, name)),
+            };
+            match r {
+                Ok(t) => simple(200, "text/plain; charset=utf-8", t.into_bytes()),
+                Err(e) => simple(200, "text/plain; charset=utf-8", format!("db error: {}", e).into_bytes()),
+            }
+        }
         // Compile a module's source into the running system and persist it to disk if possible.
         // This is the GUI's edit -> compile -> run loop applied to the system's own modules.
         // ---- TEXTS: the user's documents-with-objects, saved under <root>/text/ ----
@@ -1737,7 +1783,7 @@ fn forge_command(body: &str) -> String {
 /// OBJECT: a pure-Latte tool's way to return live markup. The payload is sent
 /// behind a \u{1}kind\u{1} marker; the System embeds it as an object (the same
 /// way chart/gfx output embeds), so text-producing tools need no Rust at all.
-fn render_result(n: &N) -> String {
+pub(crate) fn render_result(n: &N) -> String {
     if let Knot::Cell(h, t) = &**n {
         if let (Knot::Atom(tag), Knot::Atom(payload)) = (&**h, &**t) {
             if let Some(kind) = tag.as_cord() {
@@ -1755,7 +1801,7 @@ fn render_result(n: &N) -> String {
 /// Render a noun for display: small atoms as decimals, multi-byte printable atoms as text
 /// (cords), and cells as `[a b]`. (Every atom is both a number and a possible string; in an
 /// eval console the number is the expected reading, e.g. `(mul 6 7)` is `42`, not `"*"`.)
-fn render_noun(n: &N) -> String {
+pub(crate) fn render_noun(n: &N) -> String {
     match &**n {
         Knot::Atom(a) => {
             if a.bytes_le().len() >= 2 {
@@ -2051,6 +2097,11 @@ fn docs_dir(root: &str) -> std::path::PathBuf {
 }
 
 /// A safe documentation name (identifier with hyphens; no separators or `..`).
+/// A safe database name: identifier-ish, used as a WAL filename.
+fn is_db_name(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 fn safe_doc_name(name: Option<&str>) -> Option<String> {
     let name = name?;
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {

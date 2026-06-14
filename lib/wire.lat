@@ -65,10 +65,12 @@ core wire
   :: A signed value is [sign mag] (sign 0 = +, 1 = -). Zigzag interleaves +/- so
   :: small magnitudes of either sign get small varints: 0,-1,1,-2,2 -> 0,1,2,3,4.
   :: (Two's-complement would make every negative a maximal 10-byte varint.)
+  :: In bit terms: the magnitude is shifted up one bit (shl 1) and the LOW BIT
+  :: carries the sign — so decoding reads the low bit and shifts back down.
   w_zigzag = fn [sv] ->
-    if ((head sv) == 0) then (mul 2 (tail sv)) else (sub (mul 2 (tail sv)) 1)
+    if ((head sv) == 0) then (shl (tail sv) 1) else (sub (shl (tail sv) 1) 1)
   w_unzigzag = fn [u] ->
-    if ((mod u 2) == 0) then [ 0 (div u 2) ] else [ 1 (div +(u) 2) ]
+    if ((bit u 0) == 0) then [ 0 (shr u 1) ] else [ 1 (shr +(u) 1) ]
 
   :: ---- self-describing, length-delimited framing (Protobuf wire type 2) -----
   :: Each field is varint(tag) ++ varint(len) ++ len payload bytes. Because every

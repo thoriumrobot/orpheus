@@ -15,9 +15,11 @@
 ::   MVCC (Ch.7)           each key keeps a chain of [ts value] versions. A reader at
 ::                         snapshot timestamp T sees the newest version with ts <= T —
 ::                         a consistent snapshot, and time-travel for free.
-::   SERIALIZABLE TXNS(Ch7) a transaction reads at its snapshot and commits only if no
-::                         key it READ has a newer committed version (SSI / first-
-::                         committer-wins) — which is what stops write skew.
+::   TRANSACTIONS (Ch.7)  two isolation levels on the MVCC versions: SNAPSHOT
+::                         ISOLATION (db_commit_si, write-write conflicts only —
+::                         and so permits WRITE SKEW) and SERIALIZABLE via optimistic
+::                         read-set validation (db_commit, which closes write skew).
+::                         db_skew_si / db_skew_ser run the doctors-on-call anomaly.
 ::   LEADERLESS REPL.(Ch5) clu_* : N replicas, quorum W/R, version-vector conflict
 ::                         detection (siblings) via the MV-Register CRDT, and read repair.
 ::   ATOMIC COMMIT (Ch.9)  tpc_* : two-phase commit — a transaction across shards
@@ -62,7 +64,8 @@ core db
       else if (lte (head (head c)) ts) then (tail (head c))
       else again((tail c))
     end
-  :: the latest commit timestamp on a chain (0 if empty) — the per-key version SSI checks
+  :: the latest commit timestamp on a chain (0 if empty) — the per-key version that
+  :: serializable validation compares against a transaction's snapshot
   chain_ts = fn [chain] -> if (chain == 0) then 0 else (head (head chain))
 
   :: ---- tiny helpers --------------------------------------------------------
@@ -153,20 +156,55 @@ core db
     (db_make (lsm_compact (db_store d)) (lsm_compact (db_index d)) (db_bloom d)
              (db_idxtag d) (db_rschema d) (db_ts d) (db_wal d))
 
-  :: ---- serializable transactions (Ch.7): snapshot isolation + SSI -----------
-  :: begin = take the current timestamp as the read snapshot (free: a db is immutable).
+  :: ---- transactions and isolation levels (Ch.7) ---------------------------
+  :: A transaction reads at a SNAPSHOT (a timestamp) and, at commit, the database
+  :: decides whether letting it through would break isolation. Because a db value is
+  :: immutable, "begin" is free: just remember the current timestamp.
   db_begin = fn [d] -> (db_ts d)
-  :: a transaction reads through its snapshot, so it sees a consistent point in time
+  :: Reads go through the snapshot, so the transaction sees one consistent instant
+  :: no matter how many newer versions other writers have appended since.
   db_txget = fn [d snap pk] -> (db_getat d pk snap)
-  :: SSI VALIDATION: 0 (conflict) if any key the transaction READ has a committed
-  :: version newer than the snapshot — i.e. someone wrote it while we ran.
+
+  :: -- level 1: SNAPSHOT ISOLATION (what Postgres/Oracle/MySQL call it) ---------
+  :: SI aborts only on a write-WRITE conflict: a key THIS transaction writes was
+  :: written by someone else since our snapshot ("first committer wins"). It blocks
+  :: lost updates and dirty/non-repeatable reads, but it does NOT look at the read
+  :: set — so it cannot see that two transactions writing DIFFERENT keys based on
+  :: OVERLAPPING reads have broken an invariant. That gap is the WRITE SKEW anomaly.
+  db_wwconflict = fn [d snap writeset] -> (any (fn [w] -> (gt (db_keyts d (head w)) snap)) writeset)
+  db_commit_si = fn [d snap writeset] ->
+    if ((db_wwconflict d snap writeset) == 0) then [ %abort d ]
+    else [ %commit (foldl (fn [dd w] -> (db_put dd (head w) (tail w))) d writeset) ]
+
+  :: -- level 2: SERIALIZABLE via OPTIMISTIC CONCURRENCY CONTROL ----------------
+  :: OCC re-validates the whole READ SET at commit: if any key the transaction read
+  :: has a committed version newer than its snapshot, someone changed the world it
+  :: reasoned about, so abort. Re-checking reads (not just writes) is exactly what
+  :: closes write skew, giving serializable execution. This is the read-set-
+  :: validation route to serializability; it is simpler and more conservative than
+  :: true SSI (Cahill et al. 2008, used by Postgres SERIALIZABLE), which tracks
+  :: read-write dependency edges and aborts only on a genuinely dangerous cycle, so
+  :: SSI permits more concurrency (fewer false aborts) for the same guarantee.
   db_validate = fn [d snap readset] -> (any (fn [pk] -> (gt (db_keyts d pk) snap)) readset)
-  :: COMMIT: `writeset` is a list of [pk rec]. Apply the writes only if the read set
-  :: still holds; otherwise abort. This refuses the write skew that plain snapshot
-  :: isolation would wave through (first committer wins).
   db_commit = fn [d snap readset writeset] ->
     if ((db_validate d snap readset) == 0) then [ %abort d ]
     else [ %commit (foldl (fn [dd w] -> (db_put dd (head w) (tail w))) d writeset) ]
+
+  :: -- the canonical write-skew demo: two doctors, both on call (DDIA Ch.7) -----
+  :: Invariant: at least one of k1,k2 stays "on". Two transactions take the same
+  :: snapshot, each sees the OTHER still on, and each takes ITSELF off. Their writes
+  :: touch different keys, so SI lets both through (0 on call — the anomaly), while
+  :: serializable OCC aborts the second because a key it READ (the other doctor)
+  :: changed under it. The two arms below return the SECOND transaction's outcome.
+  db_oncall = fn [_] -> (db_put (db_put (db_open 1 0 256) %k1 [ [1 1] 0 ]) %k2 [ [1 1] 0 ])
+  db_skew_si = fn [_] ->
+    let d = (db_oncall 0), snap = (db_ts (db_oncall 0)) in
+    let r1 = (db_commit_si d snap [ [ %k1 [ [1 0] 0 ] ] 0 ]) in
+    (head (db_commit_si (tail r1) snap [ [ %k2 [ [1 0] 0 ] ] 0 ]))
+  db_skew_ser = fn [_] ->
+    let d = (db_oncall 0), snap = (db_ts (db_oncall 0)) in
+    let r1 = (db_commit d snap [ %k1 [ %k2 0 ] ] [ [ %k1 [ [1 0] 0 ] ] 0 ]) in
+    (head (db_commit (tail r1) snap [ %k1 [ %k2 0 ] ] [ [ %k2 [ [1 0] 0 ] ] 0 ]))
 
   :: ---- partitioning (Ch.6) -------------------------------------------------
   :: route a key to its shard on a consistent-hash ring. A LOCAL (document-
@@ -278,6 +316,17 @@ core db
         (db_rows d (db_range d lo hi))
         "</table><p style=\"color:#8a8676\">write-ahead log entries: " (numtext (len (db_wal d))) "</p></div>" 0 ]) ]
   db_dash0 = fn [_] -> (db_dash (db_sample 0) %u0 %u9)
+  :: a dashboard over an EXPLICIT key list (not a key range) — the host passes the
+  :: keys it knows are live, so a persistent database with arbitrary keys renders
+  :: without depending on cord ordering. Same row shape as db_dash.
+  db_entryk = fn [d k] -> [ k (db_get d k) ]
+  db_dashkeys = fn [d ks] ->
+    [ %html (catbal [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Database (persistent)</h3>"
+        "<p style=\"color:#8a8676;margin:.2em 0\">on-disk write-ahead log &middot; LSM &middot; Bloom filter &middot; secondary index &middot; MVCC versions</p>"
+        "<table class=\"m\"><tr><th align=left>key</th><th align=left>name</th><th align=left>city</th><th>versions</th></tr>"
+        (db_rows d (map (fn [k] -> (db_entryk d k)) ks))
+        "</table><p style=\"color:#8a8676\">write-ahead log entries: " (numtext (len (db_wal d))) "</p></div>" 0 ]) ]
 
   :: a secondary-index query rendered as a list — every live row whose city = fv
   db_queryli = fn [e] ->

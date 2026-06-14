@@ -163,10 +163,13 @@ LSM read consults the per-segment filter and only touches the SSTable when the
 filter says "maybe."
 
 The `k` bit positions come from **double hashing** (Kirsch–Mitzenmacher):
-`g_i = h1 + i·h2`, so two base hashes give `k` independent-looking probes. Because
-Loom has no XOR, the base hashes are polynomial (Horner) hashes finished with a
-multiplicative avalanche step, and ranges are taken from the high bits — see
-`lib/dhash.lat`.
+`g_i = h1 + i·h2`, so two base hashes give `k` independent-looking probes. The base
+hashes are polynomial (Horner) hashes finished with a multiplicative avalanche step,
+and ranges are taken from the high bits — see `lib/dhash.lat`. The packed bit array
+itself is manipulated through the bitwise operators now in `std`: a bit is set by
+OR-ing in `1 << i` (`bor n (shl 1 i)`), tested with `bit n i`, and the filter's fill
+is `popcount`. (Bitwise XOR is now available too, so an FNV-style hash is expressible;
+the polynomial hash is kept for its proven dispersion.)
 
 ```
 (bloom_sample 0)                       :: ready-made filter (256 bits, 3 hashes, 3 members)
@@ -438,6 +441,9 @@ committed by someone else since it began — *first committer wins*.
 (head (mvcc_try (mvcc_sample 0) [[%y 9] 0] 10 18))      :: %commit — y untouched
 :: serializable: read-set validation aborts write skew that plain SI would allow
 (head (mvcc_ssi_try (mvcc_sample 0) [%x 0] [[%y 9] 0] 10 18))  :: %abort — read x changed
+:: the same anomaly in db.lat, run BOTH ways (doctors-on-call):
+(db_skew_si 0)    :: %commit — snapshot isolation lets the second writer through (the bug)
+(db_skew_ser 0)   :: %abort  — serializable read-set validation prevents it
 ```
 
 The demo commits `x=1` at ts 5 and `x=2` at ts 15. A reader on a snapshot at ts 10
@@ -453,14 +459,24 @@ transaction that started at ts 10 and tries to write `x` at commit ts 18 **abort
   go off shift" bug). Snapshot isolation does not prevent it.
 - *So how do you get serializable?* Three routes: **actual serial execution**
   (VoltDB/Redis — one transaction at a time on a partition); **two-phase locking**
-  (predicate/range locks — correct but contended); or **serializable snapshot
-  isolation (SSI)**, which runs optimistically on a snapshot and aborts a transaction
-  only when it detects the read-write dependency that would make the schedule
-  non-serializable (PostgreSQL's `SERIALIZABLE`, the modern favourite). `mvcc_ssi_try`
-  implements the optimistic core: alongside the write-write check it **validates the
-  read set** — if any key the transaction read was overwritten by a commit during its
-  lifetime, its decision rested on stale data and it aborts. That is exactly what
-  turns the write-skew example above from a commit into an abort.
+  (predicate/range locks — correct but contended); or **optimistic concurrency
+  control on a snapshot**, which runs without locks and aborts at commit if the world
+  it read has changed. `mvcc_ssi_try` (and `db_commit` in `db.lat`) implement that
+  optimistic route: alongside the write-write check they **validate the read set** —
+  if any key the transaction read was overwritten by a commit during its lifetime,
+  its decision rested on stale data, so it aborts. That is exactly what turns the
+  write-skew example from a commit into an abort.
+- *Is read-set validation the same as SSI?* Not quite, and it is worth being precise:
+  what is implemented here is plain **optimistic concurrency control** — revalidate
+  every read at commit. True **serializable snapshot isolation** (Cahill et al. 2008,
+  PostgreSQL's `SERIALIZABLE`) is cleverer: it tracks read-write *dependency edges*
+  between live transactions and aborts only when they form the specific dangerous
+  structure that makes a schedule non-serializable, so it accepts many schedules that
+  blanket read-set validation would needlessly reject. OCC is the correct, simpler,
+  more conservative cousin: same guarantee, more false aborts. `db.lat` shows the
+  contrast directly — `db_commit_si` is snapshot isolation (write-write checks only,
+  so `db_skew_si` lets the doctors-on-call anomaly through) and `db_commit` adds
+  read-set validation (`db_skew_ser` aborts the second transaction and prevents it).
 - *Why timestamps for visibility?* A version is visible iff `commit_ts <= snapshot`,
   so visibility is a pure comparison — no locks on the read path. The hard part is
   garbage-collecting versions no live snapshot can still see.
@@ -701,8 +717,8 @@ through-line of Parts I–II in a single module. A `db` value is the tuple
 >
 > It is also fast now. A `db_put` runs the whole stack — log, Bloom add, index,
 > version chain — and the Bloom add dominated, because setting a bit in the packed
-> bitset called `pow 2 i` (a 128-byte big-integer) built by *naive* repeated
-> multiplication. Making `std.pow` binary-exponentiation (O(log e)) cut a 24-bar
+> bitset (now `bor n (shl 1 i)`) calls `pow 2 i` (a 128-byte big-integer) built by
+> *naive* repeated multiplication. Making `std.pow` binary-exponentiation (O(log e)) cut a 24-bar
 > load from ~0.5s to ~0.1s and the findb dashboard from seconds to a fifth of a
 > second — and it speeds up cord building too, since `cat` shifts by `pow 256 len`.
 
@@ -715,7 +731,7 @@ through-line of Parts I–II in a single module. A `db` value is the tuple
 | indexed field value → primary keys | a second LSM (`lsm`) | Ch. 3 (secondary index) |
 | tagged records, evolved on read | `wire` | Ch. 4 (encoding/evolution) |
 | key → shard | consistent hashing (`chash`) | Ch. 6 (partitioning) |
-| snapshot reads + read-set validation | the version chains | Ch. 7 (snapshot isolation / SSI) |
+| snapshot reads + read-set validation | the version chains | Ch. 7 (snapshot isolation; OCC for serializable) |
 | N replicas, quorum W/R, siblings | `quorum` + `crdt` + `vclock` | Ch. 5 (leaderless replication) |
 | atomic commit across shards | `tpc_*` | Ch. 9 (two-phase commit) |
 
@@ -745,6 +761,40 @@ three DDIA ideas at once:
 (db_get (db_recover (db_open 2 0 4) (db_wal (db_sample 0))) %u3)  :: -> carol, rebuilt from the log
 (len (db_wal (db_sample 0)))                      :: 3 logged mutations
 ```
+
+### Persistence — durable, named databases that survive restarts
+
+`db_recover` shows the engine *can* rebuild itself from a log; persistence makes
+that log live on disk. The `db_*` arms are pure Latte, so a database value lasts one
+evaluation and is then gone — exactly the right default for a value, and the reason
+the in-language model never touches the filesystem. Durability is added *around*
+that core, by a small host service (`src/dbservice.rs`), not by weakening it:
+
+- each write is appended to an on-disk write-ahead log (`<name>.wal`) and flushed
+  **before** the operation is reported as done;
+- on open, the log is replayed through the real `db_put`/`db_delete` arms to
+  rebuild the in-memory value — the same `db_recover` idea, now reading from disk;
+- the live value is held as a noun between requests and threaded through the Latte
+  arms via `call_arm`, so all the database logic stays in `db.lat`; only persistence
+  and the cross-request lifetime are in Rust.
+
+The result is a genuinely persistent, named, multi-version database, reachable three
+ways — the **Data** tool in the GUI, the `/api/db` endpoint, and the command line:
+
+```
+latte db people put u1 '[ [1 %alice] [ [2 %nyc] 0 ] ]'   # logged to ./dbdata/people.wal
+latte db people put u2 '[ [1 %bob]   [ [2 %sfo] 0 ] ]'
+latte db people get u1            # a DIFFERENT process — replays the log, prints alice
+latte db people put u1 '[ [1 %alice2] [ [2 %la] 0 ] ]'   # a new MVCC version
+latte db people history u1        # both versions, newest first — survived the restart
+latte db people query nyc         # the secondary index, rebuilt on replay
+latte db people dash              # the whole live state as HTML
+```
+
+Because the log is the source of truth and every layer (chains, index, Bloom filter,
+timestamp counter) is derived from it on replay, MVCC history and index queries come
+back intact after a restart — verified by the `dbservice` tests, which write in one
+service instance and read from a second over the same directory.
 
 ### Indexing, encoding, partitioning
 

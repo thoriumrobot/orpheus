@@ -814,6 +814,36 @@ pub const STATS_LAT: &str = include_str!("../lib/stats.lat");
 pub const SYMBOLS_LAT: &str = include_str!("../lib/symbols.lat");
 /// Financial/trading price data stored in the composed database, read back for visualization (an SVG sparkline) and training (a lag-1 regression), via `import findb`.
 pub const FINDB_LAT: &str = include_str!("../lib/findb.lat");
+/// The five algorithm-design paradigms from Skiena's "The Algorithm Design Manual" (divide & conquer, dynamic programming, greedy, backtracking, graph traversal), via `import algo`.
+pub const ALGO_LAT: &str = include_str!("../lib/algo.lat");
+/// Interview data structures and coding patterns (two pointers, sliding window, fast & slow, stack, prefix sums, heap, BST, trie, union-find), via `import dsa`.
+pub const DSA_LAT: &str = include_str!("../lib/dsa.lat");
+/// Weighted graph algorithms (Dijkstra shortest paths, Kruskal & Prim minimum spanning trees), via `import wgraph`.
+pub const WGRAPH_LAT: &str = include_str!("../lib/wgraph.lat");
+/// Number theory and math techniques (Euclid GCD/LCM, primality, Sieve of Eratosthenes, modular exponentiation, factorial/binomial, Fibonacci, digit ops), via `import numth`.
+pub const NUMTH_LAT: &str = include_str!("../lib/numth.lat");
+/// Bit-manipulation techniques (XOR single/missing number, add without arithmetic, power-of-two, bit get/set/clear/toggle, subset bitmasks, Hamming distance, counting-bits DP), via `import bits`.
+pub const BITS_LAT: &str = include_str!("../lib/bits.lat");
+/// String algorithms (reverse, palindrome, frequency, anagram via sorted signature, first-unique char, naive + Rabin-Karp substring search, longest common prefix, run-length encoding), via `import strings`.
+pub const STRINGS_LAT: &str = include_str!("../lib/strings.lat");
+/// Matrix/grid algorithms (number of islands via flood fill, unique-paths grid DP, transpose, rotate 90, spiral-order traversal), via `import grid`.
+pub const GRID_LAT: &str = include_str!("../lib/grid.lat");
+/// Data-structure design classics (min-stack with O(1) getMin, FIFO queue from two stacks, LRU cache with capacity eviction), via `import design`.
+pub const DESIGN_LAT: &str = include_str!("../lib/design.lat");
+/// Binary tree techniques (in/pre/post-order and level-order traversals, height, count, invert/mirror, max root-to-leaf path sum, lowest common ancestor, validate-BST), via `import trees`.
+pub const TREES_LAT: &str = include_str!("../lib/trees.lat");
+/// Dynamic-programming classics (climbing stairs, house robber, subset-sum, equal partition, coin-change ways, 0/1 knapsack, longest common subsequence), via `import dp`.
+pub const DP_LAT: &str = include_str!("../lib/dp.lat");
+/// Interval techniques (merge overlapping, insert interval, can-attend-all, minimum meeting rooms via sweep line, interval intersection, total covered length), via `import intervals`.
+pub const INTERVALS_LAT: &str = include_str!("../lib/intervals.lat");
+/// Binary search techniques (lower/upper bound, occurrence count, rotated-array search and minimum, peak finding, integer sqrt and Koko-bananas via binary-search-on-the-answer), via `import search`.
+pub const SEARCH_LAT: &str = include_str!("../lib/search.lat");
+/// Graph decision problems (Kahn topological sort, directed-cycle / course-schedule detection, connected components, reachability, bipartite 2-colouring), via `import graphs`.
+pub const GRAPHS_LAT: &str = include_str!("../lib/graphs.lat");
+/// Backtracking / combinatorial search (generate parentheses, combination sum, k-combinations, palindrome partitioning, grid word search), via `import backtrack`.
+pub const BACKTRACK_LAT: &str = include_str!("../lib/backtrack.lat");
+/// Greedy algorithms (jump game and minimum jumps, gas station circuit, partition labels, candy distribution, task scheduler), via `import greedy`.
+pub const GREEDY_LAT: &str = include_str!("../lib/greedy.lat");
 
 
 fn builtin_lib(name: &str) -> Option<&'static str> {
@@ -864,6 +894,21 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "stats" => Some(STATS_LAT),
         "symbols" => Some(SYMBOLS_LAT),
         "findb" => Some(FINDB_LAT),
+        "algo" => Some(ALGO_LAT),
+        "dsa" => Some(DSA_LAT),
+        "wgraph" => Some(WGRAPH_LAT),
+        "numth" => Some(NUMTH_LAT),
+        "bits" => Some(BITS_LAT),
+        "strings" => Some(STRINGS_LAT),
+        "grid" => Some(GRID_LAT),
+        "design" => Some(DESIGN_LAT),
+        "trees" => Some(TREES_LAT),
+        "dp" => Some(DP_LAT),
+        "intervals" => Some(INTERVALS_LAT),
+        "search" => Some(SEARCH_LAT),
+        "graphs" => Some(GRAPHS_LAT),
+        "backtrack" => Some(BACKTRACK_LAT),
+        "greedy" => Some(GREEDY_LAT),
         _ => None,
     }
 }
@@ -941,7 +986,7 @@ pub fn all_libs() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1054,7 +1099,7 @@ pub fn builtin_lib_names() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
     ]
     .iter()
     .map(|s| s.to_string())

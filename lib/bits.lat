@@ -1,0 +1,102 @@
+:: ===========================================================================
+:: bits.lat — BIT MANIPULATION, the interview tier that turns clever use of binary
+:: representation into O(1) tricks. Built on the bitwise vocabulary now in std
+:: (band/bor/bxor/shl/shr/bit/popcount/lowbit), which Latte previously lacked.
+::
+::   XOR TRICKS        single number, missing number, swap/add without arithmetic
+::   BIT TESTS         is-power-of-two, get/set/clear/toggle a bit
+::   ENUMERATION       all subsets via 2^n bitmasks
+::   COUNTING          Hamming distance, counting-bits DP, clear-lowest-bit
+::
+:: A note on the XOR identities everything here leans on: x^x = 0 and x^0 = x, and
+:: XOR is commutative and associative — so XOR-ing a value in twice cancels it.
+::
+:: LOOBEAN REMINDER: comparison gates return 0 for TRUE; `if c then A else B` takes A
+:: when c is 0; `sub` errors on underflow (guarded below).   Arms: `bm_`.
+:: ===========================================================================
+import std
+core bits
+
+  :: =========================================================================
+  :: XOR TRICKS — self-cancellation does the bookkeeping for free
+  :: =========================================================================
+  :: SINGLE NUMBER: every value appears twice except one. XOR-ing the whole list
+  :: cancels each pair (x^x=0) and leaves the lone value. O(n) time, O(1) space.
+  bm_single = fn [xs] -> (foldl (fn [acc x] -> (bxor acc x)) 0 xs)
+
+  :: MISSING NUMBER: the list is 0..n with exactly one value missing. XOR every list
+  :: element together with every index 0..n; the present values cancel, the gap remains.
+  bm_missing = fn [xs n] ->
+    (bxor (foldl (fn [acc x] -> (bxor acc x)) 0 xs)
+          (foldl (fn [acc i] -> (bxor acc i)) 0 (range (add n 1))))
+
+  :: ADD WITHOUT '+': XOR is the sum with carries ignored; (a AND b) shifted left is
+  :: the carry. Re-add the carry until none is left — exactly how a hardware adder works.
+  bm_add = fn [a b] ->
+    loop with [x = a, carry = b] :
+      if (carry == 0) then x
+      else again((bxor x carry), (shl (band x carry) 1))
+    end
+
+  :: =========================================================================
+  :: BIT TESTS — single-bit reads and writes
+  :: =========================================================================
+  :: POWER OF TWO: a positive number is a power of two iff it has exactly one set bit,
+  :: which holds iff (n AND n-1) is 0 — subtracting 1 flips the lowest set bit and all
+  :: the zeros below it, so the AND wipes out. Returns 1 = yes, 0 = no (0 is not one).
+  bm_ispow2 = fn [n] ->
+    if (n == 0) then 0
+    else if ((band n (sub n 1)) == 0) then 1 else 0
+
+  bm_get    = fn [n i] -> (bit n i)                              :: read bit i: 0 or 1
+  bm_set    = fn [n i] -> (bor n (shl 1 i))                      :: force bit i to 1
+  bm_toggle = fn [n i] -> (bxor n (shl 1 i))                     :: flip bit i
+  :: force bit i to 0: if it is set, subtract its value (avoids needing an unbounded
+  :: complement, which is awkward for arbitrary-precision integers).
+  bm_clear  = fn [n i] -> if ((bit n i) == 1) then (sub n (shl 1 i)) else n
+
+  :: clear the LOWEST set bit: n AND (n-1). The basis of iterating over set bits and of
+  :: several "is power of two / count bits" tricks.
+  bm_clearlow = fn [n] -> if (n == 0) then 0 else (band n (sub n 1))
+
+  :: =========================================================================
+  :: ENUMERATION — subsets as bitmasks
+  :: =========================================================================
+  :: SUBSETS BY BITMASK: an n-element set has exactly 2^n subsets, one per integer in
+  :: [0, 2^n). Bit j of the mask decides whether element j is in. Iterating the masks
+  :: enumerates every subset; this is the workhorse behind bitmask dynamic programming.
+  bm_pick = fn [xs mask] ->                  :: the elements of xs whose bit is set in mask
+    loop with [c = xs, j = 0, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else if ((bit mask j) == 1) then again((tail c), (add j 1), [ (head c) acc ])
+      else again((tail c), (add j 1), acc)
+    end
+  bm_subsets = fn [xs] ->
+    let n = (len xs) in
+    loop with [mask = 0, acc = 0] :
+      if (gte mask (shl 1 n)) then (reverse acc)     :: enumerated all 2^n masks
+      else again((add mask 1), [ (bm_pick xs mask) acc ])
+    end
+
+  :: =========================================================================
+  :: COUNTING
+  :: =========================================================================
+  :: HAMMING DISTANCE: how many bit positions two numbers differ in = popcount(a XOR b).
+  bm_hamming = fn [a b] -> (popcount (bxor a b))
+
+  :: COUNTING BITS 0..n as a DP: popcount(i) = popcount(i >> 1) + (lowest bit of i),
+  :: because shifting right drops the lowest bit. Returns the list [popcount 0, .., n].
+  bm_countbits = fn [n] ->
+    loop with [i = 0, dp = 0] :
+      if (gt i n) then dp
+      else let v = (if (i == 0) then 0 else (add (nth dp (shr i 1)) (mod i 2))) in
+        again((add i 1), (append dp [ v 0 ]))
+    end
+
+  :: =========================================================================
+  :: ready-made sample inputs so every demo and tutorial panel is a one-liner.
+  :: =========================================================================
+  bm_dup0  = fn [_] -> [ 4 [ 1 [ 2 [ 1 [ 2 0 ] ] ] ] ]    :: all paired except 4
+  bm_gap0  = fn [_] -> [ 0 [ 1 [ 3 0 ] ] ]                 :: 0..3 missing 2
+  bm_set0  = fn [_] -> [ 3 [ 1 [ 2 0 ] ] ]                 :: a 3-element set for subsets
+end

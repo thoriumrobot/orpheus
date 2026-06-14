@@ -37,7 +37,7 @@ core hll
   hll_add = fn [h item] ->
     let p = (hll_p h) in
     let x = (hll_h (dh_h1 item)) in
-    let i = (div x (pow 2 (sub 32 p))) in
+    let i = (shr x (sub 32 p)) in                  :: the top p bits of a 32-bit hash
     let rho = (add (sub 32 (hll_bitlen (hll_h (dh_h2 item)))) 1) in
     [ p (hll_setmax (hll_regs h) i rho) ]
   hll_addall = fn [h items] -> (foldl (fn [acc x] -> (hll_add acc x)) h items)

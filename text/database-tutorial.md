@@ -102,7 +102,38 @@ sees a consistent database as of that moment, even while writers append newer
 versions. `db_getat d key ts` reads a key *as of* a past timestamp — a query
 against the past, for free, because the past was never thrown away.
 
-## 7. Durability — the write-ahead log
+## 7. Isolation levels — and the anomaly snapshot isolation misses
+
+Snapshot isolation is wonderful, but it is **not** serializable, and the gap has a
+name: **write skew**. The textbook example is two on-call doctors. The rule is "at
+least one must stay on call." Both are on. Two transactions run at the same instant;
+each reads the schedule, sees the *other* doctor still on, and takes *itself* off.
+Their writes touch *different* rows, so neither conflicts with the other — and both
+commit. Now nobody is on call. Each transaction was correct in isolation; together
+they broke the invariant, because each reasoned about a row the other then changed.
+
+`db.lat` runs exactly this scenario two ways. Under **snapshot isolation**
+(`db_commit_si`, which only checks for write-*write* conflicts), the second
+transaction commits — the anomaly happens:
+
+```tool eval (db_skew_si 0)
+```
+
+That `%commit` is the bug. To get **serializability**, the commit must also check the
+*reads*: optimistic concurrency control re-validates the read set, and since the
+second transaction read a doctor the first one changed, it aborts:
+
+```tool eval (db_skew_ser 0)
+```
+
+`%abort` — the anomaly is prevented, at the cost of retrying the loser. That extra
+read-set check is the whole difference between "snapshot isolation" and
+"serializable" here. (Production databases like PostgreSQL use a sharper version,
+*serializable snapshot isolation*, that aborts less often by tracking which
+read-write dependencies are genuinely dangerous; the version above is its simpler,
+more conservative cousin — same guarantee, a few more needless aborts.)
+
+## 8. Durability — the write-ahead log
 
 Each write is appended to a **write-ahead log** *before* the in-memory state is
 updated, so the log is the source of truth and the live structures are a cache it
@@ -116,7 +147,19 @@ reconstructs every chain, the index, the Bloom filter, and the timestamp counter
 so the recovered database reads identically to the original. The log *is* the
 database; everything else is derived from it.
 
-## 8. From rows to prices — the same database, applied
+This is also how the database is made **persistent**. The `db_*` arms above are pure
+Latte: a value lasts one evaluation and is then gone. The **Data** tool (and `latte
+db …` on the command line) wraps exactly this engine in a host service that writes
+each operation to an on-disk write-ahead log and replays it on open — so named
+databases survive restarts. Store a row, close everything, reopen tomorrow: still
+there. Same LSM, Bloom filter, secondary index, and MVCC history — now durable.
+
+[Write a row to disk](run: data demo put alice [ [1 %alice] [ [2 %nyc] 0 ] ]) [Show the persistent database](run: data demo dash)
+
+Those buttons actually touch the disk. Open the **Data** tool to add more and inspect
+version history — or run `latte db demo dash` in a shell. Reopen any time; it persists.
+
+## 9. From rows to prices — the same database, applied
 
 Nothing about this store is user-specific. `lib/findb.lat` keeps a window of
 financial price bars in exactly this database — one record per day — then reads the
@@ -136,6 +179,8 @@ sped up the Bloom filter brought it under a fifth of a second.
 
 - **`lib/db.lat`** — the composition: open `System.Open db` to read it, edit an arm,
   press Compile, and the change is live in the panels above.
+- **The Data tool / `latte db`** — the persistent wrapper (`src/dbservice.rs`): named
+  databases on an on-disk write-ahead log that survive restarts.
 - **`latte ddia db`** (and `lsm`, `bloom`, `mvcc`, `findb`) — each technique as a
   command-line demo.
 - **`docs/data-intensive.md`** — the full written guide, including the symbol index

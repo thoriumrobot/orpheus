@@ -1,0 +1,143 @@
+:: ===========================================================================
+:: backtrack.lat — BACKTRACKING, the technique for systematically exploring all candidate
+:: solutions by building one incrementally and abandoning a branch the moment it cannot
+:: succeed ("prune"). In an imperative language you mutate a partial solution, recurse, then
+:: UNDO the change; in a pure functional language the undo is automatic — each choice just
+:: starts an independent recursive branch, and a step's full answer is the CONCATENATION of
+:: its branches' answers. That makes backtracking unusually clean here.
+::
+::   BUILD-A-STRING    generate all valid parenthesisations (constraint pruning)
+::   PICK-WITH-REUSE   combination sum (each candidate reusable, no duplicate sets)
+::   PICK-K            all k-element combinations of {1..n}
+::   SPLIT-A-STRING    partition into palindromes
+::   GRID-PATH         word search (DFS with a used-cell set)
+::
+:: (The `algo` module already shows subsets, permutations, and N-queens; this module
+:: collects the other canonical backtracking problems.)
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B` takes
+:: A when c is 0; `or a b` is 0 when either is 0; `member x xs` is 0 when present; `sub`
+:: errors on underflow, so each decrement below is guarded.   Arms prefixed `bk_`.
+:: (Strings built here are cords; multi-byte cords display as integers, so demos report the
+:: COUNT of solutions — e.g. the Catalan numbers — for the string-valued arms.)
+:: ===========================================================================
+import std
+core backtrack
+
+  :: =========================================================================
+  :: BUILD-A-STRING — generate valid parentheses
+  :: =========================================================================
+  :: All well-formed strings of `n` pairs. We carry `o` = how many '(' may still be opened and
+  :: `c` = how many ')' are currently owed (opens placed minus closes placed). The pruning is
+  :: the whole point: only open while o > 0, and only close while c > 0, so no invalid prefix is
+  :: ever built. `acc` is the string so far as a reversed byte list (40 = '(', 41 = ')').
+  bk_parensH = fn [acc o c] ->
+    if (and (o == 0) (c == 0)) then [ (frombytes (reverse acc)) 0 ]   :: nothing left: one finished string
+    else
+      let withOpen = (if (gt o 0) then (bk_parensH [ 40 acc ] (sub o 1) (add c 1)) else 0) in  :: place '('
+      let withClose = (if (gt c 0) then (bk_parensH [ 41 acc ] o (sub c 1)) else 0) in          :: place ')'
+      (append withOpen withClose)                                      :: all solutions from both choices
+  bk_parens = fn [n] -> (bk_parensH 0 n 0)
+
+  :: =========================================================================
+  :: PICK-WITH-REUSE — combination sum
+  :: =========================================================================
+  :: All multisets of `cands` (each usable any number of times) that sum to `target`. To avoid
+  :: counting the same set in different orders, the "take" branch keeps the SAME candidate
+  :: available (reuse) while the "skip" branch drops it forever — so within one solution the
+  :: chosen values are non-decreasing through the list. `acc` is the chosen values, reversed.
+  bk_combsumH = fn [cands target acc] ->
+    if (target == 0) then [ (reverse acc) 0 ]            :: hit the target exactly: one combination
+    else if (cands == 0) then 0                          :: nothing left but target unmet: dead branch
+    else
+      let c = (head cands) in
+      let take = (if (gte target c)                      :: does c still fit under the target?
+                  then (bk_combsumH cands (sub target c) [ c acc ])   :: take c, keep it available
+                  else 0) in
+      let skip = (bk_combsumH (tail cands) target acc) in :: never use c again
+      (append take skip)
+  bk_combsum = fn [cands target] -> (bk_combsumH cands target 0)
+
+  :: =========================================================================
+  :: PICK-K — all k-element combinations of {1..n}
+  :: =========================================================================
+  bk_r1 = fn [n] -> (map (fn [x] -> (add x 1)) (range n))   :: the list 1..n
+  :: Branch on each number in turn: include it (then we need k-1 more from the rest) or exclude
+  :: it (still need k from the rest). Including only later numbers keeps every set increasing,
+  :: so no permutation duplicates appear.
+  bk_combineH = fn [nums k acc] ->
+    if (k == 0) then [ (reverse acc) 0 ]                 :: chosen enough: one combination
+    else if (nums == 0) then 0                           :: ran out before filling k: dead branch
+    else
+      let take = (bk_combineH (tail nums) (sub k 1) [ (head nums) acc ]) in :: use this number
+      let skip = (bk_combineH (tail nums) k acc) in       :: drop this number
+      (append take skip)
+  bk_combine = fn [n k] -> (bk_combineH (bk_r1 n) k 0)
+
+  :: =========================================================================
+  :: SPLIT-A-STRING — palindrome partitioning
+  :: =========================================================================
+  :: is a byte list a palindrome? compare it to its reverse, element by element.
+  bk_ispal = fn [xs] ->
+    loop with [a = xs, b = (reverse xs)] :
+      if (a == 0) then 0
+      else if ((head a) == (head b)) then again((tail a), (tail b))
+      else 1
+    end
+  :: All ways to cut a string so every piece is a palindrome. For each prefix that is itself a
+  :: palindrome, emit it as the first piece and recursively partition the remaining suffix,
+  :: prepending the prefix to each sub-partition. The empty string has exactly one partition
+  :: (the empty list of pieces), which seeds the recursion.
+  bk_partH = fn [xs] ->
+    if (xs == 0) then [ 0 0 ]                            :: empty: one partition with no pieces
+    else
+      (foldl (fn [acc k] ->
+                let pre = (take k xs) in                 :: the length-k prefix
+                (if (bk_ispal pre)                       :: keep only palindromic prefixes
+                 then (append acc (map (fn [rest] -> [ (frombytes pre) rest ])
+                                       (bk_partH (drop k xs))))   :: prefix + each partition of the suffix
+                 else acc))
+             0 (bk_r1 (len xs)))                         :: try every prefix length 1..len
+  bk_partition = fn [s] -> (bk_partH (bytes s))
+
+  :: =========================================================================
+  :: GRID-PATH — word search
+  :: =========================================================================
+  bk_cell = fn [grid r c] -> (nth (nth grid r) c)        :: the character at row r, column c
+  :: DFS from cell (r,c) trying to match the remaining `word`. A cell is identified on the
+  :: current path by the id r*cols + c held in `used`; we never step off the grid, onto a used
+  :: cell, or onto a mismatching letter. Found = 0 (returned as soon as any direction succeeds).
+  bk_wsH = fn [grid word r c rows cols used] ->
+    if (word == 0) then 0                                :: matched every letter: success
+    else if (or (gte r rows) (gte c cols)) then 1        :: walked off the bottom or right edge
+    else
+      let id = (add (mul r cols) c) in
+      if (member id used) then 1                         :: this cell is already on the path
+      else if (not ((bk_cell grid r c) == (head word))) then 1   :: letter does not match
+      else
+        let u2 = [ id used ] in                          :: mark this cell used
+        let w2 = (tail word) in                          :: advance to the next letter
+        let down  = (bk_wsH grid w2 (add r 1) c rows cols u2) in
+        let right = (bk_wsH grid w2 r (add c 1) rows cols u2) in
+        let up    = (if (gte r 1) then (bk_wsH grid w2 (sub r 1) c rows cols u2) else 1) in  :: guard r-1
+        let left  = (if (gte c 1) then (bk_wsH grid w2 r (sub c 1) rows cols u2) else 1) in  :: guard c-1
+        (or down (or right (or up left)))                :: success if any neighbour completes the word
+  :: Try every starting cell (flattened as id = r*cols + c). Returns 0 if the word is found
+  :: somewhere, 1 if not.
+  bk_wordsearch = fn [grid word] ->
+    let rows = (len grid) in
+    let cols = (if (rows == 0) then 0 else (len (head grid))) in
+    let w = (bytes word) in
+    loop with [id = 0] :
+      if (gte id (mul rows cols)) then 1                 :: exhausted all start cells
+      else if ((bk_wsH grid w (div id cols) (mod id cols) rows cols 0) == 0) then 0
+      else again((add id 1))
+    end
+
+  :: =========================================================================
+  :: ready-made sample inputs so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  bk_cands0 = fn [_] -> [ 2 [ 3 [ 6 [ 7 0 ] ] ] ]        :: combination-sum candidates; target 7 -> {7},{2,2,3}
+  :: the classic word-search board:  A B C E / S F C S / A D E E
+  bk_grid0  = fn [_] -> [ (bytes %ABCE) [ (bytes %SFCS) [ (bytes %ADEE) 0 ] ] ]
+end

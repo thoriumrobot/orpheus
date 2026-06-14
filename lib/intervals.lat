@@ -1,0 +1,128 @@
+:: ===========================================================================
+:: intervals.lat — INTERVAL PROBLEMS, a high-frequency interview family. Almost all of
+:: them start with the same move: SORT the intervals (usually by start), which turns a
+:: tangle of overlaps into a single left-to-right sweep. Once sorted, you only ever
+:: compare an interval to the one you are currently holding.
+::
+::   MERGING        merge overlapping intervals, insert a new interval
+::   SCHEDULING     can one person attend all? minimum rooms for all? (sweep line)
+::   SET OPS        intersection of two interval lists, total covered length
+::
+:: (The `algo` module's interval SCHEDULING picks the most non-overlapping meetings;
+:: this module collects the other canonical interval problems.)
+::
+:: Representation: an interval is the pair [start end] — so start = (head x), end =
+:: (tail x). A list of intervals is a list of such pairs. We treat touching endpoints
+:: ([1 2] and [2 3]) as NON-overlapping unless a problem says otherwise.
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B`
+:: takes A when c is 0; `sub` errors on underflow, so widths are end - start with
+:: end >= start by construction.   Arms prefixed `iv_`.
+:: ===========================================================================
+import std
+core intervals
+
+  :: sort a list of intervals by start time — the setup step almost every arm below shares.
+  iv_bystart = fn [ivs] -> (sortby (fn [a b] -> (lte (head a) (head b))) ivs)
+
+  :: =========================================================================
+  :: MERGING
+  :: =========================================================================
+  :: MERGE OVERLAPPING INTERVALS: collapse a set of intervals into the minimal set of
+  :: disjoint ones. Sort by start, then sweep holding the current merged interval `cur`:
+  :: if the next interval starts at or before cur's end they overlap, so stretch cur's end
+  :: to cover both; otherwise cur is finished — emit it and start a fresh cur from the next.
+  iv_merge = fn [ivs] ->
+    let s = (iv_bystart ivs) in
+    if (s == 0) then 0                          :: nothing to merge
+    else loop with [c = (tail s), cur = (head s), acc = 0] :
+      if (c == 0) then (reverse [ cur acc ])    :: flush the final interval, restore order
+      else
+        let nx = (head c) in
+        if (lte (head nx) (tail cur))           :: next.start <= cur.end ? they overlap
+          then again((tail c), [ (head cur) (max (tail cur) (tail nx)) ], acc)  :: extend cur's end
+          else again((tail c), nx, [ cur acc ]) :: disjoint: close cur, open a new one at nx
+    end
+
+  :: INSERT INTERVAL into an already sorted, disjoint list, merging anything the newcomer
+  :: touches. Single sweep in three implicit phases: (1) intervals ending before `nw` starts
+  :: pass through untouched; (2) every interval overlapping `nw` is absorbed by widening the
+  :: running [lo hi]; (3) once an interval starts after `nw` ends, emit the widened `nw` and
+  :: append the untouched remainder. O(n), no second sort needed.
+  iv_insert = fn [ivs nw] ->
+    loop with [c = ivs, lo = (head nw), hi = (tail nw), acc = 0] :
+      if (c == 0) then (reverse [ [ lo hi ] acc ])           :: ran out: place the merged newcomer last
+      else
+        let x = (head c) in
+        if (lt (tail x) lo) then again((tail c), lo, hi, [ x acc ])   :: x ends before nw: keep as-is
+        else if (lt hi (head x))                                       :: x starts after nw: nw is settled
+             then (append (reverse [ [ lo hi ] acc ]) c)               :: emit nw, then the untouched tail
+        else again((tail c), (min lo (head x)), (max hi (tail x)), acc) :: overlap: widen nw to swallow x
+    end
+
+  :: =========================================================================
+  :: SCHEDULING — the sweep-line idea
+  :: =========================================================================
+  :: CAN ATTEND ALL MEETINGS? One person can attend every meeting iff no two overlap.
+  :: Sort by start, then if any meeting begins strictly before the previous one ends, they
+  :: conflict. Returns the loobean 0 = can attend all, 1 = a conflict exists.
+  iv_canattend = fn [ivs] ->
+    let s = (iv_bystart ivs) in
+    loop with [c = s] :
+      if (c == 0) then 0
+      else if ((tail c) == 0) then 0                         :: one (or zero) meeting left: fine
+      else if (lt (head (head (tail c))) (tail (head c)))    :: next.start < cur.end ? overlap
+           then 1
+      else again((tail c))
+    end
+
+  :: MINIMUM MEETING ROOMS = the maximum number of meetings happening AT ONCE. The sweep-
+  :: line trick: pull out all the start times and all the end times into two SORTED lists,
+  :: then walk them together. Each start that occurs before the next end needs a fresh room;
+  :: each time the earliest end passes, a room frees up. The peak occupancy is the answer.
+  iv_minrooms = fn [ivs] ->
+    let starts = (sort (map (fn [x] -> (head x)) ivs)) in    :: all start times, ascending
+    let ends   = (sort (map (fn [x] -> (tail x)) ivs)) in    :: all end times, ascending
+    loop with [ss = starts, ee = ends, cur = 0, best = 0] :
+      if (ss == 0) then best                                 :: every meeting has begun: peak is final
+      else if (lt (head ss) (head ee))                       :: next start is before the earliest end
+           then again((tail ss), ee, (add cur 1), (max best (add cur 1)))  :: occupy a room, track the peak
+      else again(ss, (tail ee), (sub cur 1), best)           :: a meeting ended: release a room
+    end
+
+  :: =========================================================================
+  :: SET OPERATIONS
+  :: =========================================================================
+  :: INTERSECTION of two lists of sorted, disjoint intervals. Two-pointer sweep: the overlap
+  :: of the two intervals currently under each pointer is [max of starts, min of ends], which
+  :: is real only when that low <= high. Then advance whichever interval ENDS first, since it
+  :: can meet nothing further.
+  iv_intersect = fn [la lb] ->
+    loop with [a = la, b = lb, acc = 0] :
+      if (or (a == 0) (b == 0)) then (reverse acc)           :: one list exhausted: done
+      else
+        let lo = (max (head (head a)) (head (head b))) in    :: the later of the two starts
+        let hi = (min (tail (head a)) (tail (head b))) in    :: the earlier of the two ends
+        let acc2 = (if (lte lo hi) then [ [ lo hi ] acc ] else acc) in  :: keep it only if non-empty
+        if (lt (tail (head a)) (tail (head b)))              :: a ends first: it can match nothing later
+          then again((tail a), b, acc2)
+          else again(a, (tail b), acc2)
+    end
+
+  :: TOTAL COVERED LENGTH: the measure of the union of the intervals, counting overlaps once.
+  :: Merge into disjoint pieces first, then sum each piece's width (end - start).
+  iv_coverage = fn [ivs] ->
+    (foldl (fn [acc x] -> (add acc (sub (tail x) (head x)))) 0 (iv_merge ivs))
+
+  :: =========================================================================
+  :: ready-made sample inputs so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  :: overlapping set -> merges to [1 6] [8 10] [15 18]; covered length 5+2+3 = 10.
+  iv_sample0 = fn [_] -> [ [1 3] [ [2 6] [ [8 10] [ [15 18] 0 ] ] ] ]
+  :: three meetings; [0 30] overlaps both others, but [5 10] and [15 20] are disjoint,
+  :: so a single person cannot attend all, and the minimum number of rooms is 2.
+  iv_meetings0 = fn [_] -> [ [0 30] [ [5 10] [ [15 20] 0 ] ] ]
+  :: two sorted interval lists for intersection (the classic LeetCode pair).
+  iv_a0 = fn [_] -> [ [0 2] [ [5 10] [ [13 23] [ [24 25] 0 ] ] ] ]
+  iv_b0 = fn [_] -> [ [1 5] [ [8 12] [ [15 24] [ [25 26] 0 ] ] ] ]
+end

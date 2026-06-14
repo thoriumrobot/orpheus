@@ -42,6 +42,28 @@ core std
   replicate = fn [n v] -> loop with [k = n, acc = 0] : if (k == 0) then acc else again((dec k), [ v acc ]) end
   zip = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else if (y == 0) then (reverse acc) else again((tail x), (tail y), [ [ (head x) (head y) ] acc ]) end
   foldr = fn [f z xs] -> (foldl (fn [a v] -> (f v a)) z (reverse xs))
+  :: --- general-purpose SORT (stable merge sort) ------------------------------
+  :: A comparator `cmp a b` returns the loobean 0 when a should come BEFORE b (i.e.
+  :: a <= b). Sorting is the single most-used interview primitive, so it lives here.
+  :: mergeby walks two already-sorted lists, always taking the smaller head; ties go
+  :: to the left list, which keeps the sort STABLE.
+  mergeby = fn [cmp xs ys] ->
+    loop with [a = xs, b = ys, acc = 0] :
+      if (a == 0) then (append (reverse acc) b)              :: left exhausted: emit the rest of right
+      else if (b == 0) then (append (reverse acc) a)         :: right exhausted: emit the rest of left
+      else if ((cmp (head a) (head b)) == 0)                 :: head a comes first (<=): take it
+           then again((tail a), b, [ (head a) acc ])
+      else again(a, (tail b), [ (head b) acc ])              :: otherwise take head b
+    end
+  :: sortby: split in half, sort each half, merge. O(n log n). A list of 0 or 1
+  :: element is already sorted (lt n 2 is the loobean 0 when n < 2).
+  sortby = fn [cmp xs] ->
+    let n = (len xs) in
+    if (lt n 2) then xs
+    else let h = (div n 2) in
+      (mergeby cmp (sortby cmp (take h xs)) (sortby cmp (drop h xs)))
+  :: sort naturals ascending — the common case, comparator fixed to <=.
+  sort = fn [xs] -> (sortby (fn [a b] -> (lte a b)) xs)
   :: --- general-purpose helpers (a fuller standard library) -----------------
   :: predicate combinators (predicates return the loobean 0 = true)
   any   = fn [f xs] -> loop with [c = xs] : if (c == 0) then 1 else if ((f (head c)) == 0) then 0 else again((tail c)) end
@@ -101,8 +123,50 @@ core std
                (if (lt i 2) then base else (mul base base)),
                (div i 2))
   end
+  :: ---- bitwise arithmetic ---------------------------------------------------
+  :: Latte atoms are unsigned arbitrary-precision integers, so "bits" are just the
+  :: base-2 digits. These give programs the bitwise vocabulary the language otherwise
+  :: lacked. SHIFTS are exact and cheap (a shift by k is a multiply/divide by 2^k):
+  ::   shl n k = n << k,  shr n k = n >> k,  bit n i = the i-th bit (0 or 1).
+  shl = fn [n k] -> (mul n (pow 2 k))
+  shr = fn [n k] -> (div n (pow 2 k))
+  bit = fn [n i] -> (mod (shr n i) 2)
+  :: the lowest set bit as a value (e.g. lowbit 12 = 4); 0 for 0. Handy in Fenwick
+  :: trees and "clear lowest bit" tricks.
+  lowbit = fn [n] ->
+    if (n == 0) then 0
+    else loop with [x = n, p = 1] :
+      if ((mod x 2) == 1) then p else again((div x 2), (mul p 2))
+    end
+  :: POPCOUNT: how many bits are set, by peeling the lowest bit (mod 2) each step.
+  popcount = fn [n] ->
+    loop with [x = n, c = 0] :
+      if (x == 0) then c else again((div x 2), (add c (mod x 2)))
+    end
+  :: AND/OR/XOR have no single arithmetic shortcut, so we fold bit by bit, combining
+  :: corresponding bits of a and b with a per-bit operator and re-weighting by 2^i.
+  :: A bit is min for AND (1 only if both 1), max for OR (1 unless both 0), and the
+  :: parity (a+b mod 2) for XOR.
+  bbit2 = fn [f a b] ->
+    loop with [x = a, y = b, p = 1, acc = 0] :
+      if (and (x == 0) (y == 0)) then acc
+      else again((div x 2), (div y 2), (mul p 2),
+                 (add acc (mul (f (mod x 2) (mod y 2)) p)))
+    end
+  band = fn [a b] -> (bbit2 (fn [p q] -> (min p q)) a b)
+  bor  = fn [a b] -> (bbit2 (fn [p q] -> (max p q)) a b)
+  bxor = fn [a b] -> (bbit2 (fn [p q] -> (mod (add p q) 2)) a b)
   :: byte length of a cord (0 for the empty cord / nil)
   bytelen = fn [c] -> loop with [x = c, n = 0] : if (x == 0) then n else again((div x 256), +(n)) end
+  :: a cord's bytes as a list, low byte (first character) first: (bytes %abc) -> [97 98 99].
+  :: A cord is an atom of little-endian bytes, so this is just repeated div/mod 256.
+  bytes = fn [c] ->
+    loop with [x = c, acc = 0] :
+      if (x == 0) then (reverse acc) else again((div x 256), [ (mod x 256) acc ])
+    end
+  :: rebuild a cord from a low-first byte list: (frombytes [97 98 99]) -> %abc. foldr
+  :: folds from the right so the last byte ends up in the high position: a + 256*(b + 256*c).
+  frombytes = fn [bs] -> (foldr (fn [b acc] -> (add b (mul acc 256))) 0 bs)
   :: concatenate two cords:  %ab `cat` %cd  ->  %abcd
   cat = fn [a b] -> if (a == 0) then b else (add a (mul b (pow 256 (bytelen a))))
   :: concatenate a list of cords

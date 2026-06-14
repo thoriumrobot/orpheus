@@ -1,0 +1,271 @@
+:: ===========================================================================
+:: algo.lat — the five algorithm-design paradigms from Steven Skiena's
+:: "The Algorithm Design Manual" (the technique catalog behind most Toptal /
+:: coding-interview questions), each implemented in Latte with a flagship example.
+::
+::   DIVIDE & CONQUER (Ch.4)  split, solve the halves, combine: merge sort,
+::                            binary search, quickselect.
+::   DYNAMIC PROGRAMMING(Ch.8) cache sub-answers and build up: coin change,
+::                            edit distance, longest increasing subsequence.
+::   GREEDY            (Ch.8) take the locally-best choice and never revisit:
+::                            interval scheduling.
+::   BACKTRACKING      (Ch.7) enumerate the search space, pruning dead ends:
+::                            subsets, permutations, N-queens.
+::   GRAPH TRAVERSAL   (Ch.5) explore a graph systematically: BFS shortest path,
+::                            DFS, topological sort.
+::
+:: A NOTE ON LOOBEANS (this is where interview code in Latte goes wrong): the
+:: comparison gates return 0 for TRUE. `lt a b` is 0 when a<b; `gt`,`lte`,`gte`
+:: likewise. `if c then A else B` takes A when c is 0. `filter p xs` keeps the
+:: elements where `p x` is 0, and `member x xs` is 0 when x is present. Every
+:: comparison below is written with that convention in mind.   Arms: `al_`.
+:: ===========================================================================
+import std
+core algo
+
+  :: =========================================================================
+  :: 1. DIVIDE & CONQUER  (Skiena Ch.4)
+  :: =========================================================================
+
+  :: merge two already-sorted lists into one sorted list. This is the "combine"
+  :: step of merge sort: repeatedly take the smaller head. O(n+m).
+  al_merge = fn [a b] ->
+    if (a == 0) then b
+    else if (b == 0) then a
+    :: (lte (head a) (head b)) is 0 (true) when a's head is the smaller/equal one
+    else if ((lte (head a) (head b)) == 0) then [ (head a) (al_merge (tail a) b) ]
+    else [ (head b) (al_merge a (tail b)) ]
+
+  :: MERGE SORT: the textbook divide & conquer. Split the list in half, sort each
+  :: half recursively, then merge. T(n)=2T(n/2)+O(n) => O(n log n), worst case.
+  al_msort = fn [xs] ->
+    let n = (len xs) in
+    if (lte n 1) then xs                       :: 0 or 1 element is already sorted
+    else let h = (div n 2) in
+      (al_merge (al_msort (take h xs)) (al_msort (drop h xs)))
+
+  :: BINARY SEARCH in a SORTED list: halve the search window each step, O(log n).
+  :: Returns the index of `target`, or %nf if absent. The classic off-by-one trap
+  :: is the loop condition; here we stop when lo passes hi (empty window).
+  al_bsearch = fn [xs target] ->
+    loop with [lo = 0, hi = (sub (len xs) 1)] :
+      if (gt lo hi) then %nf                   :: gt lo hi is 0 (true) once lo>hi: not found
+      else let mid = (div (add lo hi) 2), v = (nth xs mid) in
+        if (v == target) then mid
+        else if (lt v target) then again((add mid 1), hi)   :: v<target: go right
+        else again(lo, (sub mid 1))                          :: v>target: go left
+    end
+
+  :: QUICKSELECT: find the k-th smallest element (0-indexed) WITHOUT fully sorting.
+  :: Partition around a pivot into (<p),(==p),(>p); recurse only into the part that
+  :: contains rank k. Average O(n) — the divide & conquer behind median-finding.
+  al_qselect = fn [xs k] ->
+    if (xs == 0) then %nf
+    else let p = (head xs) in
+      let lo = (filter (fn [x] -> (lt x p)) xs),             :: keeps x where x<p
+          eq = (filter (fn [x] -> (if (x == p) then 0 else 1)) xs),
+          hi = (filter (fn [x] -> (gt x p)) xs),
+          nlo = (len lo), neq = (len eq) in
+      if (lt k nlo) then (al_qselect lo k)                   :: rank k sits in the < part
+      else if (lt k (add nlo neq)) then p                    :: rank k is a copy of the pivot
+      else (al_qselect hi (sub k (add nlo neq)))             :: rank k sits in the > part
+
+  :: =========================================================================
+  :: 2. DYNAMIC PROGRAMMING  (Skiena Ch.8)
+  :: =========================================================================
+
+  :: COIN CHANGE (minimum coins): make `amt` from `coins` of unlimited supply.
+  :: 1-D DP: best[a] = 1 + min over usable coins c of best[a-c]; best[0]=0. We grow
+  :: the table best[0..amt] left to right so every best[a-c] is already known.
+  :: `big` = amt+1 is an "unreachable" sentinel (no solution needs that many coins).
+  al_coins = fn [coins amt] ->
+    let big = (add amt 1) in
+    let best =
+      (loop with [a = 0, b = 0] :              :: b accumulates best[0],best[1],... in order
+        if (gt a amt) then b                   :: table complete once a passes amt
+        else let cur =
+          (if (a == 0) then 0
+           else (add 1 (foldl (fn [m c] ->
+                   if (gt c a) then m           :: coin bigger than a can't be used
+                   else (min m (nth b (sub a c)))) big coins))) in
+          again((add a 1), (append b [ cur 0 ]))
+      end) in
+    let r = (nth best amt) in
+    if (gte r big) then %nf else r             :: still the sentinel => amount is impossible
+
+  :: EDIT DISTANCE (Levenshtein): fewest insert/delete/substitute edits to turn list
+  :: `a` into list `b` — Skiena's flagship DP example. Classic 2-D table, but we only
+  :: ever need the PREVIOUS row, so we carry one row and rebuild it per character of a.
+  :: For row i and column j: min(delete=prow[j]+1, insert=newrow[j-1]+1,
+  :: substitute=prow[j-1]+cost) where cost is 0 on a match, 1 otherwise.
+  al_editrow = fn [prow ai b] ->
+    let n0 = (add (nth prow 0) 1) in           :: newrow[0]: deleting i characters of a
+    :: build the new row left-to-right; `acc` holds it REVERSED so acc's head is
+    :: newrow[j-1] (the "insert" neighbour we just computed).
+    (reverse (loop with [j = 1, acc = [ n0 0 ], bs = b] :
+       if (bs == 0) then acc
+       else let bj = (head bs),
+                cost = (if (ai == bj) then 0 else 1),
+                del = (add (nth prow j) 1),
+                ins = (add (head acc) 1),
+                subst = (add (nth prow (sub j 1)) cost),
+                v = (min del (min ins subst)) in
+            again((add j 1), [ v acc ], (tail bs))
+     end))
+  al_edit = fn [a b] ->
+    let row0 = (range (add (len b) 1)) in       :: row 0 = [0 1 2 .. len b] (all inserts)
+    (last (foldl (fn [prow ai] -> (al_editrow prow ai b)) row0 a))
+
+  :: LONGEST INCREASING SUBSEQUENCE (length): dp[i] = 1 + max dp[j] over j<i with
+  :: xs[j]<xs[i]. O(n^2) DP; the answer is the largest dp value. (Patience-sorting
+  :: gives O(n log n), but the quadratic DP is the one interviewers ask you to derive.)
+  al_lis = fn [xs] ->
+    let n = (len xs) in
+    (maximum (loop with [i = 0, dp = 0] :
+       if (i == n) then (if (dp == 0) then [ 0 0 ] else dp)   :: empty input => LIS 0
+       else let xi = (nth xs i),
+                best = (loop with [j = 0, m = 0] :             :: best dp[j] we can extend
+                   if (j == i) then m
+                   else again((add j 1),
+                      (if (lt (nth xs j) xi) then (max m (nth dp j)) else m)) end) in
+            again((add i 1), (append dp [ (add best 1) 0 ]))
+     end))
+
+  :: =========================================================================
+  :: 3. GREEDY  (Skiena Ch.8)
+  :: =========================================================================
+  :: Greedy = commit to the locally-best choice and never reconsider. It is only
+  :: correct when a problem has the right structure; interval scheduling is the
+  :: canonical case where "earliest finish first" is provably optimal.
+
+  :: an interval is a pair [start finish]. Insert one into a list kept sorted by
+  :: finish time (insertion sort; the schedules in interviews are short).
+  al_iins = fn [iv srt] ->
+    if (srt == 0) then [ iv 0 ]
+    else if ((lte (tail iv) (tail (head srt))) == 0) then [ iv srt ]
+    else [ (head srt) (al_iins iv (tail srt)) ]
+  al_isort = fn [ivs] -> (foldl (fn [acc iv] -> (al_iins iv acc)) 0 ivs)
+
+  :: INTERVAL SCHEDULING: the largest set of mutually non-overlapping intervals.
+  :: GREEDY PROOF SKETCH: sorting by earliest finish, always take the first interval;
+  :: it leaves the most room for the rest, so it is safe to keep. Then take each later
+  :: interval that starts at or after the last kept finish. O(n log n) for the sort.
+  al_sched = fn [ivs] ->
+    let sorted = (al_isort ivs) in
+    if (sorted == 0) then 0
+    else (loop with [c = (tail sorted), lastend = (tail (head sorted)), cnt = 1] :
+            if (c == 0) then cnt
+            else let iv = (head c) in
+              if (gte (head iv) lastend)                       :: start >= lastend: compatible
+              then again((tail c), (tail iv), (add cnt 1))
+              else again((tail c), lastend, cnt)               :: overlaps: skip it
+          end)
+
+  :: =========================================================================
+  :: 4. BACKTRACKING  (Skiena Ch.7)
+  :: =========================================================================
+  :: Backtracking = build candidates incrementally and abandon a branch the moment
+  :: it cannot lead to a solution. The whole search space is a tree; we DFS it.
+
+  :: SUBSETS (power set): each element is either out or in, doubling the count. The
+  :: recursion: subsets(rest) gives every subset without x; adding x to each gives
+  :: the rest. 2^n subsets. (A subset is a list; the empty subset is 0.)
+  al_subsets = fn [xs] ->
+    if (xs == 0) then [ 0 0 ]                  :: exactly one subset of {}: the empty set
+    else let rest = (al_subsets (tail xs)), x = (head xs) in
+      (append rest (map (fn [s] -> [ x s ]) rest))
+
+  :: remove the first occurrence of x from a list (helper for permutations).
+  al_remove = fn [x xs] ->
+    if (xs == 0) then 0
+    else if ((head xs) == x) then (tail xs)
+    else [ (head xs) (al_remove x (tail xs)) ]
+
+  :: PERMUTATIONS: choose each element in turn as the head, then permute what is
+  :: left. n! results. This is backtracking over "arrangements".
+  al_perms = fn [xs] ->
+    if (xs == 0) then [ 0 0 ]                  :: one permutation of {}: the empty arrangement
+    else (concat (map (fn [x] ->
+            (map (fn [p] -> [ x p ]) (al_perms (al_remove x xs)))) xs))
+
+  :: N-QUEENS (count solutions): place one queen per row; a candidate column is
+  :: pruned the instant it shares a column or diagonal with a queen already placed.
+  :: This pruning is what makes backtracking beat brute force.
+  al_absdiff = fn [a b] -> if (gte a b) then (sub a b) else (sub b a)
+  :: is column c safe against the queens in `cols` (most-recent row first)? Returns
+  :: 1 = safe, 0 = conflict. d counts rows back, so a diagonal clash is |c-qc| == d.
+  al_safe = fn [cols c] ->
+    loop with [cs = cols, d = 1] :
+      if (cs == 0) then 1
+      else let qc = (head cs) in
+        if (or (qc == c) ((al_absdiff c qc) == d)) then 0
+        else again((tail cs), (add d 1))
+    end
+  :: try every column in the current row; recurse on the safe ones; sum the leaves.
+  al_qcount = fn [n cols k] ->
+    if (k == n) then 1                         :: all n rows filled: one complete solution
+    else (foldl (fn [acc c] ->
+            if ((al_safe cols c) == 1) then (add acc (al_qcount n [ c cols ] (add k 1)))
+            else acc) 0 (range n))
+  al_queens = fn [n] -> (al_qcount n 0 0)      :: e.g. 4 -> 2, 6 -> 4, 8 -> 92
+
+  :: =========================================================================
+  :: 5. GRAPH TRAVERSAL  (Skiena Ch.5)
+  :: =========================================================================
+  :: A graph is an association list [ [node neighbours] .. ]; neighbours is a list
+  :: of nodes. al_neighbors looks one up (empty if the node has no out-edges).
+  al_neighbors = fn [g v] -> (aget g v 0)
+
+  :: expand one BFS frontier into the next: every not-yet-visited neighbour of every
+  :: frontier node. Returns [ nextfrontier newvisited ]. The visited set is what keeps
+  :: BFS from looping on cycles and what bounds it to O(V+E).
+  al_expand = fn [g frontier visited] ->
+    (foldl (fn [acc v] ->
+       (foldl (fn [a2 w] ->
+          if ((member w (tail a2)) == 0) then a2               :: already visited: skip
+          else [ (append (head a2) [ w 0 ]) (append (tail a2) [ w 0 ]) ])
+         acc (al_neighbors g v)))
+     [ 0 visited ] frontier)
+
+  :: BFS SHORTEST PATH (unweighted): explore level by level from src; the level at
+  :: which dst first appears IS the fewest-edges distance. %nf if unreachable.
+  al_bfs = fn [g src dst] ->
+    loop with [frontier = [ src 0 ], visited = [ src 0 ], dist = 0] :
+      if (frontier == 0) then %nf                              :: ran out of nodes: unreachable
+      else if ((member dst frontier) == 0) then dist           :: dst in this level: done
+      else let nxt = (al_expand g frontier visited) in
+        again((head nxt), (tail nxt), (add dist 1))
+    end
+
+  :: DFS: depth-first visit order from src, using an explicit stack. Pop a node; if
+  :: seen, skip; else record it and push its neighbours to the front (so we dive deep
+  :: before going wide). `acc` collects nodes newest-first, so reverse for visit order.
+  al_dfsv = fn [g stack acc] ->
+    if (stack == 0) then acc
+    else let v = (head stack) in
+      if ((member v acc) == 0) then (al_dfsv g (tail stack) acc)
+      else (al_dfsv g (append (al_neighbors g v) (tail stack)) [ v acc ])
+  al_dfs = fn [g src] -> (reverse (al_dfsv g [ src 0 ] 0))
+
+  :: TOPOLOGICAL SORT (DAG): order nodes so every edge points forward. DFS post-order
+  :: prepend gives it directly — a node is emitted only after all nodes it points to,
+  :: so prepending on finish leaves each node ahead of its dependents. (No cycle check
+  :: here; a real toposort would detect a back-edge and report "not a DAG".)
+  al_topov = fn [g v acc] ->
+    if ((member v acc) == 0) then acc          :: already placed: skip
+    else let acc2 = (foldl (fn [a w] -> (al_topov g w a)) acc (al_neighbors g v)) in
+      [ v acc2 ]
+  al_topo = fn [g nodes] -> (foldl (fn [acc v] -> (al_topov g v acc)) 0 nodes)
+
+  :: =========================================================================
+  :: ready-made sample inputs so every demo and tutorial panel is a one-liner.
+  :: =========================================================================
+  al_nums0   = fn [_] -> [ 5 [ 2 [ 8 [ 1 [ 9 [ 3 [ 7 0 ] ] ] ] ] ] ]   :: unsorted ints
+  al_sorted0 = fn [_] -> [ 1 [ 2 [ 3 [ 5 [ 7 [ 8 [ 9 0 ] ] ] ] ] ] ]   :: sorted ints
+  al_coins0  = fn [_] -> [ 1 [ 5 [ 6 [ 9 0 ] ] ] ]                      :: coin denominations
+  al_ivs0    = fn [_] -> [ [1 3] [ [2 5] [ [4 7] [ [6 8] [ [5 9] 0 ] ] ] ] ]  :: intervals
+  :: a small DAG:  a -> b -> d,  a -> c -> d,  d -> e
+  al_graph0  = fn [_] ->
+    [ [ %a [ %b [ %c 0 ] ] ] [ [ %b [ %d 0 ] ] [ [ %c [ %d 0 ] ] [ [ %d [ %e 0 ] ] [ [ %e 0 ] 0 ] ] ] ] ]
+  al_nodes0  = fn [_] -> [ %a [ %b [ %c [ %d [ %e 0 ] ] ] ] ]
+end

@@ -1,0 +1,150 @@
+:: ===========================================================================
+:: greedy.lat — GREEDY ALGORITHMS, where you commit to the locally best choice at each step
+:: and never reconsider. The whole difficulty is RECOGNISING when that works: a greedy choice
+:: is valid only when it can be justified by an EXCHANGE ARGUMENT (any optimal solution can be
+:: rewritten to agree with the greedy pick without getting worse) or by a clear invariant.
+:: When greed is valid it is usually a single linear sweep — far simpler than the DP you would
+:: otherwise need.
+::
+::   REACHABILITY  jump game (can you finish?) and its minimum-jumps variant
+::   CIRCUIT       gas station: where can you start a loop?
+::   SCANNING      partition labels (greedy boundary extension)
+::   TWO-PASS      candy distribution (satisfy each side, then take the max)
+::   COUNTING      task scheduler (the most frequent task sets the pace)
+::
+:: (The `algo` module already shows greedy interval scheduling; this collects the rest.)
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B` takes A
+:: when c is 0; `sub` errors on underflow, so subtractions below are arranged to stay >= 0
+:: (notably the gas-station sweep only ever subtracts a cost once it knows the tank covers it).
+:: Arms prefixed `gd_`.
+:: ===========================================================================
+import std
+core greedy
+
+  :: =========================================================================
+  :: REACHABILITY — the jump game
+  :: =========================================================================
+  :: CAN YOU REACH THE END? xs[i] is the maximum forward jump from index i. Greedy sweep: keep
+  :: the FURTHEST index reachable so far; the instant the cursor stands beyond that reach you are
+  :: stranded. The exchange argument: nothing is lost by always remembering the furthest reach,
+  :: since any index it covers is reachable. Returns 0 = reachable, 1 = stuck.
+  gd_canjump = fn [xs] ->
+    let n = (len xs) in
+    loop with [i = 0, reach = 0] :
+      if (gte i n) then 0                          :: passed every index without stalling
+      else if (gt i reach) then 1                  :: standing beyond the furthest reach: stuck
+      else again((add i 1), (max reach (add i (nth xs i))))
+    end
+
+  :: MINIMUM JUMPS to reach the last index (assuming it is reachable). Greedy in BFS "levels":
+  :: `curend` is the furthest index reachable using `jumps` jumps; while sweeping we track the
+  :: furthest reachable overall, and the moment the cursor hits the current level's boundary we
+  :: must spend one more jump and the boundary jumps out to that furthest.
+  gd_minjumps = fn [xs] ->
+    let n = (len xs) in
+    if (lte n 1) then 0                            :: already at (or past) the only index
+    else loop with [i = 0, curend = 0, far = 0, jumps = 0] :
+      if (gte i (sub n 1)) then jumps              :: reached the last index
+      else let far2 = (max far (add i (nth xs i))) in
+        if (i == curend)                           :: end of the current jump's range
+          then again((add i 1), far2, far2, (add jumps 1))
+          else again((add i 1), curend, far2, jumps)
+    end
+
+  :: =========================================================================
+  :: CIRCUIT — gas station
+  :: =========================================================================
+  :: A circular row of stations: gas[i] fuel available at i, cost[i] to drive from i to i+1.
+  :: From which station can you drive all the way round? Two greedy facts make it a single
+  :: sweep: (1) it is possible at all iff total gas >= total cost; (2) if the tank ever runs dry
+  :: between start s and station i, then NO station in [s, i] can be the start, so the next
+  :: candidate is i+1. We never compute a negative tank: a cost is only subtracted once the tank
+  :: is known to cover it. Returns the 0-based start, or n (= len) if the loop is impossible.
+  gd_gas = fn [gas cost] ->
+    let n = (len gas) in
+    if (lt (sum gas) (sum cost)) then n            :: not enough fuel overall: impossible
+    else loop with [i = 0, tank = 0, start = 0] :
+      if (gte i n) then start                      :: a full pass succeeded from `start`
+      else
+        let avail = (add tank (nth gas i)) in      :: fuel after refuelling at station i
+        if (gte avail (nth cost i))                :: enough to reach the next station?
+          then again((add i 1), (sub avail (nth cost i)), start)  :: drive on, carry the surplus
+          else again((add i 1), 0, (add i 1))      :: dry: restart from i+1 with an empty tank
+    end
+
+  :: =========================================================================
+  :: SCANNING — partition labels
+  :: =========================================================================
+  :: the last index at which byte b appears in xs (used to fix each part's right edge).
+  gd_lastpos = fn [xs b] ->
+    loop with [c = xs, i = 0, best = 0] :
+      if (c == 0) then best
+      else if ((head c) == b) then again((tail c), (add i 1), i)
+      else again((tail c), (add i 1), best)
+    end
+  :: PARTITION LABELS: cut a string into as many parts as possible so that no letter spans two
+  :: parts. Greedy: as you scan, push the current part's end out to the LAST occurrence of every
+  :: letter seen; when the cursor finally reaches that end, the part is forced to close exactly
+  :: there. Returns the list of part sizes.
+  gd_partition = fn [s] ->
+    let xs = (bytes s) in
+    let n = (len xs) in
+    loop with [i = 0, start = 0, end = 0, acc = 0] :
+      if (gte i n) then (reverse acc)
+      else
+        let e2 = (max end (gd_lastpos xs (nth xs i))) in   :: stretch the part to this letter's last index
+        if (i == e2)                                       :: cursor reached the forced boundary
+          then again((add i 1), (add i 1), (add i 1), [ (add (sub e2 start) 1) acc ])  :: close, record size
+          else again((add i 1), start, e2, acc)
+    end
+
+  :: =========================================================================
+  :: TWO-PASS — candy distribution
+  :: =========================================================================
+  :: left-to-right candy counts: the first child gets 1, and each child with a strictly higher
+  :: rating than the one on its LEFT gets one more than that neighbour, else resets to 1.
+  gd_candyL = fn [rs] ->
+    if (rs == 0) then 0
+    else loop with [c = (tail rs), prevr = (head rs), prevc = 1, acc = [ 1 0 ]] :
+      if (c == 0) then (reverse acc)
+      else
+        let r = (head c) in
+        let cur = (if (gt r prevr) then (add prevc 1) else 1) in   :: rises above the left neighbour?
+        again((tail c), r, cur, [ cur acc ])
+    end
+  :: CANDY: every child needs >= 1 candy and must out-candy any strictly-lower-rated neighbour;
+  :: minimise the total. The two neighbour rules are independent, so satisfy each with a one-way
+  :: pass (the right-to-left rule is just the left pass on the reversed ratings) and give every
+  :: child the MAX of the two demands — the smallest count meeting both constraints.
+  gd_candy = fn [ratings] ->
+    if (ratings == 0) then 0
+    else
+      let left = (gd_candyL ratings) in                     :: satisfies the left-neighbour rule
+      let right = (reverse (gd_candyL (reverse ratings))) in :: satisfies the right-neighbour rule
+      (sum (map (fn [p] -> (max (head p) (tail p))) (zip left right)))
+
+  :: =========================================================================
+  :: COUNTING — task scheduler
+  :: =========================================================================
+  :: Given each distinct task's frequency and a cooldown of `nslots` between repeats of the SAME
+  :: task, find the minimum total time (counting forced idles). The most frequent task paces
+  :: everything: it lays down (max-1) frames of width (nslots+1), and the final frame holds every
+  :: task tied for that maximum frequency. But if there are enough OTHER tasks to fill all the
+  :: idle gaps, no idling is needed and the answer is simply the task count. Take the max of the two.
+  gd_taskschedule = fn [freqs nslots] ->
+    let mx = (maximum freqs) in
+    let cntmax = (count (fn [f] -> (if (f == mx) then 0 else 1)) freqs) in  :: tasks sharing the peak
+    let frame = (mul (sub mx 1) (add nslots 1)) in           :: (max-1) full cooldown frames
+    (max (add frame cntmax) (sum freqs))
+
+  :: =========================================================================
+  :: ready-made sample inputs so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  gd_jump0 = fn [_] -> [ 2 [ 3 [ 1 [ 1 [ 4 0 ] ] ] ] ]   :: canjump -> 0 (reachable), minjumps -> 2
+  gd_jump1 = fn [_] -> [ 3 [ 2 [ 1 [ 0 [ 4 0 ] ] ] ] ]   :: canjump -> 1 (stuck at index 3)
+  gd_gasG0 = fn [_] -> [ 1 [ 2 [ 3 [ 4 [ 5 0 ] ] ] ] ]   :: gas
+  gd_gasC0 = fn [_] -> [ 3 [ 4 [ 5 [ 1 [ 2 0 ] ] ] ] ]   :: cost; valid start is index 3
+  gd_rat0  = fn [_] -> [ 1 [ 0 [ 2 0 ] ] ]               :: candy -> 5 (2,1,2)
+  gd_freqs0 = fn [_] -> [ 3 [ 3 0 ] ]                    :: two tasks x3; with cooldown 2 -> 8 time units
+end

@@ -1,0 +1,149 @@
+:: ===========================================================================
+:: grid.lat — MATRIX / GRID ALGORITHMS, a top-frequency interview category. A grid
+:: is an implicit graph (each cell adjacent to its 4 neighbours), so these problems
+:: blend traversal, dynamic programming, and array surgery.
+::
+::   CONNECTIVITY    number of islands, flood fill (4-directional)
+::   GRID DP         count unique right/down paths
+::   TRANSFORMS      transpose, rotate 90 degrees, spiral-order traversal
+::
+:: Representation: a grid is a LIST OF ROWS, each row a list of cell values. We assume
+:: it is rectangular. Cells are addressed (r, c) with r the row and c the column, both
+:: 0-based. A visited set is an assoc map keyed by the flattened index r*cols + c.
+::
+:: LOOBEAN REMINDER: comparison gates return 0 for TRUE; `if c then A else B` takes A
+:: when c is 0; `and`/`or` are loobean (0 = true); `sub` errors on underflow, so each
+:: neighbour offset is guarded before it is computed.   Arms prefixed `gr_`.
+:: ===========================================================================
+import std
+core grid
+
+  :: =========================================================================
+  :: ACCESSORS
+  :: =========================================================================
+  :: number of rows = length of the outer list.
+  gr_rows = fn [g] -> (len g)
+  :: number of columns = length of the first row (0 for an empty grid).
+  gr_cols = fn [g] -> if (g == 0) then 0 else (len (head g))
+  :: the value at (r, c): index into row r, then into column c (both 0-based).
+  gr_at = fn [g r c] -> (nth (nth g r) c)
+
+  :: a list of every coordinate [r c] in the grid, row-major. Built by mapping each
+  :: row index to its row of [r c] pairs, then flattening with concat.
+  gr_cells = fn [rows cols] ->
+    (concat (map (fn [r] -> (map (fn [c] -> [ r c ]) (range cols))) (range rows)))
+
+  :: =========================================================================
+  :: CONNECTIVITY — flood fill and counting islands
+  :: =========================================================================
+  :: FLOOD FILL: starting at (sr, sc), mark every 4-connected land cell (value 1) of the
+  :: same component as visited, returning the updated visited set. We use an EXPLICIT
+  :: stack (a worklist list) rather than recursion so a large component cannot overflow.
+  :: Neighbours are pushed only when in bounds — the (sub r 1)/(sub c 1) offsets are
+  :: guarded by (gt r 0)/(gt c 0) so they never underflow.
+  gr_flood = fn [g rows cols vis sr sc] ->
+    loop with [stack = [ [ sr sc ] 0 ], v = vis ] :     :: stack holds [r c] pairs to process
+      if (stack == 0) then v                            :: worklist empty: component fully marked
+      else
+        let rc = (head stack) in                        :: next cell to consider
+        let rest = (tail stack) in                      :: the remaining worklist
+        let r = (head rc) in                            :: its row  (rc is the pair [r c])
+        let c = (tail rc) in                            :: its column
+        let key = (add (mul r cols) c) in               :: flattened index for the visited set
+        if (or ((aget v key 0) == 1)                    :: already visited, OR...
+               (not ((gr_at g r c) == 1)))              :: ...this cell is water (not land)
+          then again(rest, v)                           :: skip it
+          else
+            let v2 = (aput v key 1) in                  :: mark this land cell visited
+            :: push the up-to-four in-bounds neighbours (append handles the empty 0s)
+            let up    = (if (gt r 0) then [ [ (sub r 1) c ] 0 ] else 0) in
+            let down  = (if (lt (add r 1) rows) then [ [ (add r 1) c ] 0 ] else 0) in
+            let left  = (if (gt c 0) then [ [ r (sub c 1) ] 0 ] else 0) in
+            let right = (if (lt (add c 1) cols) then [ [ r (add c 1) ] 0 ] else 0) in
+            again((append up (append down (append left (append right rest)))), v2)
+    end
+
+  :: NUMBER OF ISLANDS: scan every cell; whenever we meet a land cell we have not yet
+  :: visited, it begins a new island — flood its whole component (so we never count it
+  :: again) and add one to the tally. State is threaded as a pair [visited count].
+  gr_islands = fn [g] ->
+    let rows = (gr_rows g) in
+    let cols = (gr_cols g) in
+    (tail                                                :: keep only the count from [vis count]
+      (foldl (fn [acc rc] ->
+                let vis = (head acc) in                  :: visited set so far
+                let count = (tail acc) in                :: islands found so far
+                let r = (head rc) in
+                let c = (tail rc) in
+                let key = (add (mul r cols) c) in
+                if (and ((gr_at g r c) == 1)             :: a land cell...
+                        ((aget vis key 0) == 0))         :: ...not yet visited: new island
+                  then [ (gr_flood g rows cols vis r c) (add count 1) ]
+                  else [ vis count ])                    :: water or already counted: unchanged
+             [ 0 0 ]                                     :: start: empty visited set, 0 islands
+             (gr_cells rows cols)))
+
+  :: =========================================================================
+  :: GRID DYNAMIC PROGRAMMING
+  :: =========================================================================
+  :: UNIQUE PATHS: how many distinct routes move from the top-left to the bottom-right
+  :: of an r-by-c grid taking only steps RIGHT or DOWN. DP recurrence:
+  ::   paths(i,j) = paths(i-1,j) + paths(i,j-1),  with the first row and column all 1.
+  :: We keep only the PREVIOUS row (a rolling array): the new row's cell j is the cell
+  :: above (prev[j]) plus the cell to the left (the value we just computed).
+  gr_pathcount = fn [rows cols] ->
+    if (or (rows == 0) (cols == 0)) then 0               :: a degenerate grid has no path
+    else loop with [i = 1, prev = (replicate cols 1) ] : :: row 0 is all 1s (only one way along an edge)
+      if (gte i rows) then (last prev)                   :: done: bottom-right is the last cell
+      else
+        let cur =                                        :: build row i left-to-right
+          (loop with [j = 1, row = [ 1 0 ] ] :           :: cur[0] = 1 (left column is all 1s)
+             if (gte j cols) then (reverse row)          :: row was accumulated newest-first
+             else again((add j 1),
+                        [ (add (nth prev j) (head row)) row ]) end)  :: above + left
+        in again((add i 1), cur)
+    end
+
+  :: =========================================================================
+  :: TRANSFORMS — transpose, rotate, spiral
+  :: =========================================================================
+  :: TRANSPOSE: swap rows and columns. The new row c is the old column c, gathered by
+  :: reading cell c out of every original row. The empty grid transposes to itself.
+  gr_transpose = fn [g] ->
+    if (g == 0) then 0
+    else (map (fn [c] -> (map (fn [row] -> (nth row c)) g)) (range (gr_cols g)))
+
+  :: ROTATE 90 degrees CLOCKWISE = transpose, then reverse each resulting row.
+  gr_rotate = fn [g] -> (map (fn [row] -> (reverse row)) (gr_transpose g))
+
+  :: rotate 90 degrees COUNTER-clockwise = transpose, then reverse the ORDER of the rows.
+  :: Used by the spiral: it brings the old right column up to be the new first row.
+  gr_rotccw = fn [g] -> (reverse (gr_transpose g))
+
+  :: SPIRAL ORDER via the elegant peel-and-rotate method: emit the top row, then spiral
+  :: the rest — but first rotate the rest counter-clockwise so that what used to be the
+  :: right column is now the top row. Recursing repeats this for right column, bottom
+  :: row, left column, and inward. No index arithmetic, no underflow.
+  gr_spiral = fn [g] ->
+    if (g == 0) then 0                                   :: no rows left
+    else if ((head g) == 0) then 0                       :: top row is empty: nothing left
+    else (append (head g) (gr_spiral (gr_rotccw (tail g))))
+
+  :: =========================================================================
+  :: ready-made samples so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  :: a 4x4 grid of land(1)/water(0) with exactly THREE islands:
+  ::   1 1 0 1     A = {(0,0),(0,1),(1,0)}   (top-left L-shape)
+  ::   1 0 0 0     B = {(0,3)}               (lone cell)
+  ::   0 0 1 1     C = {(2,2),(2,3),(3,3)}   (bottom-right hook)
+  ::   0 0 0 1
+  gr_grid0 = fn [_] ->
+    [ [1 [1 [0 [1 0]]]]
+      [ [1 [0 [0 [0 0]]]]
+        [ [0 [0 [1 [1 0]]]]
+          [ [0 [0 [0 [1 0]]]] 0 ] ] ] ]
+  :: a 3x3 matrix 1..9 for rotate / spiral demos:
+  ::   1 2 3 / 4 5 6 / 7 8 9
+  gr_mat0 = fn [_] ->
+    [ [1 [2 [3 0]]] [ [4 [5 [6 0]]] [ [7 [8 [9 0]]] 0 ] ] ]
+end

@@ -136,8 +136,24 @@
     <a href="#" onclick="openTool('Plan');return false" title="economic-planning tool text">Plan</a><a class="pg" href="/plan" target="_blank">↗</a>
     <a href="#" onclick="openTool('Acplan');return false" title="accountable-planning tool text: quadratic vote → plan → vouchers → audit">Acplan</a>
     <a href="#" onclick="openTool('Db');return false" title="database tool text: state, queries, MVCC history">Db</a>
+    <a href="#" onclick="openTool('Algo');return false" title="algorithm-design techniques: divide & conquer, DP, greedy, backtracking, graph traversal (Skiena)">Algo</a>
+    <a href="#" onclick="openTool('Dsa');return false" title="data structures & coding patterns: two pointers, sliding window, fast/slow, stack, prefix sums, heap, BST, trie, union-find">Dsa</a>
+    <a href="#" onclick="openTool('Wgraph');return false" title="weighted graph algorithms: Dijkstra shortest paths, Kruskal & Prim minimum spanning trees">Wgraph</a>
+    <a href="#" onclick="openTool('Numth');return false" title="number theory & math: GCD/LCM, primality, Sieve of Eratosthenes, modular exponentiation, combinatorics, digit ops">Numth</a>
+    <a href="#" onclick="openTool('Bits');return false" title="bit manipulation: XOR single/missing number, add without arithmetic, power-of-two, bit get/set/clear, subset bitmasks, Hamming distance">Bits</a>
+    <a href="#" onclick="openTool('Strings');return false" title="string algorithms: reverse, palindrome, anagrams, first-unique char, naive & Rabin-Karp substring search, longest common prefix, run-length encoding">Strings</a>
+    <a href="#" onclick="openTool('Grid');return false" title="matrix/grid algorithms: number of islands (flood fill), unique-paths grid DP, transpose, rotate 90, spiral-order traversal">Grid</a>
+    <a href="#" onclick="openTool('Design');return false" title="data-structure design: min-stack with O(1) getMin, FIFO queue from two stacks, LRU cache with capacity eviction">Design</a>
+    <a href="#" onclick="openTool('Trees');return false" title="binary trees: in/pre/post-order and level-order traversals, height, count, invert, max root-to-leaf path sum, lowest common ancestor, validate-BST">Trees</a>
+    <a href="#" onclick="openTool('Dp');return false" title="dynamic programming: climbing stairs, house robber, subset-sum, equal partition, coin-change ways, 0/1 knapsack, longest common subsequence">Dp</a>
+    <a href="#" onclick="openTool('Intervals');return false" title="interval problems: merge overlapping, insert interval, can-attend-all, minimum meeting rooms (sweep line), interval intersection, total covered length">Intervals</a>
+    <a href="#" onclick="openTool('Search');return false" title="binary search variants: lower/upper bound, occurrence count, rotated-array search and minimum, peak finding, integer sqrt and Koko-bananas via binary-search-on-the-answer">Search</a>
+    <a href="#" onclick="openTool('Graphs');return false" title="graph decision problems: Kahn topological sort, directed cycle / course-schedule detection, connected components, reachability, bipartite 2-colouring">Graphs</a>
+    <a href="#" onclick="openTool('Backtrack');return false" title="backtracking / combinatorial search: generate parentheses, combination sum, k-combinations, palindrome partitioning, grid word search">Backtrack</a>
+    <a href="#" onclick="openTool('Greedy');return false" title="greedy algorithms: jump game and minimum jumps, gas station circuit, partition labels, candy distribution, task scheduler">Greedy</a>
     <a href="#" onclick="openTool('Sym');return false" title="symbol index: which modules define a name, shadowing, arities (db-backed)">Sym</a>
     <a href="#" onclick="openTool('Findb');return false" title="financial price data in the database: sparkline, statistics, lag-1 model">Findb</a>
+    <a href="#" onclick="openTool('Data');return false" title="persistent database: named stores on an on-disk write-ahead log, surviving restarts">Data</a>
     <a href="#" onclick="openTool('Trace');return false" title="ray-tracer tool text">Trace</a>
     <a href="#" onclick="openTool('Derive');return false" title="Ligurian derivation tool text">Derive</a><a class="pg" href="/derive" target="_blank">↗</a>
     <a href="#" onclick="openTool('Debug');return false" title="the Loom call-tracer debugger">Debug</a>
@@ -625,7 +641,7 @@ function renderLine(text){
   return d;
 }
 function looksLikeCommand(t){
-  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|sym|findb|acplan\.|db\.|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
+  return /^(chart|gfx|trace|ta|trade|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|debug|xiangqi|sym|findb|data|acplan\.|db\.|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
 }
 /* serialize ONE rendered line back to markdown */
 function lineToMarkdown(node){
@@ -1055,6 +1071,35 @@ function runObjectCommand(line, done){
         .catch(function(e){ done('findb: '+e, true, true); });
       return true;
     }
+    case 'data': case 'pdb': {
+      // the PERSISTENT database (src/dbservice.rs via /api/db): named databases on
+      // an on-disk write-ahead log, surviving restarts.
+      //   data <name> put <key> <record-expr>   data <name> get <key>
+      //   data <name> query <field>  data <name> history <key>  data <name> dash
+      //   data list
+      var dt = rest.trim();
+      function dbEmbed(h){ var m=/^\u0001(svg|html)\u0001([\s\S]*)$/.exec(h); if(m) done(m[2], false); else done(h, true, /error/i.test(h)); }
+      if(dt==='list' || dt===''){
+        fetch('/api/db?op=list').then(function(r){return r.text();}).then(function(x){ done(x, true); }).catch(function(e){ done('data: '+e, true, true); });
+        return true;
+      }
+      var s1=dt.indexOf(' '); var dnm=s1<0?dt:dt.slice(0,s1); var aft=s1<0?'':dt.slice(s1+1).trim();
+      var s2=aft.indexOf(' '); var dop=s2<0?aft:aft.slice(0,s2); var darg=s2<0?'':aft.slice(s2+1).trim();
+      if(dop==='put'){
+        var s3=darg.indexOf(' '); var dk=s3<0?darg:darg.slice(0,s3); var drec=s3<0?'':darg.slice(s3+1).trim();
+        post('/api/db?op=put&name='+encodeURIComponent(dnm)+'&key='+encodeURIComponent(dk), drec, function(out){ done(out, true, /error/i.test(out)); });
+        return true;
+      }
+      if(dop==='delete' || dop==='del'){
+        post('/api/db?op=delete&name='+encodeURIComponent(dnm)+'&key='+encodeURIComponent(darg), '', function(out){ done(out, true, /error/i.test(out)); });
+        return true;
+      }
+      var qs='/api/db?op='+encodeURIComponent(dop||'dash')+'&name='+encodeURIComponent(dnm);
+      if(dop==='get'||dop==='history') qs+='&key='+encodeURIComponent(darg);
+      if(dop==='query') qs+='&field='+encodeURIComponent(darg);
+      fetch(qs).then(function(r){return r.text();}).then(dbEmbed).catch(function(e){ done('data: '+e, true, true); });
+      return true;
+    }
     default: return false; // not an object command
   }
 }
@@ -1257,7 +1302,7 @@ function exec(line, fromViewer, ctx){
              trade:'Trade.Out',advise:'Trade.Out',fin:'Fin.Out',gpu:'Gpu.Out',
              derive:'Derive.Out',plan:'Plan.Out',drawing:'Draw.Out',
              phono:'Phono.Out',soundlib:'Sound.Out',soundchanges:'Sound.Out',
-             sym:'Sym.Out',symbol:'Sym.Out',findb:'Findb.Out',fdb:'Findb.Out',
+             sym:'Sym.Out',symbol:'Sym.Out',findb:'Findb.Out',fdb:'Findb.Out',data:'Data.Out',pdb:'Data.Out',
              debug:'Debug.Out',trace2:'Debug.Out'};
   if(OUT[headTok]){
     if(sink){
@@ -1648,6 +1693,353 @@ var TOOLS = {
 '\n'+
 'Field values can\u2019t contain `]`, so list arguments (records, ballots) are\n'+
 'typed into the command lines directly — edit any line above and middle-click it.\n',
+ Algo:
+'# Algo.Tool \u2014 algorithm-design techniques\n'+
+'The five paradigms from Skiena\u2019s The Algorithm Design Manual \u2014 the toolkit\n'+
+'behind most coding interviews \u2014 each a heavily-commented module in lib/algo.lat\n'+
+'(prefix al_). Every button embeds a live result below it.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText algorithm-techniques) [Open the guide](run: System.Edit data-intensive)\n'+
+'\n'+
+'## Divide & conquer \u2014 split, solve, combine\n'+
+'[Merge sort](run: eval (al_msort (al_nums0 0))) [Binary search for 7](run: eval (al_bsearch (al_sorted0 0) 7)) [Quickselect median](run: eval (al_qselect (al_nums0 0) 3))\n'+
+'\n'+
+'## Dynamic programming \u2014 remember sub-answers\n'+
+'amount [field: amt=11]\n'+
+'[Min coins for the amount](run: eval (al_coins (al_coins0 0) $amt)) [LIS length](run: eval (al_lis [ 3 [ 1 [ 4 [ 1 [ 5 [ 9 [ 2 [ 6 0 ] ] ] ] ] ] ] ]))\n'+
+'\n'+
+'## Greedy \u2014 best local choice (earliest finish first)\n'+
+'[Max non-overlapping intervals](run: eval (al_sched (al_ivs0 0)))\n'+
+'\n'+
+'## Backtracking \u2014 search, prune dead ends\n'+
+'board n [field: nq=8]\n'+
+'[Count N-queens solutions](run: eval (al_queens $nq)) [All subsets of {1,2,3}](run: eval (al_subsets [ 1 [ 2 [ 3 0 ] ] ]))\n'+
+'\n'+
+'## Graph traversal \u2014 explore systematically\n'+
+'A small DAG: a\u2192b,c; b,c\u2192d; d\u2192e.\n'+
+'[BFS shortest a\u2192e](run: eval (al_bfs (al_graph0 0) %a %e)) [DFS order](run: eval (al_dfs (al_graph0 0) %a)) [Topological sort](run: eval (al_topo (al_graph0 0) (al_nodes0 0)))\n'+
+'\n'+
+'Edit any command line and middle-click to re-run. `latte algo <topic>` prints the\n'+
+'same demos in a terminal (topics: dc dp greedy backtracking graph).\n',
+ Dsa:
+'# Dsa.Tool \u2014 data structures & coding patterns\n'+
+'The patterns and structures an interview leans on (companion to Algo), each a\n'+
+'commented section of lib/dsa.lat (prefix ds_). Spot the cue, reach for the\n'+
+'structure. Every button embeds a live result below it.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText dsa-techniques)\n'+
+'\n'+
+'## Two pointers \u2014 sorted array, scan inward\n'+
+'target [field: tgt=9]\n'+
+'[Pair sum to target](run: eval (ds_pairsum (ds_arr0 0) $tgt)) [Is racecar a palindrome](run: eval (ds_ispalin [ %r [ %a [ %c [ %e [ %c [ %a [ %r 0 ] ] ] ] ] ] ]))\n'+
+'\n'+
+'## Sliding window \u2014 contiguous runs\n'+
+'[Max sum of 2 adjacent](run: eval (ds_maxwin (ds_win0 0) 2)) [Longest unique substring](run: eval (ds_longestuniq (ds_str0 0)))\n'+
+'\n'+
+'## Fast & slow \u2014 linked-list cycle\n'+
+'[Cyclic list?](run: eval (ds_hascycle (ds_cyclic 0) %a)) [Acyclic list?](run: eval (ds_hascycle (ds_acyclic 0) %a))\n'+
+'\n'+
+'## Stack \u2014 match, evaluate, next-greater\n'+
+'[Balanced ([]{})](run: eval (ds_balanced (ds_bal0 0))) [Unbalanced ([)]](run: eval (ds_balanced (ds_bal1 0))) [RPN (3 4 + 5 *)](run: eval (ds_rpn (ds_rpn0 0))) [Next greater of 2 1 3](run: eval (ds_nextgreater [ 2 [ 1 [ 3 0 ] ] ]))\n'+
+'\n'+
+'## Prefix sums \u2014 O(1) range queries\n'+
+'[Prefix table of 2 4 6](run: eval (ds_prefix [ 2 [ 4 [ 6 0 ] ] ])) [Range sum [1,3)](run: eval (ds_rangesum (ds_prefix [ 2 [ 4 [ 6 0 ] ] ]) 1 3))\n'+
+'\n'+
+'## Heap \u2014 top-K and the minimum\n'+
+'k [field: kk=3]\n'+
+'[Heapsort](run: eval (ds_heapsort (ds_unsort0 0))) [K smallest](run: eval (ds_topk (ds_unsort0 0) $kk))\n'+
+'\n'+
+'## BST \u2014 ordered lookups\n'+
+'[Inorder (sorted)](run: eval (ds_bstinorder (ds_bstins (ds_bstins (ds_bstins (ds_bstins (ds_bstins 0 5) 2) 8) 1) 9)))\n'+
+'\n'+
+'## Trie \u2014 prefixes & dictionaries\n'+
+'[Has word cat](run: eval (ds_thas (ds_tins (ds_tins (ds_tnew 0) [ %c [ %a [ %t 0 ] ] ]) [ %c [ %a [ %r 0 ] ] ]) [ %c [ %a [ %t 0 ] ] ])) [Is ca a prefix](run: eval (ds_tprefix (ds_tins (ds_tnew 0) [ %c [ %a [ %t 0 ] ] ]) [ %c [ %a 0 ] ]))\n'+
+'\n'+
+'## Union-Find \u2014 connectivity\n'+
+'[Components after 2 unions](run: eval (ds_ufcount (ds_ufunion (ds_ufunion (ds_ufnew [ %a [ %b [ %c [ %d 0 ] ] ] ]) %a %b) %c %d)))\n'+
+'\n'+
+'`latte dsa <topic>` prints the same demos (pointers stack prefix heap bst trie unionfind).\n',
+ Wgraph:
+'# Wgraph.Tool \u2014 weighted graph algorithms\n'+
+'The tier above BFS/DFS: shortest paths and minimum spanning trees, in lib/wgraph.lat\n'+
+'(prefix wg_). Sample graph (undirected): a-b 4, a-c 1, b-c 2, b-d 5, c-d 8, d-e 3.\n'+
+'Every button embeds a live result below it.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText weighted-graphs)\n'+
+'\n'+
+'## Dijkstra \u2014 cheapest route from a source\n'+
+'to [field: dst=%e]\n'+
+'[Shortest distance from a](run: eval (wg_distto (wg_graph0 0) (wg_nodes0 0) %a $dst)) [Whole distance map from a](run: eval (wg_dijkstra (wg_graph0 0) (wg_nodes0 0) %a))\n'+
+'\n'+
+'## Minimum spanning tree \u2014 connect everything cheapest\n'+
+'[Kruskal (sorted edges + union-find)](run: eval (wg_kruskal (wg_nodes0 0) (wg_edges0 0))) [Prim (grow one tree)](run: eval (wg_prim (wg_graph0 0) (wg_nodes0 0))) [Edges in Kruskal order](run: eval (wg_esort (wg_edges0 0)))\n'+
+'\n'+
+'Kruskal reuses the union-find from Dsa. `latte wgraph <topic>` prints these (dijkstra mst).\n',
+ Numth:
+'# Numth.Tool \u2014 number theory & math\n'+
+'The math warm-ups an interview opens with, and the building blocks under hashing and\n'+
+'crypto, in lib/numth.lat (prefix nt_). Integer arithmetic only \u2014 no data structures.\n'+
+'Every button embeds a live result below it.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText number-theory)\n'+
+'\n'+
+'## Divisibility \u2014 Euclid\u2019s algorithm\n'+
+'a [field: ga=48]  b [field: gb=36]\n'+
+'[GCD](run: eval (nt_gcd $ga $gb)) [LCM](run: eval (nt_lcm $ga $gb))\n'+
+'\n'+
+'## Primes\n'+
+'n [field: pn=97]  up to [field: sn=30]\n'+
+'[Is n prime (0=yes)](run: eval (nt_isprime $pn)) [Sieve up to](run: eval (nt_sieve $sn))\n'+
+'\n'+
+'## Modular exponentiation \u2014 base^exp mod m\n'+
+'base [field: mb=2]  exp [field: me=10]  mod [field: mm=1000]\n'+
+'[Compute](run: eval (nt_modpow $mb $me $mm))\n'+
+'\n'+
+'## Combinatorics\n'+
+'n [field: cn=10]  k [field: ck=3]\n'+
+'[n choose k](run: eval (nt_choose $cn $ck)) [n!](run: eval (nt_fact $ck)) [Fibonacci F(n)](run: eval (nt_fib $cn))\n'+
+'\n'+
+'## Digits\n'+
+'n [field: dn=1234]\n'+
+'[Digit sum](run: eval (nt_digitsum $dn)) [Reverse digits](run: eval (nt_reverse $dn))\n'+
+'\n'+
+'`latte numth <topic>` prints these (divisibility primes modular combinatorics digits).\n',
+ Bits:
+'# Bits.Tool \u2014 bit manipulation\n'+
+'Binary-representation tricks, in lib/bits.lat (prefix bm_), built on the bitwise ops\n'+
+'now in std (band/bor/bxor/shl/shr/bit/popcount). XOR identities (x^x=0) do a lot of\n'+
+'the work. Every button embeds a live result below it.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText bit-manipulation)\n'+
+'\n'+
+'## XOR tricks \u2014 self-cancellation\n'+
+'[Single number in [4 1 2 1 2]](run: eval (bm_single (bm_dup0 0))) [Missing number in 0..3](run: eval (bm_missing (bm_gap0 0) 3))\n'+
+'a [field: aa=5]  b [field: bb=3]\n'+
+'[Add a+b with only XOR/AND/shift](run: eval (bm_add $aa $bb))\n'+
+'\n'+
+'## Bit tests & writes\n'+
+'n [field: pn=16]\n'+
+'[Is n a power of two](run: eval (bm_ispow2 $pn)) [Clear lowest set bit](run: eval (bm_clearlow $pn)) [popcount](run: eval (popcount $pn))\n'+
+'\n'+
+'## Subsets as bitmasks\n'+
+'[All subsets of {3,1,2}](run: eval (bm_subsets (bm_set0 0))) [How many (2^3)](run: eval (len (bm_subsets (bm_set0 0))))\n'+
+'\n'+
+'## Counting bits\n'+
+'a [field: ha=4]  b [field: hb=1]\n'+
+'[Hamming distance](run: eval (bm_hamming $ha $hb)) [popcounts 0..7](run: eval (bm_countbits 7))\n'+
+'\n'+
+'Built on the std bitwise ops. `latte bits <topic>` prints these (xor tests enumeration counting).\n',
+ Strings:
+'# Strings.Tool \u2014 string algorithms\n'+
+'String questions start by turning the cord into bytes, so this builds on the std\n'+
+'cord helpers (bytes/frombytes/sort). A character is a one-byte cord (%a is 97).\n'+
+'Results follow the loobean convention (0 = yes/found). Live results embed below.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText string-techniques)\n'+
+'\n'+
+'## Analysis\n'+
+'word [field: w=hello]\n'+
+'[Reverse](run: eval (st_rev %$w)) [Is palindrome (0=yes)](run: eval (st_ispalin %$w)) [First unique char](run: eval (st_firstuniq %$w))\n'+
+'\n'+
+'## Anagrams\n'+
+'a [field: a1=listen]  b [field: a2=silent]\n'+
+'[Are they anagrams (0=yes)](run: eval (st_anagram %$a1 %$a2))\n'+
+'\n'+
+'## Substring search\n'+
+'text [field: tx=abracadabra]  pattern [field: pat=cad]\n'+
+'[Naive find](run: eval (st_find %$tx %$pat)) [Rabin-Karp](run: eval (st_rabinkarp %$tx %$pat)) [Contains (0=yes)](run: eval (st_contains %$tx %$pat))\n'+
+'\n'+
+'## Families\n'+
+'[Longest common prefix of [flower flow flight]](run: eval (st_lcp (st_list0 0))) [Run-length encode %aaabbc](run: eval (st_rle %aaabbc))\n'+
+'\n'+
+'Built on the std cord helpers. `latte strings <topic>` prints these (analysis anagrams search families).\n',
+ Grid:
+'# Grid.Tool \u2014 matrix / grid algorithms\n'+
+'A grid is a graph in disguise (each cell adjacent to its 4 neighbours). Arms in\n'+
+'lib/grid.lat (prefix gr_); a grid is a list of rows. Results follow the loobean\n'+
+'convention (0 = true). Live results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText grid-techniques)\n'+
+'\n'+
+'## Connectivity \u2014 flood fill\n'+
+'[Number of islands (sample grid, 3)](run: eval (gr_islands (gr_grid0 0))) [Diagonal touch = 2 islands](run: eval (gr_islands [ [1 [0 0]] [ [0 [1 0]] 0 ] ]))\n'+
+'\n'+
+'## Grid dynamic programming\n'+
+'rows [field: gr=3]  cols [field: gc=3]\n'+
+'[Unique right/down paths](run: eval (gr_pathcount $gr $gc))\n'+
+'\n'+
+'## Transforms (on the 3x3 matrix 1..9)\n'+
+'[Transpose](run: eval (gr_transpose (gr_mat0 0))) [Rotate 90 clockwise](run: eval (gr_rotate (gr_mat0 0))) [Spiral order](run: eval (gr_spiral (gr_mat0 0)))\n'+
+'\n'+
+'`latte grid <topic>` prints these (connectivity dp transforms).\n',
+ Design:
+'# Design.Tool \u2014 data-structure design\n'+
+'"Implement a structure with these ops at this cost." The skill is choosing a\n'+
+'representation so each op is cheap. Arms in lib/design.lat (prefix dz_); since\n'+
+'values are immutable, each op returns the new structure. Live results embed below.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText design-techniques)\n'+
+'\n'+
+'## Min-stack \u2014 getMin in O(1)\n'+
+'Each node stores the min as of its own push, so the top always knows the current min.\n'+
+'[Top after push 5,2,7,1](run: eval (dz_mstop (dz_ms0 0))) [Current min](run: eval (dz_msmin (dz_ms0 0))) [Min after one pop (2)](run: eval (dz_msmin (dz_mspop (dz_ms0 0))))\n'+
+'\n'+
+'## Queue from two stacks \u2014 amortised O(1) FIFO\n'+
+'in-stack receives, out-stack releases; flip in->out when out runs dry.\n'+
+'[Peek front of [1 2 3] (=1)](run: eval (dz_qpeek (dz_q0 0))) [Dequeue once (=1)](run: eval (head (dz_deq (dz_q0 0))))\n'+
+'\n'+
+'## LRU cache \u2014 evict least-recently-used\n'+
+'Cap-2 cache after putting a,b,c (a evicted). A touch counts as use.\n'+
+'[Keys, newest first](run: eval (dz_lrukeys (dz_lru0 0))) [Get a (evicted -> 0)](run: eval (dz_lruget (dz_lru0 0) %a)) [Touch b, put d; c evicted](run: eval (dz_lrukeys (dz_lruput (dz_lrutouch (dz_lru0 0) %b) %d 4)))\n'+
+'\n'+
+'`latte design <topic>` prints these (minstack queue lru).\n',
+ Trees:
+'# Trees.Tool \u2014 binary trees\n'+
+'Almost every tree question is one recursive template: solve the two subtrees, then\n'+
+'combine at the root. Arms in lib/trees.lat (prefix tr_); a node is [value [left right]],\n'+
+'empty is 0. Sample tree: 5 / (3 / 2,4) / (8 / 7,9). Live results embed below.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText tree-techniques)\n'+
+'\n'+
+'## Traversals (root visited at different moments)\n'+
+'[In-order (sorted for a BST)](run: eval (tr_inorder (tr_tree0 0))) [Pre-order](run: eval (tr_preorder (tr_tree0 0))) [Post-order](run: eval (tr_postorder (tr_tree0 0))) [Level-order (BFS)](run: eval (tr_levelorder (tr_tree0 0)))\n'+
+'\n'+
+'## Shape\n'+
+'[Height](run: eval (tr_height (tr_tree0 0))) [Node count](run: eval (tr_count (tr_tree0 0))) [Invert, read in-order](run: eval (tr_inorder (tr_invert (tr_tree0 0))))\n'+
+'\n'+
+'## Paths & queries\n'+
+'a [field: la=2]  b [field: lb=7]\n'+
+'[Max root-to-leaf sum](run: eval (tr_maxpath (tr_tree0 0))) [LCA of a,b](run: eval (tr_lca (tr_tree0 0) $la $lb)) [Is a BST (0=yes)](run: eval (tr_isbst (tr_tree0 0)))\n'+
+'\n'+
+'`latte trees <topic>` prints these (traversals shape paths queries).\n',
+ Dp:
+'# Dp.Tool \u2014 dynamic programming\n'+
+'Every DP is one recipe: a recurrence over smaller sub-answers, each computed once.\n'+
+'Arms in lib/dp.lat (prefix dp_). Feasibility answers use loobean 0 = yes. Live\n'+
+'results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText dp-techniques)\n'+
+'\n'+
+'## 1-D DP\n'+
+'n [field: ds=5]\n'+
+'[Climbing stairs (ways)](run: eval (dp_stairs $ds)) [House robber max (no two adjacent)](run: eval (dp_rob (dp_houses0 0)))\n'+
+'\n'+
+'## Feasibility (0 = yes)\n'+
+'target [field: dt=9]\n'+
+'[Subset-sum to target](run: eval (dp_subsetsum (dp_set0 0) $dt)) [Equal partition?](run: eval (dp_canpartition (dp_part0 0)))\n'+
+'\n'+
+'## Counting\n'+
+'amount [field: dm=5]\n'+
+'[Coin-change ways {1,2,5}](run: eval (dp_coinways (dp_coins0 0) $dm))\n'+
+'\n'+
+'## Optimisation\n'+
+'capacity [field: dc=5]\n'+
+'[0/1 knapsack value](run: eval (dp_knapsack (dp_items0 0) $dc)) [LCS abcde / ace](run: eval (dp_lcs %abcde %ace)) [LCS AGGTAB / GXTXAYB](run: eval (dp_lcs %AGGTAB %GXTXAYB))\n'+
+'\n'+
+'`latte dp <topic>` prints these (oned feasibility counting optimisation).\n',
+ Intervals:
+'# Intervals.Tool \u2014 interval problems\n'+
+'Almost every interval problem starts by sorting by start, turning overlaps into one\n'+
+'left-to-right sweep. Arms in lib/intervals.lat (prefix iv_); an interval is the pair\n'+
+'[start end]. Live results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText interval-techniques)\n'+
+'\n'+
+'## Merging\n'+
+'[Merge [1-3][2-6][8-10][15-18]](run: eval (iv_merge (iv_sample0 0))) [Insert [4 8] into a disjoint list](run: eval (iv_insert [ [1 2] [ [3 5] [ [6 7] [ [8 10] [ [12 16] 0 ] ] ] ] ] [4 8]))\n'+
+'\n'+
+'## Scheduling (sweep line)\n'+
+'[Can attend all of [0-30][5-10][15-20] (1=no)](run: eval (iv_canattend (iv_meetings0 0))) [Minimum rooms needed](run: eval (iv_minrooms (iv_meetings0 0)))\n'+
+'\n'+
+'## Set operations\n'+
+'[Intersection of two sorted lists](run: eval (iv_intersect (iv_a0 0) (iv_b0 0))) [Total covered length](run: eval (iv_coverage (iv_sample0 0)))\n'+
+'\n'+
+'`latte intervals <topic>` prints these (merging scheduling setops).\n',
+ Search:
+'# Search.Tool \u2014 binary search & its variants\n'+
+'One invariant everywhere: keep a range that must contain the answer, halve it each step\n'+
+'with one yes/no question at the middle. Arms in lib/search.lat (prefix se_). Live\n'+
+'results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText search-techniques)\n'+
+'\n'+
+'## Boundaries in a sorted array [1 2 2 2 3 4]\n'+
+'target [field: st=2]\n'+
+'[Lower bound (first index)](run: eval (se_lowerbound (se_sorted0 0) $st)) [Upper bound (one past last)](run: eval (se_upperbound (se_sorted0 0) $st)) [Occurrence count](run: eval (se_count (se_sorted0 0) $st))\n'+
+'\n'+
+'## Rotated sorted array [4 5 6 7 0 1 2]\n'+
+'find [field: sr=0]\n'+
+'[Search rotated (index, or 7=absent)](run: eval (se_rotated (se_rot0 0) $sr)) [Minimum (rotation point)](run: eval (se_rotmin (se_rot0 0)))\n'+
+'\n'+
+'## Slope (no sorted array)\n'+
+'[Find a peak index of [1 2 3 1]](run: eval (se_peak (se_peak0 0)))\n'+
+'\n'+
+'## Binary search ON THE ANSWER\n'+
+'n [field: sn=17]\n'+
+'[Integer sqrt (largest k, k*k<=n)](run: eval (se_isqrt $sn)) hours [field: sh=8] [Koko min speed, piles [3 6 7 11]](run: eval (se_minspeed (se_piles0 0) $sh))\n'+
+'\n'+
+'`latte search <topic>` prints these (boundaries rotated slope answer).\n',
+ Graphs:
+'# Graphs.Tool \u2014 graph decision problems\n'+
+'A graph is an assoc list node -> out-neighbours (undirected samples list each edge both\n'+
+'ways). Directed problems use in-degree; undirected ones use flood fill. Arms in\n'+
+'lib/graphs.lat (prefix gp_). Live results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText graph-techniques)\n'+
+'\n'+
+'## Ordering & cycles (directed)\n'+
+'[Topological sort (Kahn) of the DAG](run: eval (gp_toposort (gp_dag0 0))) [Is the DAG acyclic? (0=yes)](run: eval (gp_isdag (gp_dag0 0))) [Is the 3-cycle acyclic? (1=no)](run: eval (gp_isdag (gp_cyc0 0)))\n'+
+'\n'+
+'## Components & reachability (undirected)\n'+
+'[Connected components {0,1,2}{3,4}{5}](run: eval (gp_components (gp_undir0 0))) [Path 0 to 2? (0=yes)](run: eval (gp_reach (gp_undir0 0) 0 2)) [Path 0 to 3? (1=no)](run: eval (gp_reach (gp_undir0 0) 0 3))\n'+
+'\n'+
+'## Bipartite (2-colouring)\n'+
+'[Even cycle 0-1-2-3-0 bipartite? (0=yes)](run: eval (gp_bipartite (gp_bip0 0))) [Triangle 0-1-2-0 bipartite? (1=no)](run: eval (gp_bipartite (gp_odd0 0)))\n'+
+'\n'+
+'`latte graphs <topic>` prints these (ordering components bipartite).\n',
+ Backtrack:
+'# Backtrack.Tool \u2014 combinatorial search\n'+
+'Build a candidate one decision at a time and prune dead branches. In this pure-functional\n'+
+'setting each choice just starts its own branch; a step\u2019s answer is its branches\n'+
+'concatenated. Arms in lib/backtrack.lat (prefix bk_). String results are counted (multi-\n'+
+'byte cords display as integers). Live results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText backtrack-techniques)\n'+
+'\n'+
+'## Generate parentheses (counts are Catalan numbers)\n'+
+'pairs [field: bp=3]\n'+
+'[Count valid parenthesisations](run: eval (len (bk_parens $bp)))\n'+
+'\n'+
+'## Pick\n'+
+'target [field: bs=7]\n'+
+'[Combination sum of {2,3,6,7}](run: eval (bk_combsum (bk_cands0 0) $bs)) n [field: bn=4] k [field: bk=2] [All k-combinations of {1..n}](run: eval (bk_combine $bn $bk))\n'+
+'\n'+
+'## Split & grid\n'+
+'[Palindrome partitions of \u2018aab\u2019 (count)](run: eval (len (bk_partition %aab))) [Word search \u2018ABCCED\u2019 (0=found)](run: eval (bk_wordsearch (bk_grid0 0) %ABCCED)) [Word search \u2018ABCB\u2019 (1=absent)](run: eval (bk_wordsearch (bk_grid0 0) %ABCB))\n'+
+'\n'+
+'`latte backtrack <topic>` prints these (parens combos partition grid).\n',
+ Greedy:
+'# Greedy.Tool \u2014 greedy algorithms\n'+
+'Commit to the locally best choice and never look back \u2014 valid only when an exchange\n'+
+'argument justifies it. Each arm is a single linear sweep. Arms in lib/greedy.lat (prefix\n'+
+'gd_). Live results embed below each button.\n'+
+'\n'+
+'[Interactive tutorial](run: System.OpenText greedy-techniques)\n'+
+'\n'+
+'## Jump game\n'+
+'[Can [2 3 1 1 4] reach the end? (0=yes)](run: eval (gd_canjump (gd_jump0 0))) [Can [3 2 1 0 4]? (1=no)](run: eval (gd_canjump (gd_jump1 0))) [Minimum jumps for [2 3 1 1 4]](run: eval (gd_minjumps (gd_jump0 0)))\n'+
+'\n'+
+'## Gas station\n'+
+'[Starting station for the loop](run: eval (gd_gas (gd_gasG0 0) (gd_gasC0 0))) [Impossible loop returns n=3](run: eval (gd_gas [2 [3 [4 0]]] [3 [4 [3 0]]]))\n'+
+'\n'+
+'## Scan & two-pass\n'+
+'[Partition labels of the classic string](run: eval (gd_partition %ababcbacadefegdehijhklij)) [Candy for ratings [1 0 2]](run: eval (gd_candy (gd_rat0 0)))\n'+
+'\n'+
+'## Task scheduler\n'+
+'cooldown [field: gn=2]\n'+
+'[Min time for two tasks x3](run: eval (gd_taskschedule (gd_freqs0 0) $gn))\n'+
+'\n'+
+'`latte greedy <topic>` prints these (jump gas scan schedule).\n',
  Sym:
 '# Sym.Tool - the symbol index\n'+
 'Every arm of every loaded library, indexed by name in the composed database\n'+
@@ -1690,6 +2082,26 @@ var TOOLS = {
 'A least-squares fit of tomorrow\u2019s return on today\u2019s over the stored window,\n'+
 'returned as [slope intercept correlation] (a negative slope is mean reversion):\n'+
 '[Fit the lag-1 model](run: findb.fd_fit (fd_sample 0) 12)\n',
+ Data:
+'# Data.Tool \u2014 the persistent database\n'+
+'Named databases backed by an **on-disk write-ahead log** (src/dbservice.rs). Every\n'+
+'write is logged before it is applied and replayed on open, so the data survives a\n'+
+'restart \u2014 unlike the in-memory db_* arms, whose value lasts one evaluation. The\n'+
+'engine is the same lib/db.lat: LSM, Bloom filter, secondary index (on city here),\n'+
+'and MVCC version chains. Logs live under ./dbdata (or $ORPHEUS_DB_DIR).\n'+
+'\n'+
+'database [field: dn=people]  key [field: dk=u1]  name [field: pn=%alice]  city [field: pc=%nyc]\n'+
+'[Put / update row](run: data $dn put $dk [ [1 $pn] [ [2 $pc] 0 ] ])\n'+
+'[Read key](run: data $dn get $dk) [Dashboard](run: data $dn dash) [History of key](run: data $dn history $dk)\n'+
+'[Who is in this city?](run: data $dn query $pc) [Delete key](run: data $dn delete $dk)\n'+
+'[List databases](run: data list)\n'+
+'\n'+
+'## Try it\n'+
+'Put a couple of rows (change the key and name between clicks), open the Dashboard,\n'+
+'then put a NEW version of an existing key and open its History \u2014 the old version is\n'+
+'still there. Everything you store is on disk: reopen this tool tomorrow and it is\n'+
+'still here. The interactive tutorial (System.OpenText database-tutorial) explains\n'+
+'the engine underneath.\n',
  Trace:
 '# Trace.Tool — the ray tracer\n'+
 'Written in Latte, Anvil-compiled: checkered ground, sky, key + fill lights, shadows,\n'+

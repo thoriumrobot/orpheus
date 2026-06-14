@@ -1,0 +1,297 @@
+:: ===========================================================================
+:: dsa.lat — the data structures and coding PATTERNS a Toptal-style interview
+:: expects, the companion to algo.lat (which covers the algorithm paradigms).
+:: Where algo.lat answers "what strategy solves this?", this module answers the
+:: other half of the interview: "what pattern does the problem shape match, and
+:: what structure supports it?" The recognition cues are called out per section.
+::
+::   POINTER PATTERNS   two pointers, sliding window, fast & slow (cycle detection)
+::   STACK              balanced brackets, RPN evaluation, monotonic "next greater"
+::   PREFIX SUMS        O(1) range queries after O(n) precompute
+::   HEAP               a purely-functional leftist priority queue; heapsort, top-k
+::   BST                ordered insert / lookup / inorder traversal
+::   TRIE               prefix tree for word and prefix membership
+::   UNION-FIND         disjoint-set connectivity
+::
+:: LOOBEAN REMINDER (the usual Latte trap): comparison gates return 0 for TRUE, so
+:: `lt a b` is 0 when a<b, `==` is 0 when equal, `if c then A else B` takes A when c
+:: is 0, `member x xs` is 0 when present. Also `sub` ERRORS on underflow, so any
+:: `sub (len xs) 1` is guarded against the empty list.   Arms are prefixed `ds_`.
+:: ===========================================================================
+import std
+core dsa
+
+  :: =========================================================================
+  :: 1. TWO POINTERS   — cue: a SORTED array/string, "find a pair", "in place"
+  :: =========================================================================
+
+  :: PAIR SUM: do two values in a sorted list add up to `target`? Walk one index in
+  :: from each end. If the sum is too small only the left value can usefully grow, so
+  :: advance lo; if too big, retreat hi. O(n) time, O(1) space (vs O(n^2) brute force).
+  :: Returns the index pair [lo hi], or %nf if no pair works.
+  ds_pairsum = fn [xs target] ->
+    if (lt (len xs) 2) then %nf                  :: fewer than two elements: no pair
+    else loop with [lo = 0, hi = (sub (len xs) 1)] :
+      if (gte lo hi) then %nf                     :: pointers crossed without a hit
+      else let s = (add (nth xs lo) (nth xs hi)) in
+        if (s == target) then [ lo [ hi 0 ] ]     :: exact pair found
+        else if (lt s target) then again((add lo 1), hi)   :: sum too small: raise lo
+        else again(lo, (sub hi 1))                          :: sum too big: lower hi
+    end
+
+  :: PALINDROME: read the sequence from both ends inward; every mirrored pair must
+  :: match. Returns 1 = palindrome, 0 = not. Empty or single element is trivially one.
+  ds_ispalin = fn [xs] ->
+    if (lte (len xs) 1) then 1
+    else loop with [lo = 0, hi = (sub (len xs) 1)] :
+      if (gte lo hi) then 1                        :: met in the middle: all pairs matched
+      else if ((nth xs lo) == (nth xs hi)) then again((add lo 1), (sub hi 1))
+      else 0                                       :: a mismatch: not a palindrome
+    end
+
+  :: =========================================================================
+  :: 2. SLIDING WINDOW — cue: "subarray/substring", "longest/shortest", "of size k"
+  :: =========================================================================
+
+  :: FIXED WINDOW: largest sum of any `k` consecutive elements. Compute the first
+  :: window once, then SLIDE: add the entering element, subtract the leaving one.
+  :: O(n) rather than O(n*k) because we never re-add the overlap.
+  ds_maxwin = fn [xs k] ->
+    let first = (sum (take k xs)) in
+    loop with [i = k, cur = first, best = first] :
+      if (gte i (len xs)) then best
+      else let nc = (sub (add cur (nth xs i)) (nth xs (sub i k))) in   :: i>=k so sub is safe
+        again((add i 1), nc, (max best nc))
+    end
+
+  :: VARIABLE WINDOW: length of the longest run with no repeated element. Grow the
+  :: right edge; the instant the new element is already inside the window, shrink from
+  :: the left until it is unique again. `win` holds the live window in order. (A hash
+  :: set would make the membership test O(1); the algorithm's shape is the same.)
+  ds_longestuniq = fn [xs] ->
+    loop with [r = 0, win = 0, best = 0] :
+      if (gte r (len xs)) then best
+      else let x = (nth xs r) in
+        if ((member x win) == 0)                   :: x already in window: drop leftmost, hold r
+        then again(r, (tail win), best)
+        else let w2 = (append win [ x 0 ]) in       :: x is new: extend window, advance r
+          again((add r 1), w2, (max best (len w2)))
+    end
+
+  :: =========================================================================
+  :: 3. FAST & SLOW POINTERS — cue: linked list, "cycle?", "middle", "happy number"
+  :: =========================================================================
+  :: A linked list is modelled as a successor map [ [node next] .. ]; ds_next gives
+  :: the node after v, or %nil at the end. (A list value can't literally point back to
+  :: itself, so the map lets us express a cycle.)
+  ds_next = fn [nx v] -> (aget nx v %nil)
+
+  :: FLOYD'S TORTOISE & HARE: advance slow by one and fast by two each step. In a
+  :: cycle the fast pointer must eventually lap the slow one and they meet; if fast
+  :: runs off the end (%nil) the list is acyclic. O(n) time, O(1) space. 1 = cycle.
+  ds_hascycle = fn [nx v0] ->
+    loop with [sp = v0, fp = v0] :
+      if ((ds_next nx fp) == %nil) then 0                   :: hare fell off the end: no cycle
+      else if ((ds_next nx (ds_next nx fp)) == %nil) then 0
+      else if ((ds_next nx sp) == (ds_next nx (ds_next nx fp))) then 1   :: they met: cycle
+      else again((ds_next nx sp), (ds_next nx (ds_next nx fp)))
+    end
+
+  :: =========================================================================
+  :: 4. STACK — cue: "matching/nesting", "evaluate", "next greater/smaller"
+  :: =========================================================================
+
+  :: which opener matches a given closer, and is a token an opener? (data-driven so
+  :: the matcher stays tiny). Brackets are the cords %lp %rp %lb %rb %lc %rc.
+  ds_match = fn [c] ->
+    if (c == %rp) then %lp else if (c == %rb) then %lb else if (c == %rc) then %lc else %no
+  ds_isopen = fn [c] -> (or (or (c == %lp) (c == %lb)) (c == %lc))
+
+  :: BALANCED BRACKETS: push every opener; each closer must pop its exact match. The
+  :: string is balanced iff nothing mismatches and the stack ends empty. 1 = balanced.
+  ds_balanced = fn [toks] ->
+    loop with [t = toks, stk = 0] :
+      if (t == 0) then (if (stk == 0) then 1 else 0)        :: end: balanced iff stack empty
+      else let c = (head t) in
+        if (ds_isopen c) then again((tail t), [ c stk ])     :: opener: push it
+        else if (stk == 0) then 0                            :: closer but nothing to match
+        else if ((head stk) == (ds_match c)) then again((tail t), (tail stk))  :: matched: pop
+        else 0                                               :: wrong opener on top: unbalanced
+    end
+
+  :: RPN EVALUATION: in Reverse Polish Notation, push numbers; an operator pops its
+  :: two operands, combines them, and pushes the result. One value is left: the answer.
+  :: Operators are the cords %add %sub %mul; the deeper operand is the left argument.
+  ds_rpn = fn [toks] ->
+    (head (loop with [t = toks, stk = 0] :
+      if (t == 0) then stk
+      else let c = (head t) in
+        if (c == %add) then again((tail t), [ (add (head (tail stk)) (head stk)) (tail (tail stk)) ])
+        else if (c == %mul) then again((tail t), [ (mul (head (tail stk)) (head stk)) (tail (tail stk)) ])
+        else if (c == %sub) then again((tail t), [ (sub (head (tail stk)) (head stk)) (tail (tail stk)) ])
+        else again((tail t), [ c stk ])                      :: a number: push it
+    end))
+
+  :: MONOTONIC STACK: each element's NEXT GREATER element in one pass. Scan right to
+  :: left keeping a stack of candidates in increasing order (from the top); for each
+  :: value pop everything not greater than it, then the top (if any) is its answer,
+  :: and it becomes a candidate. O(n): every value is pushed and popped at most once.
+  :: Returns a list parallel to xs of next-greater values (%none where there is none).
+  ds_nextgreater = fn [xs] ->
+    loop with [r = (reverse xs), stk = 0, out = 0] :
+      if (r == 0) then out                          :: out already comes out left-to-right
+      else let x = (head r) in
+        let s2 = (loop with [s = stk] :              :: pop while top <= x
+                    if (s == 0) then 0
+                    else if (gt (head s) x) then s    :: top > x: stop (gt is 0 when top>x)
+                    else again((tail s)) end) in
+        let ng = (if (s2 == 0) then %none else (head s2)) in
+        again((tail r), [ x s2 ], [ ng out ])
+    end
+
+  :: =========================================================================
+  :: 5. PREFIX SUMS — cue: many "sum of range [i,j)" queries over a fixed array
+  :: =========================================================================
+  :: Precompute P where P[i] = sum of the first i elements (P[0]=0). Then any range
+  :: sum is P[j]-P[i] in O(1), trading O(n) space for O(1) queries.
+  ds_prefix = fn [xs] ->
+    (reverse (foldl (fn [acc x] -> [ (add (head acc) x) acc ]) [ 0 0 ] xs))
+  ds_rangesum = fn [pre i j] -> (sub (nth pre j) (nth pre i))
+
+  :: =========================================================================
+  :: 6. HEAP (leftist) — cue: "top-K", "k smallest/largest", "merge k sorted", median
+  :: =========================================================================
+  :: A LEFTIST HEAP is a purely-functional min-heap. Heap order: a parent <= its
+  :: children. Leftist shape: the "rank" is the length of the right spine to the
+  :: nearest empty node, and every left child's rank >= its right sibling's. Merging
+  :: only ever walks the (short) right spines, so all ops are O(log n) with no
+  :: mutation. A node is [ rank key left right ]; 0 is the empty heap.
+  ds_rank  = fn [h] -> if (h == 0) then 0 else (head h)
+  ds_hkey  = fn [h] -> (head (tail h))
+  ds_hleft = fn [h] -> (head (tail (tail h)))
+  ds_hright= fn [h] -> (head (tail (tail (tail h))))
+  :: assemble a node from a key and two sub-heaps, keeping the leftist invariant by
+  :: putting the higher-ranked sub-heap on the left; new rank = right's rank + 1.
+  ds_makenode = fn [key a b] ->
+    if (gte (ds_rank a) (ds_rank b))
+    then [ (add (ds_rank b) 1) [ key [ a [ b 0 ] ] ] ]
+    else [ (add (ds_rank a) 1) [ key [ b [ a 0 ] ] ] ]
+  :: MERGE — the one operation everything else is built from. Take the smaller root,
+  :: keep its left child, and recursively merge its right child with the other heap.
+  ds_hmerge = fn [h1 h2] ->
+    if (h1 == 0) then h2
+    else if (h2 == 0) then h1
+    else if ((lte (ds_hkey h1) (ds_hkey h2)) == 0)
+         then (ds_makenode (ds_hkey h1) (ds_hleft h1) (ds_hmerge (ds_hright h1) h2))
+         else (ds_makenode (ds_hkey h2) (ds_hleft h2) (ds_hmerge h1 (ds_hright h2)))
+  ds_hinsert = fn [h key] -> (ds_hmerge h [ 1 [ key [ 0 [ 0 0 ] ] ] ])  :: merge in a singleton
+  ds_hmin    = fn [h] -> (ds_hkey h)                                     :: the root is the min
+  ds_hdelmin = fn [h] -> (ds_hmerge (ds_hleft h) (ds_hright h))          :: drop root, merge kids
+
+  :: HEAPSORT: heap-insert every element, then pull the minimum out repeatedly — the
+  :: values come out in sorted order. O(n log n).
+  ds_heapsort = fn [xs] ->
+    let h = (foldl (fn [acc x] -> (ds_hinsert acc x)) 0 xs) in
+    (loop with [hh = h, out = 0] :
+       if (hh == 0) then (reverse out)
+       else again((ds_hdelmin hh), [ (ds_hmin hh) out ])
+    end)
+  :: TOP-K smallest: the same idea, stopped after k pops.
+  ds_topk = fn [xs k] ->
+    let h = (foldl (fn [acc x] -> (ds_hinsert acc x)) 0 xs) in
+    (loop with [hh = h, i = 0, out = 0] :
+       if (gte i k) then (reverse out)
+       else if (hh == 0) then (reverse out)
+       else again((ds_hdelmin hh), (add i 1), [ (ds_hmin hh) out ])
+    end)
+
+  :: =========================================================================
+  :: 7. BINARY SEARCH TREE — cue: "keep things ordered", "insert + lookup + in order"
+  :: =========================================================================
+  :: Left subtree < node < right subtree, so insert and lookup just follow the
+  :: comparisons down one path: O(height). A node is [ key left right ]; 0 is empty.
+  ds_bkey  = fn [t] -> (head t)
+  ds_bleft = fn [t] -> (head (tail t))
+  ds_bright= fn [t] -> (head (tail (tail t)))
+  ds_bstins = fn [t key] ->
+    if (t == 0) then [ key [ 0 [ 0 0 ] ] ]              :: reached an empty slot: new leaf
+    else if (key == (ds_bkey t)) then t                  :: already present (set semantics)
+    else if (lt key (ds_bkey t))                          :: smaller: rebuild down the left
+         then [ (ds_bkey t) [ (ds_bstins (ds_bleft t) key) [ (ds_bright t) 0 ] ] ]
+         else [ (ds_bkey t) [ (ds_bleft t) [ (ds_bstins (ds_bright t) key) 0 ] ] ]
+  :: lookup: 0 = present, 1 = absent (the member convention).
+  ds_bsthas = fn [t key] ->
+    if (t == 0) then 1
+    else if (key == (ds_bkey t)) then 0
+    else if (lt key (ds_bkey t)) then (ds_bsthas (ds_bleft t) key)
+    else (ds_bsthas (ds_bright t) key)
+  :: inorder traversal = left ++ [key] ++ right, which visits keys in sorted order.
+  ds_bstinorder = fn [t] ->
+    if (t == 0) then 0
+    else (append (ds_bstinorder (ds_bleft t)) [ (ds_bkey t) (ds_bstinorder (ds_bright t)) ])
+
+  :: =========================================================================
+  :: 8. TRIE (prefix tree) — cue: "prefix", "autocomplete", "dictionary of words"
+  :: =========================================================================
+  :: Each edge is a character; a root-to-node path spells a prefix, and a flag marks
+  :: where a real word ends. Lookups cost O(length of the query) regardless of how
+  :: many words are stored. A node is [ isword children ], children an assoc list
+  :: char -> child node. isword uses the loobean: 0 = "a word ends here", 1 = not.
+  ds_tnew  = fn [_] -> [ 1 [ 0 0 ] ]
+  ds_tword = fn [t] -> (head t)
+  ds_tkids = fn [t] -> (head (tail t))
+  :: insert a word (a list of char cords): walk/create child nodes, then mark the end.
+  ds_tins = fn [t word] ->
+    if (word == 0) then [ 0 [ (ds_tkids t) 0 ] ]          :: end of word: set isword = 0 (true)
+    else let c = (head word), kid = (aget (ds_tkids t) c 0) in
+      let kid2 = (if (kid == 0) then (ds_tins (ds_tnew 0) (tail word)) else (ds_tins kid (tail word))) in
+      [ (ds_tword t) [ (aput (ds_tkids t) c kid2) 0 ] ]
+  :: the node reached by spelling `word`, or 0 if that path doesn't exist.
+  ds_tnode = fn [t word] ->
+    if (word == 0) then t
+    else let kid = (aget (ds_tkids t) (head word) 0) in
+      if (kid == 0) then 0 else (ds_tnode kid (tail word))
+  ds_thas    = fn [t word] -> let n = (ds_tnode t word) in if (n == 0) then 1 else (ds_tword n)
+  ds_tprefix = fn [t pre]  -> if ((ds_tnode t pre) == 0) then 1 else 0
+
+  :: =========================================================================
+  :: 9. UNION-FIND (disjoint set) — cue: "connected?", "groups/islands", "merge sets"
+  :: =========================================================================
+  :: Tracks which elements share a group. `find` follows parent links to the group's
+  :: root; `union` hangs one root under another; two elements are connected iff they
+  :: share a root. The forest is an assoc list elem -> parent; a root is its own parent.
+  :: WHY IT IS "NEAR-CONSTANT TIME" in the optimised form: two refinements make find
+  :: almost O(1) amortised. *Union by rank* always hangs the SHORTER tree under the taller,
+  :: keeping depth logarithmic; *path compression* re-points every node visited during a
+  :: find straight at the root, flattening the tree as a side effect of querying it.
+  :: Together they give an inverse-Ackermann bound a(n) — under 5 for any n in the universe,
+  :: effectively constant. This teaching version keeps the plain forest (find climbs, union
+  :: links arbitrarily) so the *idea* is unobscured; the refinements are a small delta on top.
+  ds_ufnew = fn [elems] -> (foldl (fn [m e] -> (aput m e e)) 0 elems)
+  ds_uffind = fn [uf x] ->
+    let p = (aget uf x x) in
+    if (p == x) then x else (ds_uffind uf p)              :: climb parent links until one is its own parent
+  ds_ufunion = fn [uf a b] ->
+    let ra = (ds_uffind uf a), rb = (ds_uffind uf b) in
+    if (ra == rb) then uf else (aput uf ra rb)            :: already joined (same root), or link the two roots
+  ds_ufconnected = fn [uf a b] ->
+    if ((ds_uffind uf a) == (ds_uffind uf b)) then 0 else 1   :: 0 = same component (loobean true)
+  ds_ufcount = fn [uf] ->                                  :: number of distinct roots = number of components
+    (len (nub (map (fn [e] -> (ds_uffind uf e)) (akeys uf))))
+
+  :: =========================================================================
+  :: ready-made sample inputs so every demo and tutorial panel is a one-liner.
+  :: =========================================================================
+  ds_arr0    = fn [_] -> [ 2 [ 7 [ 11 [ 15 0 ] ] ] ]                   :: sorted, for two-pointer
+  ds_win0    = fn [_] -> [ 2 [ 1 [ 5 [ 1 [ 3 [ 2 0 ] ] ] ] ] ]          :: for sliding window
+  ds_str0    = fn [_] -> [ %a [ %b [ %c [ %a [ %b [ %c [ %b [ %b 0 ] ] ] ] ] ] ] ]  :: "abcabcbb"
+  ds_unsort0 = fn [_] -> [ 5 [ 2 [ 8 [ 1 [ 9 [ 3 0 ] ] ] ] ] ]          :: for heap/BST
+  :: a linked list with a cycle: a->b->c->d->b  (and an acyclic one a->b->c->%nil)
+  ds_cyclic  = fn [_] -> [ [ %a %b ] [ [ %b %c ] [ [ %c %d ] [ [ %d %b ] 0 ] ] ] ]
+  ds_acyclic = fn [_] -> [ [ %a %b ] [ [ %b %c ] [ [ %c %nil ] 0 ] ] ]
+  :: balanced "([]{})" and unbalanced "([)]" as bracket-token lists
+  ds_bal0    = fn [_] -> [ %lp [ %lb [ %rb [ %lc [ %rc [ %rp 0 ] ] ] ] ] ]
+  ds_bal1    = fn [_] -> [ %lp [ %lb [ %rp [ %rb 0 ] ] ] ]
+  :: RPN for (3 + 4) * 5 = 35
+  ds_rpn0    = fn [_] -> [ 3 [ 4 [ %add [ 5 [ %mul 0 ] ] ] ] ]
+end

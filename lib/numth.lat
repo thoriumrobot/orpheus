@@ -1,0 +1,129 @@
+:: ===========================================================================
+:: numth.lat — number theory and math techniques, the warm-up tier of a coding
+:: interview (and the toolkit behind cryptography, hashing, and combinatorics).
+:: Everything here needs only integer arithmetic, so it is the most self-contained
+:: of the technique modules.
+::
+::   DIVISIBILITY      Euclid's GCD and LCM
+::   PRIMES            trial-division primality, the Sieve of Eratosthenes
+::   MODULAR ARITH     fast modular exponentiation (the RSA workhorse)
+::   COMBINATORICS     factorial, binomial coefficient n-choose-k, Fibonacci
+::   DIGITS            digit sum and digit reversal (classic warm-ups)
+::
+:: LOOBEAN REMINDER (the recurring Latte trap): comparison gates return 0 for TRUE,
+:: so `lt a b` is 0 when a<b, `gt a b` is 0 when a>b, `==` is 0 when equal, and
+:: `if c then A else B` takes A when c is 0. `sub` ERRORS on underflow, so every
+:: subtraction below is on values known to be non-negative.   Arms: `nt_`.
+:: ===========================================================================
+import std
+core numth
+
+  :: =========================================================================
+  :: DIVISIBILITY — Euclid's algorithm
+  :: =========================================================================
+  :: GCD: the largest number dividing both a and b. Euclid's insight is that
+  :: gcd(a,b) = gcd(b, a mod b), and gcd(a,0) = a. Each step replaces the pair with a
+  :: strictly smaller remainder, so it finishes in O(log min(a,b)) steps.
+  nt_gcd = fn [a b] ->
+    loop with [x = a, y = b] :
+      if (y == 0) then x                 :: remainder hit 0: the previous value is the GCD
+      else again(y, (mod x y))
+    end
+
+  :: LCM: the smallest number both divide. lcm(a,b) = a*b / gcd(a,b); we divide FIRST
+  :: (a / gcd) to keep the intermediate product smaller and exact.
+  nt_lcm = fn [a b] -> (mul (div a (nt_gcd a b)) b)
+
+  :: =========================================================================
+  :: PRIMES
+  :: =========================================================================
+  :: Primality by trial division: n is prime iff no integer i in [2, sqrt n] divides
+  :: it. We avoid a square root by looping while i*i <= n. Returns 0 = prime (loobean
+  :: true), 1 = not prime, matching the rest of the system's membership convention.
+  nt_isprime = fn [n] ->
+    if (lt n 2) then 1                    :: 0 and 1 are not prime
+    else loop with [i = 2] :
+      if (gt (mul i i) n) then 0          :: passed sqrt n with no divisor: prime
+      else if ((mod n i) == 0) then 1     :: i divides n: composite
+      else again((add i 1))
+    end
+
+  :: SIEVE OF ERATOSTHENES: instead of testing each number alone, start by assuming
+  :: everything in [2..n] is prime, then for each surviving prime strike out all of its
+  :: multiples. What is never struck is prime. We carry `comp`, a set (assoc map) of
+  :: numbers already known to be composite. `nt_strike` marks p*p, p*p+p, ... (smaller
+  :: multiples of p were already struck by smaller primes).
+  nt_strike = fn [comp p n] ->
+    loop with [m = (mul p p), c = comp] :
+      if (gt m n) then c                  :: past n: done striking p's multiples
+      else again((add m p), (aput c m 1)) :: mark m composite, step to the next multiple
+    end
+  nt_sieve = fn [n] ->
+    loop with [i = 2, comp = 0, primes = 0] :
+      if (gt i n) then (reverse primes)                       :: collected newest-first; flip to ascending
+      else if ((aget comp i 0) == 0)                          :: i was never struck: it is prime
+           then again((add i 1), (nt_strike comp i n), [ i primes ])
+           else again((add i 1), comp, primes)                :: i is composite: skip it
+    end
+
+  :: =========================================================================
+  :: MODULAR ARITHMETIC
+  :: =========================================================================
+  :: MODULAR EXPONENTIATION by squaring: base^exp mod m, reducing mod m at every step
+  :: so the numbers never blow up. Square the base each round; when the current bit of
+  :: the exponent is 1 (exp is odd) fold the base into the result. O(log exp)
+  :: multiplications — the operation that makes RSA and Diffie-Hellman practical.
+  nt_modpow = fn [base ex m] ->
+    loop with [b = (mod base m), e = ex, r = 1] :
+      if (e == 0) then r
+      else if ((mod e 2) == 0)                                :: exponent bit is 0: just square
+           then again((mod (mul b b) m), (div e 2), r)
+           else again((mod (mul b b) m), (div e 2), (mod (mul r b) m))  :: bit is 1: multiply r by b too
+    end
+
+  :: =========================================================================
+  :: COMBINATORICS
+  :: =========================================================================
+  :: factorial n! = 1*2*...*n (iterative product).
+  nt_fact = fn [n] ->
+    loop with [i = 1, acc = 1] :
+      if (gt i n) then acc
+      else again((add i 1), (mul acc i))
+    end
+
+  :: BINOMIAL COEFFICIENT C(n,k) = n! / (k!(n-k)!), the number of k-element subsets.
+  :: Computed multiplicatively as product of (n-k+i)/i for i in [1..k], which stays an
+  :: exact integer at every step (i consecutive integers are divisible by i!) and never
+  :: forms the huge factorials directly. We use the symmetry C(n,k)=C(n,n-k) to loop
+  :: the smaller number of times.
+  nt_choose = fn [n k0] ->
+    let k = (min k0 (sub n k0)) in
+    loop with [i = 1, acc = 1] :
+      if (gt i k) then acc
+      else again((add i 1), (div (mul acc (add (sub n k) i)) i))
+    end
+
+  :: FIBONACCI, iteratively: keep the running pair (a,b) = (F(i), F(i+1)) and advance.
+  :: O(n) time, O(1) space — no exponential recursion. F(0)=0, F(1)=1.
+  nt_fib = fn [n] ->
+    loop with [i = 0, a = 0, b = 1] :
+      if (gte i n) then a
+      else again((add i 1), b, (add a b))
+    end
+
+  :: =========================================================================
+  :: DIGITS — peel decimal digits with mod 10 (last digit) and div 10 (drop it)
+  :: =========================================================================
+  :: sum of the decimal digits of n.
+  nt_digitsum = fn [n] ->
+    loop with [x = n, s = 0] :
+      if (x == 0) then s
+      else again((div x 10), (add s (mod x 10)))
+    end
+  :: reverse the decimal digits of n (e.g. 1234 -> 4321; trailing zeros are dropped).
+  nt_reverse = fn [n] ->
+    loop with [x = n, r = 0] :
+      if (x == 0) then r
+      else again((div x 10), (add (mul r 10) (mod x 10)))
+    end
+end

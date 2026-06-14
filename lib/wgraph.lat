@@ -1,0 +1,158 @@
+:: ===========================================================================
+:: wgraph.lat — WEIGHTED graph algorithms, the interview tier above plain BFS/DFS
+:: (which live in algo.lat). Two classic problems, three classic algorithms:
+::
+::   SHORTEST PATH      Dijkstra — cheapest route from a source over non-negative
+::                      edge weights.
+::   MINIMUM SPANNING   Kruskal — cheapest set of edges connecting everything, built
+::   TREE (MST)         greedily with UNION-FIND (reused from dsa.lat); and Prim,
+::                      which grows one tree outward.
+::
+:: Two graph shapes are used. For Dijkstra and Prim, an ADJACENCY map node -> list
+:: of [neighbour weight] pairs (so an edge `e` has neighbour `(head e)` and weight
+:: `(tail e)`). For Kruskal, an EDGE LIST of [u v w] triples. Weights are natural
+:: numbers (Latte atoms are unsigned), so all three algorithms — which only need
+:: non-negative weights — apply directly.
+::
+:: LOOBEAN REMINDER: comparison gates return 0 for TRUE (`lt a b` is 0 when a<b),
+:: `member x xs` is 0 when present, and `sub` errors on underflow.  Arms: `wg_`.
+:: ===========================================================================
+import std
+import dsa
+core wgraph
+
+  :: the neighbour list of `u` (each entry is a [neighbour weight] pair), empty if none.
+  wg_adj = fn [g u] -> (aget g u 0)
+
+  :: an "infinity" larger than any real path: one past the total of all edge weights,
+  :: so any genuine distance is smaller and an unreachable node stays pinned at it.
+  wg_big = fn [g nodes] ->
+    (add 1 (foldl (fn [acc u] ->
+              (add acc (foldl (fn [a e] -> (add a (tail e))) 0 (wg_adj g u)))) 0 nodes))
+
+  :: =========================================================================
+  :: DIJKSTRA — single-source shortest paths over non-negative weights
+  :: =========================================================================
+  :: Tentative distances start at `big` for everyone except the source (0). Repeatedly
+  :: SETTLE the closest unsettled node — its distance is now final — then RELAX its edges
+  :: (offer its neighbours a shorter route through it).
+  :: WHY SETTLING IS CORRECT (exchange argument): any rival path to the closest unsettled
+  :: node u must first step out of the already-settled set, and that exit node is unsettled
+  :: hence >= u's distance; the rest of the rival path only ADDS weight, so it cannot beat
+  :: u's current value. This step depends on weights being NON-NEGATIVE — a later negative
+  :: edge could undercut a frozen node, which is exactly why Dijkstra fails on negative
+  :: weights (use Bellman-Ford there). This linear-scan form is O(V^2); a heap (see dsa.lat)
+  :: brings it to O(E log V).
+
+  :: every node's starting distance: 0 for the source, `big` for the rest.
+  wg_initdist = fn [nodes src big] ->
+    (foldl (fn [dd u] -> (aput dd u (if (u == src) then 0 else big))) 0 nodes)
+
+  :: among the not-yet-settled nodes, the one with the smallest tentative distance
+  :: (%none if every remaining node is unreachable). This is the node Dijkstra settles next.
+  wg_pickmin = fn [dist settled nodes big] ->
+    loop with [ns = nodes, bn = %none, bd = big] :
+      if (ns == 0) then bn
+      else let u = (head ns) in
+        if ((member u settled) == 0) then again((tail ns), bn, bd)   :: already settled: skip
+        else let d = (aget dist u big) in
+          if (lt d bd) then again((tail ns), u, d)                    :: a new closest node
+          else again((tail ns), bn, bd)
+    end
+
+  :: relax every edge out of `u`: if reaching a neighbour through `u` beats its current
+  :: best, lower it. Returns the updated distance map.
+  wg_relax = fn [g u dist] ->
+    let du = (aget dist u 0) in
+    (foldl (fn [dd e] ->
+       let v = (head e), w = (tail e), alt = (add du w) in
+       if (lt alt (aget dd v 0)) then (aput dd v alt) else dd
+     ) dist (wg_adj g u))
+
+  :: the whole algorithm: settle nodes closest-first, relaxing as we go; returns the
+  :: final distance map (node -> shortest distance from src).
+  wg_dijkstra = fn [g nodes src] ->
+    let big = (wg_big g nodes) in
+    loop with [dist = (wg_initdist nodes src big), settled = 0, k = 0] :
+      if (gte k (len nodes)) then dist
+      else let u = (wg_pickmin dist settled nodes big) in
+        if (u == %none) then dist                                   :: rest unreachable: done
+        else again((wg_relax g u dist), [ u settled ], (add k 1))
+    end
+  :: convenience: the shortest distance from src to a single dst.
+  wg_distto = fn [g nodes src dst] -> (aget (wg_dijkstra g nodes src) dst 0)
+
+  :: =========================================================================
+  :: KRUSKAL — minimum spanning tree, greedy over sorted edges + union-find
+  :: =========================================================================
+  :: Consider edges cheapest-first; KEEP an edge only if its endpoints are in different
+  :: components (otherwise it would close a cycle). Union-find (ds_uf* from dsa.lat)
+  :: answers "same component?" in near-constant time. After |V|-1 keeps the tree spans
+  :: every node. Edges are [u v w] triples: u=(head e), v=(head(tail e)), w=(head(tail(tail e))).
+  :: WHY IT IS OPTIMAL (cut property): the cheapest edge crossing ANY partition of the nodes
+  :: belongs to some MST. The lightest non-cycling edge here is exactly the lightest edge
+  :: across the cut between the two components it joins, so every kept edge is safe. Prim
+  :: applies the same property to a different cut (tree vs rest), which is why both agree.
+  wg_ew = fn [e] -> (head (tail (tail e)))                 :: the weight of a [u v w] edge
+  :: insertion sort of the edge list by ascending weight (interview graphs are small).
+  wg_eins = fn [e srt] ->
+    if (srt == 0) then [ e 0 ]
+    else if ((lte (wg_ew e) (wg_ew (head srt))) == 0) then [ e srt ]
+    else [ (head srt) (wg_eins e (tail srt)) ]
+  wg_esort = fn [edges] -> (foldl (fn [acc e] -> (wg_eins e acc)) 0 edges)
+
+  wg_kruskal = fn [nodes edges] ->
+    loop with [es = (wg_esort edges), uf = (ds_ufnew nodes), tot = 0] :
+      if (es == 0) then tot
+      else let e = (head es), u = (head e), v = (head (tail e)), w = (wg_ew e) in
+        if ((ds_ufconnected uf u v) == 0) then again((tail es), uf, tot)  :: same set: would cycle, skip
+        else again((tail es), (ds_ufunion uf u v), (add tot w))           :: joins two trees: take it
+    end
+
+  :: =========================================================================
+  :: PRIM — minimum spanning tree by growing one tree outward
+  :: =========================================================================
+  :: Start with any single node in the tree. Repeatedly add the CHEAPEST edge that
+  :: crosses from the tree to a node outside it, absorbing that node. After |V|-1
+  :: additions the tree spans the graph. O(V^2) with a linear scan for the min edge.
+
+  :: the cheapest edge crossing out of the current tree: returns [weight node], or %none.
+  wg_mincross = fn [g intree] ->
+    (foldl (fn [best u] ->
+       (foldl (fn [b e] ->
+          let v = (head e), w = (tail e) in
+          if ((member v intree) == 0) then b                  :: v already inside: not a crossing edge
+          else if (b == %none) then [ w [ v 0 ] ]
+          else if (lt w (head b)) then [ w [ v 0 ] ] else b
+        ) best (wg_adj g u))
+     ) %none intree)
+
+  wg_prim = fn [g nodes] ->
+    if (nodes == 0) then 0
+    else loop with [intree = [ (head nodes) 0 ], tot = 0, k = 1] :
+      if (gte k (len nodes)) then tot
+      else let best = (wg_mincross g intree) in
+        if (best == %none) then tot                           :: graph is disconnected
+        else again([ (head (tail best)) intree ], (add tot (head best)), (add k 1))
+    end
+
+  :: =========================================================================
+  :: ready-made sample graph (undirected, weighted):
+  ::   a-b 4, a-c 1, b-c 2, b-d 5, c-d 8, d-e 3
+  :: Dijkstra from a: a0 c1 b3 d8 e11.  MST weight (Kruskal = Prim): 11.
+  :: =========================================================================
+  wg_nodes0 = fn [_] -> [ %a [ %b [ %c [ %d [ %e 0 ] ] ] ] ]
+  wg_graph0 = fn [_] ->
+    [ [ %a [ [ %b 4 ] [ [ %c 1 ] 0 ] ] ]
+    [ [ %b [ [ %a 4 ] [ [ %c 2 ] [ [ %d 5 ] 0 ] ] ] ]
+    [ [ %c [ [ %a 1 ] [ [ %b 2 ] [ [ %d 8 ] 0 ] ] ] ]
+    [ [ %d [ [ %b 5 ] [ [ %c 8 ] [ [ %e 3 ] 0 ] ] ] ]
+    [ [ %e [ [ %d 3 ] 0 ] ] 0 ] ] ] ] ]
+  wg_edges0 = fn [_] ->
+    [ [ %a [ %b [ 4 0 ] ] ]
+    [ [ %a [ %c [ 1 0 ] ] ]
+    [ [ %b [ %c [ 2 0 ] ] ]
+    [ [ %b [ %d [ 5 0 ] ] ]
+    [ [ %c [ %d [ 8 0 ] ] ]
+    [ [ %d [ %e [ 3 0 ] ] ] 0 ] ] ] ] ] ]
+end

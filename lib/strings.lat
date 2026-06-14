@@ -1,0 +1,152 @@
+:: ===========================================================================
+:: strings.lat — STRING ALGORITHMS, one of the highest-frequency interview areas.
+:: Latte strings are cords (atoms of little-endian bytes), so this module leans on
+:: the cord<->byte-list helpers now in std (`bytes`, `frombytes`) plus `sort`.
+::
+::   ANALYSIS        reverse, palindrome, frequency table, character count
+::   ANAGRAMS        anagram test (sorted-character signature), first unique char
+::   SEARCH          naive substring search, and Rabin-Karp rolling-hash search
+::   FAMILIES        longest common prefix, run-length encoding
+::
+:: A character is a one-byte cord: %a is the atom 97, so a byte value and a one-char
+:: cord are the same thing and compare with ==. Membership/predicate results follow
+:: the system's LOOBEAN convention: 0 = true (here, 0 = "yes / found / matches").
+:: `sub` errors on underflow, so each subtraction below is guarded.   Arms `st_`.
+:: ===========================================================================
+import std
+core strings
+
+  :: =========================================================================
+  :: ANALYSIS
+  :: =========================================================================
+  :: reverse a string: reverse its byte list and rebuild the cord.
+  st_rev = fn [s] -> (frombytes (reverse (bytes s)))
+
+  :: palindrome test: a string reads the same forwards and backwards, i.e. it equals
+  :: its reverse. Comparing the cords as atoms is exact. Returns 0 = palindrome.
+  st_ispalin = fn [s] -> if ((st_rev s) == s) then 0 else 1
+
+  :: frequency table: fold over the bytes, bumping each byte's tally in an assoc map.
+  st_freq = fn [s] ->
+    (foldl (fn [m b] -> (aput m b (add (aget m b 0) 1))) 0 (bytes s))
+
+  :: count occurrences of character `ch` (a one-byte cord) in s.
+  st_count = fn [s ch] ->
+    (foldl (fn [acc b] -> (if (b == ch) then (add acc 1) else acc)) 0 (bytes s))
+
+  :: =========================================================================
+  :: ANAGRAMS
+  :: =========================================================================
+  :: two strings are anagrams iff they are permutations of the same characters — so
+  :: their SORTED byte lists are identical. Rebuilding each sorted list into a cord
+  :: lets us compare atoms directly. Returns 0 = anagrams.
+  st_anagram = fn [a b] ->
+    if ((frombytes (sort (bytes a))) == (frombytes (sort (bytes b)))) then 0 else 1
+
+  :: first non-repeating character: build the frequency table, then scan the string in
+  :: order and return the first character whose count is 1 (as a one-byte cord); 0 if
+  :: every character repeats.
+  st_firstuniq = fn [s] ->
+    let m = (st_freq s) in
+    loop with [c = (bytes s)] :
+      if (c == 0) then 0
+      else if ((aget m (head c) 0) == 1) then (head c)
+      else again((tail c))
+    end
+
+  :: =========================================================================
+  :: SUBSTRING SEARCH
+  :: =========================================================================
+  :: naive search: slide a window of the pattern's width across the text, comparing
+  :: each window (rebuilt as a cord) to the pattern. Returns the 0-based index of the
+  :: first match, or (len s) — one past the last index — to signal "absent". O(n*m).
+  st_find = fn [s pat] ->
+    let bs = (bytes s) in
+    let n = (len bs) in
+    let m = (len (bytes pat)) in
+    loop with [i = 0] :
+      if (gt (add i m) n) then n                                   :: window past the end: absent
+      else if ((frombytes (take m (drop i bs))) == pat) then i     :: this window equals the pattern
+      else again((add i 1))
+    end
+
+  :: membership wrapper: 0 = pattern occurs in s, 1 = absent.
+  st_contains = fn [s pat] -> if (lt (st_find s pat) (len (bytes s))) then 0 else 1
+
+  :: Horner hash of a byte list mod a large prime — the hash Rabin-Karp rolls.
+  st_hashw = fn [bs] ->
+    (foldl (fn [h b] -> (mod (add (mul h 256) b) 1000000007)) 0 bs)
+
+  :: RABIN-KARP: hash the pattern once, then roll a same-width hash across the text,
+  :: dropping the byte that leaves and folding in the byte that enters, so each step is
+  :: O(1) instead of re-hashing. On a hash match we still verify the bytes (hashes can
+  :: collide). Average O(n+m). To roll we must subtract the leaving byte's weighted
+  :: contribution mod M; since `sub` underflows, we add M first (M - leaving is safe).
+  st_rabinkarp = fn [s pat] ->
+    let bs = (bytes s) in
+    let n = (len bs) in
+    let pb = (bytes pat) in
+    let m = (len pb) in
+    if (m == 0) then 0                                  :: empty pattern matches at 0
+    else if (gt m n) then n                             :: pattern longer than text: absent
+    else
+      let ph = (st_hashw pb) in                         :: pattern hash
+      let high = (mod (pow 256 (sub m 1)) 1000000007) in :: weight of the byte that leaves the window
+      loop with [i = 0, wh = (st_hashw (take m bs))] :     :: wh = hash of the window at i
+        if (and (wh == ph) ((frombytes (take m (drop i bs))) == pat)) then i  :: hash hit + verified
+        else if ((add i m) == n) then n                 :: that was the last window: absent
+        else
+          :: --- roll the window one step to the right, in O(1) ---
+          :: `leaving` is the weighted contribution of bs[i], the byte sliding OUT of the
+          :: window: its value times `high` (= 256^(m-1)), reduced mod M.
+          let leaving = (mod (mul (nth bs i) high) 1000000007) in
+          :: new hash = (old hash - leaving) * 256 + entering byte, all mod M. We compute
+          :: (wh - leaving) as (wh + (M - leaving)) mod M so the subtraction never underflows;
+          :: multiplying by 256 shifts every surviving byte up one place; then the entering
+          :: byte bs[i+m] drops into the now-vacant low position.
+          let wh2 = (mod (add (mul (mod (add wh (sub 1000000007 leaving)) 1000000007)   :: (wh - leaving) mod M
+                                   256)                                                  :: shift left one byte
+                              (nth bs (add i m)))                                        :: + entering byte
+                         1000000007) in                                                  :: keep it in [0, M)
+          again((add i 1), wh2)
+      end
+
+  :: =========================================================================
+  :: FAMILIES OF STRINGS
+  :: =========================================================================
+  :: common prefix of TWO cords: walk both byte lists together until they end or differ.
+  st_lcp2 = fn [a b] ->
+    loop with [x = (bytes a), y = (bytes b), acc = 0] :
+      if (x == 0) then (frombytes (reverse acc))
+      else if (y == 0) then (frombytes (reverse acc))
+      else if ((head x) == (head y)) then again((tail x), (tail y), [ (head x) acc ])
+      else (frombytes (reverse acc))
+    end
+  :: longest common prefix of a whole LIST of cords: fold the pairwise prefix across
+  :: them (the common prefix can only shrink), starting from the first string.
+  st_lcp = fn [ss] ->
+    if (ss == 0) then 0 else (foldl (fn [acc s] -> (st_lcp2 acc s)) (head ss) (tail ss))
+
+  :: RUN-LENGTH ENCODE: collapse maximal runs of one character into [char count] pairs.
+  :: e.g. %aaabb -> [ [%a 3] [%b 2] ]. Track the current run's char and length; on a
+  :: change, flush the pair and start a new run.
+  st_rle = fn [s] ->
+    let bs = (bytes s) in
+    if (bs == 0) then 0
+    else loop with [c = (tail bs), cur = (head bs), k = 1, acc = 0] :
+      if (c == 0) then (reverse [ [ cur k ] acc ])             :: flush the final run
+      else if ((head c) == cur) then again((tail c), cur, (add k 1), acc)  :: run continues
+      else again((tail c), (head c), 1, [ [ cur k ] acc ])     :: run ends: flush and restart
+    end
+
+  :: =========================================================================
+  :: ready-made sample inputs so every demo and tutorial panel is a one-liner.
+  :: =========================================================================
+  st_word0 = fn [_] -> %racecar                  :: a palindrome
+  st_word1 = fn [_] -> %hello                     :: has a repeated 'l' and 'o'
+  st_anaA  = fn [_] -> %listen                    :: anagram pair with...
+  st_anaB  = fn [_] -> %silent                    :: ...this one
+  st_text0 = fn [_] -> %abracadabra               :: search target (contains %cad at index 4)
+  st_list0 = fn [_] -> [ %flower [ %flow [ %flight 0 ] ] ]   :: common prefix %fl
+  st_run0  = fn [_] -> %aaabbc                     :: run-length: [[%a 3][%b 2][%c 1]]
+end

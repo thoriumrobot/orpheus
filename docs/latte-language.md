@@ -208,10 +208,16 @@ end
 
 `lib/std.lat`, written in Latte over the single Loom successor primitive:
 
-- arithmetic on naturals: `dec add sub mul div mod`
+- arithmetic on naturals: `dec add sub mul div mod` and `pow`
+- bitwise on naturals: `shl shr bit lowbit popcount band bor bxor` (shifts are exact `×/÷ 2^k`;
+  AND/OR/XOR fold bit by bit). The data-intensive libraries use these for Bloom-filter bitsets
+  and zigzag varints.
 - comparison / logic (loobean): `lt gt lte gte not and or min max`
-- lists: `len reverse append nth member range`
-- higher-order: `map filter foldl`
+- lists: `len reverse append nth member range`, `take drop`, and stable `sort` / `sortby`
+  (merge sort; a `sortby` comparator returns the loobean `0` when its first argument sorts first)
+- higher-order: `map filter foldl foldr`
+- cords (strings): `bytelen cat catall`, plus `bytes` (cord → low-first byte list) and
+  `frombytes` (byte list → cord) — the basis of the string-algorithms library
 
 Other built-in libraries: `mold` (the aura/type system), `num` (signed fixed-point), `tensor`,
 `ml`, `plan`, `plot`, `vec`, `chess`, `chessml`, `tool` (the system command set), `mocha` (the

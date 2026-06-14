@@ -1,0 +1,154 @@
+:: ===========================================================================
+:: trees.lat — BINARY TREES, the single most common interview shape. Almost every
+:: tree question is one recursive idea: solve the two subtrees, then combine their
+:: answers at the root. Master that template and traversals, height, diameter, LCA,
+:: and path sums are all variations on it.
+::
+::   TRAVERSALS    in-/pre-/post-order (depth-first) and level-order (breadth-first)
+::   SHAPE         height, node count, invert/mirror
+::   PATHS         maximum root-to-leaf sum
+::   QUERIES       lowest common ancestor, validate-BST
+::
+:: Representation: a node is the triple [value [left right]] — so value = (head t),
+:: left = (head (tail t)), right = (tail (tail t)). The EMPTY tree is 0 (nil), which
+:: doubles as the "absent child" and as the natural base case of every recursion.
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B`
+:: takes A when c is 0; `and`/`or`/`not` are loobean (0 = true).   Arms prefixed `tr_`.
+:: ===========================================================================
+import std
+core trees
+
+  :: =========================================================================
+  :: CONSTRUCTORS AND ACCESSORS
+  :: =========================================================================
+  :: build a node from a value and its two subtrees (each a tree, possibly 0).
+  tr_node = fn [v l r] -> [ v [ l r ] ]
+  :: a leaf is a node with two empty children.
+  tr_leaf = fn [v] -> (tr_node v 0 0)
+  tr_val   = fn [t] -> (head t)            :: the value stored at this node
+  tr_left  = fn [t] -> (head (tail t))     :: the left subtree
+  tr_right = fn [t] -> (tail (tail t))     :: the right subtree
+
+  :: =========================================================================
+  :: DEPTH-FIRST TRAVERSALS — the three differ only in WHERE the root is visited
+  :: =========================================================================
+  :: IN-ORDER: left subtree, then root, then right. For a binary SEARCH tree this
+  :: emits the values in sorted order — the property we exploit in tr_isbst below.
+  tr_inorder = fn [t] ->
+    if (t == 0) then 0                     :: empty tree contributes nothing
+    else (append (tr_inorder (tr_left t))  :: everything smaller, in order...
+                 [ (tr_val t) (tr_inorder (tr_right t)) ])  :: ...then root, then the larger side
+
+  :: PRE-ORDER: root first, then left, then right. Pre-order is the traversal that lets
+  :: you SERIALISE and rebuild a tree, since the root is known before its subtrees.
+  tr_preorder = fn [t] ->
+    if (t == 0) then 0
+    else [ (tr_val t) (append (tr_preorder (tr_left t)) (tr_preorder (tr_right t))) ]
+
+  :: POST-ORDER: both subtrees, then the root last. Post-order visits children before
+  :: parents, which is what you need to free / fold a tree from the leaves upward.
+  tr_postorder = fn [t] ->
+    if (t == 0) then 0
+    else (append (tr_postorder (tr_left t))
+                 (append (tr_postorder (tr_right t)) [ (tr_val t) 0 ]))
+
+  :: =========================================================================
+  :: BREADTH-FIRST TRAVERSAL
+  :: =========================================================================
+  :: LEVEL-ORDER: visit the tree top-to-bottom, left-to-right, one level at a time.
+  :: Depth-first recursion cannot do this; we keep an explicit QUEUE of subtrees, pop
+  :: the front, emit its value, and push its (non-empty) children to the back — so
+  :: nodes come out in the exact order they were discovered, which is by level.
+  tr_levelorder = fn [t] ->
+    if (t == 0) then 0
+    else loop with [q = [ t 0 ], acc = 0] :        :: q is a queue of subtrees, front at head
+      if (q == 0) then (reverse acc)               :: queue drained: acc holds values newest-first
+      else
+        let node = (head q) in                     :: dequeue the front subtree
+        let rest = (tail q) in
+        :: enqueue the left child if present, then the right child if present
+        let q2 = (if ((tr_left node) == 0) then rest else (append rest [ (tr_left node) 0 ])) in
+        let q3 = (if ((tr_right node) == 0) then q2 else (append q2 [ (tr_right node) 0 ])) in
+        again(q3, [ (tr_val node) acc ])           :: record this node's value, continue
+    end
+
+  :: =========================================================================
+  :: SHAPE — height, size, mirror
+  :: =========================================================================
+  :: HEIGHT (max depth): the empty tree is 0; otherwise 1 + the taller of the two
+  :: subtrees. This IS the recursive template: combine the children's answers at the root.
+  tr_height = fn [t] ->
+    if (t == 0) then 0
+    else (add 1 (max (tr_height (tr_left t)) (tr_height (tr_right t))))
+
+  :: NODE COUNT: 0 for empty, else 1 (this node) plus the counts of both subtrees.
+  tr_count = fn [t] ->
+    if (t == 0) then 0
+    else (add 1 (add (tr_count (tr_left t)) (tr_count (tr_right t))))
+
+  :: INVERT (mirror): swap every node's left and right child, recursively. The famous
+  :: "could you invert a binary tree on a whiteboard" question — three lines here.
+  tr_invert = fn [t] ->
+    if (t == 0) then 0
+    else (tr_node (tr_val t) (tr_invert (tr_right t)) (tr_invert (tr_left t)))
+
+  :: =========================================================================
+  :: PATHS — maximum root-to-leaf sum
+  :: =========================================================================
+  :: the largest sum of values along any path from the root down to a leaf. We must
+  :: treat a MISSING child specially: descending into an absent subtree (0) would
+  :: contribute nothing yet wrongly count as a valid path, so a node with one child
+  :: only follows the child it actually has.
+  tr_maxpath = fn [t] ->
+    if (t == 0) then 0
+    else if (and ((tr_left t) == 0) ((tr_right t) == 0)) then (tr_val t)        :: a leaf: just its value
+    else if ((tr_left t) == 0)  then (add (tr_val t) (tr_maxpath (tr_right t))) :: only a right child
+    else if ((tr_right t) == 0) then (add (tr_val t) (tr_maxpath (tr_left t)))  :: only a left child
+    else (add (tr_val t) (max (tr_maxpath (tr_left t)) (tr_maxpath (tr_right t))))  :: take the better side
+
+  :: =========================================================================
+  :: QUERIES — lowest common ancestor, validate-BST
+  :: =========================================================================
+  :: LOWEST COMMON ANCESTOR of values a and b (assumed present and distinct). The
+  :: recursion: if this node IS a or b it is an ancestor of itself, so return it. Otherwise
+  :: search both subtrees. If a and b come back from DIFFERENT sides, this node is where
+  :: their paths first meet — the LCA. If they come from the same side, the answer is down
+  :: there. Returns the LCA's value, or 0 if neither was found in this subtree.
+  tr_lca = fn [t a b] ->
+    if (t == 0) then 0                                       :: fell off the tree: found nothing
+    else if (or ((tr_val t) == a) ((tr_val t) == b)) then (tr_val t)  :: this node is one of the targets
+    else
+      let lft = (tr_lca (tr_left t) a b) in                  :: search left  (0 if not found)
+      let rgt = (tr_lca (tr_right t) a b) in                 :: search right (0 if not found)
+      if (and (not (lft == 0)) (not (rgt == 0))) then (tr_val t)  :: targets split here: LCA is this node
+      else if (not (lft == 0)) then lft else rgt             :: otherwise propagate whichever side found one
+
+  :: a strictly-increasing check on a list (loobean 0 = strictly increasing).
+  tr_issorted = fn [xs] ->
+    if (xs == 0) then 0                                      :: empty is trivially sorted
+    else if ((tail xs) == 0) then 0                          :: one element is trivially sorted
+    else if (lt (head xs) (head (tail xs)))                  :: first < second (strictly)?
+         then (tr_issorted (tail xs))                        :: keep checking the rest
+         else 1                                              :: an out-of-order pair: not sorted
+  :: VALIDATE BST: a binary tree is a binary search tree exactly when its in-order
+  :: traversal is strictly increasing. This is cleaner and less error-prone than
+  :: threading min/max bounds down the recursion (and avoids `sub` underflow on bounds).
+  tr_isbst = fn [t] -> (tr_issorted (tr_inorder t))
+
+  :: =========================================================================
+  :: ready-made sample trees so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  ::          5
+  ::        /   \        in-order  2 3 4 5 7 8 9   (sorted -> a valid BST)
+  ::       3     8       pre-order 5 3 2 4 8 7 9
+  ::      / \   / \      height 3, 7 nodes, max root-to-leaf sum 5+8+9 = 22
+  ::     2   4 7   9     LCA(2,4)=3, LCA(7,9)=8, LCA(2,7)=5
+  tr_tree0 = fn [_] ->
+    (tr_node 5
+      (tr_node 3 (tr_leaf 2) (tr_leaf 4))
+      (tr_node 8 (tr_leaf 7) (tr_leaf 9)))
+  :: a tree whose in-order (2 3 9 5 8) is NOT sorted -> not a BST, for tr_isbst.
+  tr_bad0 = fn [_] ->
+    (tr_node 5 (tr_node 3 (tr_leaf 2) (tr_leaf 9)) (tr_leaf 8))
+end

@@ -1,0 +1,155 @@
+:: ===========================================================================
+:: search.lat — BINARY SEARCH and its variants, the technique behind "can you do it in
+:: O(log n)?" Plain binary search (in the `algo` module) finds an exact key in a sorted
+:: array; the real interview skill is recognising the LESS obvious places a monotone
+:: boundary hides — duplicate runs, rotated arrays, slopes, and even the answer itself.
+::
+::   BOUNDARIES    lower / upper bound, occurrence count, membership
+::   ROTATED       search and find-minimum in a rotated sorted array
+::   SLOPE         find a peak element
+::   ON THE ANSWER integer square root, Koko-bananas minimum eating speed
+::
+:: The unifying invariant: maintain a range that is guaranteed to contain the boundary
+:: you want, and halve it each step by asking ONE monotone yes/no question at the middle.
+:: (Arrays are Latte lists, so `nth` is O(n); the SEARCH LOGIC is still O(log n) compares,
+:: which is what the technique is about.)
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B`
+:: takes A when c is 0; `sub` errors on underflow, so each `mid-1` below is reached only
+:: when mid >= 1.   Arms prefixed `se_`.
+:: ===========================================================================
+import std
+core search
+
+  :: =========================================================================
+  :: BOUNDARIES — where a value begins and ends in a sorted array
+  :: =========================================================================
+  :: LOWER BOUND: the first index at which `target` could be inserted to keep `xs` sorted —
+  :: equivalently, the number of elements strictly less than target, and (when target is
+  :: present) the index of its FIRST occurrence. We keep the half-open range [lo, hi): if
+  :: xs[mid] < target the boundary is strictly right of mid, else mid is still a candidate.
+  se_lowerbound = fn [xs target] ->
+    loop with [lo = 0, hi = (len xs)] :
+      if (gte lo hi) then lo                       :: range empty: lo is the boundary
+      else let mid = (div (add lo hi) 2) in
+        if (lt (nth xs mid) target)                :: xs[mid] < target: discard mid and the left
+          then again((add mid 1), hi)
+          else again(lo, mid)                      :: xs[mid] >= target: boundary is mid or left of it
+    end
+
+  :: UPPER BOUND: the first index whose value is strictly GREATER than target — i.e. one past
+  :: the last occurrence. Same search, with `<=` instead of `<` at the midpoint.
+  se_upperbound = fn [xs target] ->
+    loop with [lo = 0, hi = (len xs)] :
+      if (gte lo hi) then lo
+      else let mid = (div (add lo hi) 2) in
+        if (lte (nth xs mid) target)               :: xs[mid] <= target: boundary is right of mid
+          then again((add mid 1), hi)
+          else again(lo, mid)
+    end
+
+  :: how many times target occurs = upper bound - lower bound (no underflow: upper >= lower).
+  se_count = fn [xs target] -> (sub (se_upperbound xs target) (se_lowerbound xs target))
+
+  :: membership via lower bound: target is present iff the boundary index is in range and the
+  :: element sitting there equals target. Returns loobean 0 = present, 1 = absent.
+  se_contains = fn [xs target] ->
+    let i = (se_lowerbound xs target) in
+    if (and (lt i (len xs)) ((nth xs i) == target)) then 0 else 1
+
+  :: =========================================================================
+  :: ROTATED ARRAYS — a sorted array cut and swapped (e.g. [4 5 6 7 0 1 2])
+  :: =========================================================================
+  :: SEARCH a rotated sorted array in O(log n). The insight: at any midpoint, AT LEAST ONE
+  :: side [lo,mid] or [mid,hi] is still in sorted order. Identify that sorted side, check
+  :: whether target falls inside its known range, and recurse into the half that can contain
+  :: it. Returns the index, or (len xs) if absent.
+  se_rotated = fn [xs target] ->
+    if (xs == 0) then 0
+    else loop with [lo = 0, hi = (sub (len xs) 1)] :
+      if (gt lo hi) then (len xs)                  :: range empty: not found
+      else let mid = (div (add lo hi) 2) in
+        if ((nth xs mid) == target) then mid
+        else if (lte (nth xs lo) (nth xs mid))     :: the left half [lo,mid] is sorted
+          then (if (and (lte (nth xs lo) target) (lt target (nth xs mid)))   :: target lies in it
+                then again(lo, (sub mid 1))
+                else again((add mid 1), hi))
+        else                                        :: otherwise the right half [mid,hi] is sorted
+          (if (and (lt (nth xs mid) target) (lte target (nth xs hi)))        :: target lies in it
+                then again((add mid 1), hi)
+                else again(lo, (sub mid 1)))
+    end
+
+  :: MINIMUM of a rotated sorted array = the rotation point. If xs[mid] > xs[hi] the array
+  :: "wraps" between mid and hi, so the minimum is strictly right of mid; otherwise the
+  :: minimum is at mid or to its left. Comparing to xs[hi] (not xs[lo]) handles the
+  :: not-actually-rotated case cleanly.
+  se_rotmin = fn [xs] ->
+    if (xs == 0) then 0
+    else loop with [lo = 0, hi = (sub (len xs) 1)] :
+      if (gte lo hi) then (nth xs lo)
+      else let mid = (div (add lo hi) 2) in
+        if (gt (nth xs mid) (nth xs hi))           :: wrap is to the right of mid
+          then again((add mid 1), hi)
+          else again(lo, mid)
+    end
+
+  :: =========================================================================
+  :: SLOPE — binary search without a sorted array
+  :: =========================================================================
+  :: FIND A PEAK: an index whose value is greater than its neighbours (treat the off-array
+  :: edges as -infinity). You can binary search even though the array is NOT sorted, by
+  :: following the slope: if xs[mid] < xs[mid+1] you are going uphill, so a peak must exist
+  :: to the right; otherwise mid itself is on a downslope (or is the peak). Returns an index.
+  se_peak = fn [xs] ->
+    if (xs == 0) then 0
+    else loop with [lo = 0, hi = (sub (len xs) 1)] :
+      if (gte lo hi) then lo
+      else let mid = (div (add lo hi) 2) in
+        if (lt (nth xs mid) (nth xs (add mid 1)))  :: uphill: a peak lies to the right
+          then again((add mid 1), hi)
+          else again(lo, mid)                      :: downhill / flat-right: mid may be the peak
+    end
+
+  :: =========================================================================
+  :: BINARY SEARCH ON THE ANSWER — the array is implicit
+  :: =========================================================================
+  :: When the answer is a number in a known range and "is value k good?" is MONOTONE (once
+  :: true it stays true, or vice-versa), binary-search the value itself — no array required.
+  ::
+  :: INTEGER SQUARE ROOT: the largest k with k*k <= n. The predicate "k*k <= n" is true for
+  :: small k and flips to false past sqrt(n), so we hunt that boundary, remembering the last
+  :: good k in `ans`.
+  se_isqrt = fn [n] ->
+    loop with [lo = 0, hi = n, ans = 0] :
+      if (gt lo hi) then ans
+      else let mid = (div (add lo hi) 2) in
+        if (lte (mul mid mid) n)                   :: mid*mid <= n: mid works, aim higher
+          then again((add mid 1), hi, mid)
+          else again(lo, (sub mid 1), ans)         :: too big (mid >= 1 here, so mid-1 is safe)
+    end
+
+  :: hours Koko needs to eat all piles at speed k: each pile takes ceil(pile/k) hours, and
+  :: ceil(p/k) is computed as (p + k - 1) / k with integer division.
+  se_hours = fn [piles k] ->
+    (foldl (fn [acc p] -> (add acc (div (add p (sub k 1)) k))) 0 piles)
+  :: KOKO BANANAS: the minimum integer eating speed at which all piles finish within `h`
+  :: hours. "speed k is fast enough" (hours(k) <= h) is monotone increasing in k, so we
+  :: binary-search the smallest good speed in [1, biggest pile].
+  se_minspeed = fn [piles h] ->
+    loop with [lo = 1, hi = (maximum piles)] :
+      if (gte lo hi) then lo
+      else let mid = (div (add lo hi) 2) in
+        if (lte (se_hours piles mid) h)            :: fast enough: try a slower speed
+          then again(lo, mid)
+          else again((add mid 1), hi)              :: too slow: must go faster
+    end
+
+  :: =========================================================================
+  :: ready-made sample inputs so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  se_sorted0 = fn [_] -> [ 1 [ 2 [ 2 [ 2 [ 3 [ 4 0 ] ] ] ] ] ]   :: count of 2 is 3
+  se_rot0    = fn [_] -> [ 4 [ 5 [ 6 [ 7 [ 0 [ 1 [ 2 0 ] ] ] ] ] ] ]  :: rotated; min 0, 0 at index 4
+  se_peak0   = fn [_] -> [ 1 [ 2 [ 3 [ 1 0 ] ] ] ]               :: peak value 3 at index 2
+  se_piles0  = fn [_] -> [ 3 [ 6 [ 7 [ 11 0 ] ] ] ]              :: Koko: within 8 hours -> speed 4
+end

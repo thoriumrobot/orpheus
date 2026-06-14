@@ -1,0 +1,141 @@
+:: ===========================================================================
+:: graphs.lat — GRAPH DECISION PROBLEMS, an enormous interview category. The `algo` module
+:: shows raw traversal (BFS/DFS, DFS-based topological sort); this module collects the
+:: classic QUESTIONS asked about a graph's structure:
+::
+::   ORDERING    topological sort by Kahn's in-degree method
+::   CYCLES      is a directed graph acyclic? (course-schedule feasibility)
+::   COMPONENTS  how many connected pieces does an undirected graph have?
+::   COLOURING   is an undirected graph bipartite (2-colourable)?
+::   REACHABILITY is there a path from one node to another?
+::
+:: GRAPH REPRESENTATION: an adjacency assoc-list mapping each node to its list of out-
+:: neighbours. An entry is the pair [node neighbourlist]; `aget g u 0` returns u's
+:: neighbours (or 0 if u has none), `akeys g` lists every node. For UNDIRECTED graphs the
+:: samples list each edge in BOTH directions.
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `member x xs` is 0 when
+:: present; `if c then A else B` takes A when c is 0; `filter pred xs` KEEPS elements with
+:: pred == 0; `sub` errors on underflow.   Arms prefixed `gp_`.
+:: ===========================================================================
+import std
+core graphs
+
+  :: the out-neighbours of node u (the empty list 0 if u has none).
+  gp_adj = fn [g u] -> (aget g u 0)
+
+  :: =========================================================================
+  :: ORDERING & CYCLES — directed graphs
+  :: =========================================================================
+  :: in-degree of node v counting ONLY edges whose source is not in `removed`. We scan every
+  :: node's neighbour list and tally how many times v appears as a destination.
+  gp_indegR = fn [g v removed] ->
+    (foldl (fn [acc entry] ->
+              (if (member (head entry) removed) then acc       :: source already removed: ignore it
+               else (add acc (count (fn [w] -> (if (w == v) then 0 else 1)) (tail entry)))))
+           0 g)
+
+  :: TOPOLOGICAL SORT via Kahn's algorithm. Repeatedly pick a node whose remaining in-degree
+  :: is zero (nothing un-removed still points at it), append it to the order, and mark it
+  :: removed — which may free up others. If we run out of zero-in-degree nodes before removing
+  :: them all, the leftover nodes form a cycle and are simply not emitted.
+  gp_toposort = fn [g] ->
+    let nodes = (akeys g) in
+    loop with [removed = 0, order = 0] :
+      let ready = (filter (fn [u] ->
+                     (if (member u removed) then 1             :: already placed: not a candidate
+                      else (gp_indegR g u removed))) nodes) in  :: candidate iff in-degree is 0
+      if (ready == 0) then (reverse order)                     :: none ready: finished (or stuck on a cycle)
+      else again([ (head ready) removed ], [ (head ready) order ])  :: place the first ready node
+    end
+
+  :: IS IT A DAG? (course-schedule feasibility). Kahn emits every node exactly when the graph
+  :: is acyclic, so compare the emitted count to the node count. Returns 0 = acyclic (all
+  :: courses finishable), 1 = a cycle exists.
+  gp_isdag = fn [g] ->
+    if ((len (gp_toposort g)) == (len (akeys g))) then 0 else 1
+
+  :: =========================================================================
+  :: COMPONENTS & REACHABILITY — undirected graphs
+  :: =========================================================================
+  :: flood fill: return `seen` extended with every node reachable from `start`. An explicit
+  :: stack drives an iterative DFS; each node is marked the first time it is popped, so the
+  :: walk terminates after visiting each reachable node once.
+  gp_flood = fn [g start seen] ->
+    loop with [stack = [ start 0 ], vis = seen] :
+      if (stack == 0) then vis
+      else let u = (head stack) in
+        if (member u vis) then again((tail stack), vis)        :: already visited: drop it
+        else again((append (gp_adj g u) (tail stack)), [ u vis ])  :: visit u, push its neighbours
+    end
+
+  :: CONNECTED COMPONENTS: flood from each not-yet-seen node and count how many separate
+  :: floods are needed to cover every node. Each flood paints exactly one component.
+  gp_components = fn [g] ->
+    let nodes = (akeys g) in
+    loop with [seen = 0, ns = nodes, cnt = 0] :
+      if (ns == 0) then cnt
+      else if (member (head ns) seen)                          :: covered by an earlier flood
+        then again(seen, (tail ns), cnt)
+        else again((gp_flood g (head ns) seen), (tail ns), (add cnt 1))  :: a fresh component
+    end
+
+  :: REACHABILITY: is there a path from `src` to `dst`? Flood from src and test membership
+  :: (src reaches itself trivially). Returns 0 = reachable, 1 = not.
+  gp_reach = fn [g src dst] ->
+    if (member dst (gp_flood g src 0)) then 0 else 1
+
+  :: =========================================================================
+  :: COLOURING — bipartite test
+  :: =========================================================================
+  :: BFS-colour one component starting from `start` with colour 0, neighbours 1, and so on.
+  :: The work queue holds [node wantedColour] pairs. If a node is reached that is already
+  :: coloured with the OTHER colour, an edge joins two same-coloured nodes (an odd cycle) and
+  :: we bail out with the marker 1. Otherwise we return the extended colour map (always a
+  :: non-empty assoc list, so it can never be confused with the 1 marker).
+  gp_colorBFS = fn [g start col] ->
+    loop with [q = [ [ start 0 ] 0 ], cc = col] :
+      if (q == 0) then cc                                      :: component coloured cleanly
+      else
+        let item = (head q) in
+        let u = (head item) in                                :: the node to colour
+        let c = (tail item) in                                :: the colour it should take
+        if (ahas cc u)                                        :: already coloured?
+          then (if ((aget cc u 0) == c) then again((tail q), cc)  :: same colour: consistent, go on
+                else 1)                                       :: different colour wanted: NOT bipartite
+          else again((append (map (fn [v] -> [ v (sub 1 c) ]) (gp_adj g u)) (tail q)),
+                     (aput cc u c))                           :: colour u; enqueue neighbours, opposite colour
+    end
+
+  :: BIPARTITE? Try to 2-colour every component. Returns 0 = bipartite, 1 = not.
+  gp_bipartite = fn [g] ->
+    let nodes = (akeys g) in
+    loop with [ns = nodes, col = 0] :
+      if (ns == 0) then 0                                      :: all components coloured: bipartite
+      else if (ahas col (head ns)) then again((tail ns), col)  :: already coloured by an earlier pass
+      else
+        let res = (gp_colorBFS g (head ns) col) in
+        if (res == 1) then 1                                  :: a clash bubbled up: not bipartite
+        else again((tail ns), res)                            :: carry the extended colour map onward
+    end
+
+  :: =========================================================================
+  :: ready-made sample graphs so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  :: directed acyclic graph (the classic CLRS prerequisite example): 5->2 5->0 4->0 4->1
+  :: 2->3 3->1, with 0 and 1 as sinks. A valid topological order exists.
+  gp_dag0 = fn [_] ->
+    [ [5 [2 [0 0]]] [ [4 [0 [1 0]]] [ [2 [3 0]] [ [3 [1 0]] [ [0 0] [ [1 0] 0 ] ] ] ] ] ]
+  :: directed graph with a 3-cycle 0->1->2->0: no topological order, not finishable.
+  gp_cyc0 = fn [_] ->
+    [ [0 [1 0]] [ [1 [2 0]] [ [2 [0 0]] 0 ] ] ]
+  :: undirected graph with three pieces: {0,1,2} fully connected, edge {3,4}, isolated {5}.
+  gp_undir0 = fn [_] ->
+    [ [0 [1 [2 0]]] [ [1 [0 [2 0]]] [ [2 [0 [1 0]]] [ [3 [4 0]] [ [4 [3 0]] [ [5 0] 0 ] ] ] ] ] ]
+  :: undirected 4-cycle 0-1-2-3-0 (an EVEN cycle: bipartite).
+  gp_bip0 = fn [_] ->
+    [ [0 [1 [3 0]]] [ [1 [0 [2 0]]] [ [2 [1 [3 0]]] [ [3 [0 [2 0]]] 0 ] ] ] ]
+  :: undirected triangle 0-1-2-0 (an ODD cycle: NOT bipartite).
+  gp_odd0 = fn [_] ->
+    [ [0 [1 [2 0]]] [ [1 [0 [2 0]]] [ [2 [0 [1 0]]] 0 ] ] ]
+end

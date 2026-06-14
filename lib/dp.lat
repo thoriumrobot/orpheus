@@ -1,0 +1,148 @@
+:: ===========================================================================
+:: dp.lat — DYNAMIC PROGRAMMING, the most feared interview category. Every DP is the
+:: same two-part recipe: (1) find a RECURRENCE that expresses an answer in terms of
+:: smaller answers (optimal substructure), and (2) compute each distinct sub-answer
+:: ONCE and reuse it (because the sub-problems overlap). What changes between problems
+:: is only the recurrence and the shape of the table.
+::
+::   1-D DP        climbing stairs, house robber
+::   FEASIBILITY   subset-sum, equal partition
+::   COUNTING      coin-change ways (combinations)
+::   OPTIMISATION  0/1 knapsack, longest common subsequence
+::
+:: (The `algo` module already shows coin-change-MIN, edit distance, and longest
+:: increasing subsequence; this module collects the other canonical DP problems.)
+::
+:: LOOBEAN REMINDER: comparison gates and `==` return 0 for TRUE; `if c then A else B`
+:: takes A when c is 0; `member x xs` is 0 when present; `sub` errors on underflow, so
+:: every subtraction below is guarded by a `>=` / index range.   Arms prefixed `dp_`.
+:: ===========================================================================
+import std
+core dp
+
+  :: a small helper: return list `xs` with index `i` replaced by `v`. Rebuilds the list
+  :: (take the first i, then v, then the rest) — O(n), which is fine for the table sizes
+  :: in these problems. Used by the counting DP that updates a cell in place.
+  dp_setat = fn [xs i v] -> (append (take i xs) [ v (drop (add i 1) xs) ])
+
+  :: =========================================================================
+  :: 1-D DP — one rolling dimension
+  :: =========================================================================
+  :: CLIMBING STAIRS: how many ways to climb `n` stairs in 1- or 2-step moves. The last
+  :: move is either a single step (from n-1) or a double (from n-2), so
+  :: ways(n) = ways(n-1) + ways(n-2) — the Fibonacci recurrence. We carry the rolling
+  :: pair (a, b) = (ways(i), ways(i+1)) instead of a whole table: O(n) time, O(1) space.
+  dp_stairs = fn [n] ->
+    loop with [i = 0, a = 1, b = 1] :       :: ways(0) = ways(1) = 1
+      if (i == n) then a
+      else again((add i 1), b, (add a b))
+    end
+
+  :: HOUSE ROBBER: maximum sum of a subsequence with NO TWO ADJACENT elements (you can't
+  :: rob two neighbouring houses). At each house keep two running bests: `rob` = best if we
+  :: take this house (so the previous must have been skipped), `skip` = best if we don't
+  :: (the better of the two previous states). The answer is the better of the final two.
+  dp_rob = fn [xs] ->
+    loop with [c = xs, rob = 0, skip = 0] :
+      if (c == 0) then (max rob skip)
+      else again((tail c), (add skip (head c)), (max rob skip))
+    end
+
+  :: =========================================================================
+  :: FEASIBILITY — can we hit a target exactly?
+  :: =========================================================================
+  :: SUBSET-SUM: is there a subset of `xs` summing to exactly `target`? We track the SET of
+  :: sums reachable so far; starting from {0}, each number `x` makes every previously
+  :: reachable sum `s` also reach `s + x`. If `target` ends up reachable, the answer is yes.
+  :: Returns the loobean 0 = reachable (yes), 1 = not.
+  dp_subsetsum = fn [xs target] ->
+    let reach = (foldl (fn [acc x] ->
+                          (nub (append acc (map (fn [s] -> (add s x)) acc))))
+                       [ 0 0 ] xs) in       :: start: only the empty subset, sum 0
+    if ((member target reach) == 0) then 0 else 1
+
+  :: EQUAL PARTITION: can `xs` be split into two groups of equal sum? Only possible if the
+  :: total is even, and then exactly when some subset reaches half the total — so it reduces
+  :: directly to subset-sum. Returns 0 = yes, 1 = no.
+  dp_canpartition = fn [xs] ->
+    let tot = (sum xs) in
+    if ((mod tot 2) == 1) then 1            :: odd total can never split evenly
+    else (dp_subsetsum xs (div tot 2))
+
+  :: =========================================================================
+  :: COUNTING — how many ways?
+  :: =========================================================================
+  :: dp[0..amount] initialised to dp[0]=1 (one way to make nothing) and 0 elsewhere.
+  dp_initways = fn [amount] -> [ 1 (replicate amount 0) ]
+  :: COIN-CHANGE WAYS: the number of DISTINCT combinations of `coins` summing to `amount`
+  :: (order does not matter). The trick that counts combinations rather than permutations is
+  :: to loop the coins on the OUTSIDE: once we have finished a coin we never revisit it, so
+  :: {1 then 2} and {2 then 1} are never both counted. For a fixed coin `c`, sweeping amounts
+  :: LOW to HIGH and reading the just-updated dp[a-c] lets a coin be reused any number of times.
+  dp_coinways = fn [coins amount] ->
+    (nth
+      (foldl (fn [dp c] ->                   :: fold each coin into the table
+                loop with [a = c, d = dp] :  :: update reachable amounts a = c .. amount
+                  if (gt a amount) then d
+                  else again((add a 1), (dp_setat d a (add (nth d a) (nth d (sub a c)))))
+                end)
+             (dp_initways amount)
+             coins)
+      amount)
+
+  :: =========================================================================
+  :: OPTIMISATION — best value under a constraint
+  :: =========================================================================
+  :: 0/1 KNAPSACK: choose a subset of items (each [weight value]) to maximise total value
+  :: without exceeding `cap`, using each item AT MOST ONCE. dp[w] = best value achievable
+  :: with capacity w. We fold the items in; for each item we build a FRESH table that reads
+  :: the OLD one — `dp[w] = max(leave it, take it = dp[w-weight] + value)`. Because every
+  :: lookup is into the pre-item table, no item is ever counted twice (that is exactly the
+  :: 0/1 constraint; an unbounded knapsack would instead read the table being built).
+  dp_knapsack = fn [items cap] ->
+    (nth
+      (foldl (fn [dp item] ->
+                let wt = (head item) in      :: item is the pair [weight value]
+                let val = (tail item) in
+                (map (fn [w] ->
+                        (if (gte w wt)        :: does the item fit at capacity w?
+                         then (max (nth dp w) (add (nth dp (sub w wt)) val))  :: leave vs take
+                         else (nth dp w)))    :: too heavy here: carry the old value
+                     (range (add cap 1))))    :: rebuild dp for every capacity 0..cap
+             (replicate (add cap 1) 0)        :: capacity 0..cap all start at value 0
+             items)
+      cap)
+
+  :: LONGEST COMMON SUBSEQUENCE: the length of the longest sequence that appears (in order,
+  :: not necessarily contiguous) in both strings. Classic 2-D DP:
+  ::   lcs(i,j) = lcs(i-1,j-1) + 1            if a[i] == b[j]   (extend the match)
+  ::            = max(lcs(i-1,j), lcs(i,j-1)) otherwise         (drop one character)
+  :: We keep only the PREVIOUS row (`prev`) and build the next (`cur`) — O(|a|*|b|) time,
+  :: O(|b|) space. `prev[j]` is the cell directly above; `head cur` is the cell to the left.
+  dp_lcs = fn [a b] ->
+    let xs = (bytes a) in
+    let ys = (bytes b) in
+    let n = (len ys) in
+    (last
+      (foldl (fn [prev x] ->                  :: x is the current character of `a`
+                loop with [c = ys, j = 1, cur = [ 0 0 ]] :  :: cur[0] = 0 (empty prefix of a)
+                  if (c == 0) then (reverse cur)
+                  else
+                    let v = (if ((head c) == x)
+                             then (add (nth prev (sub j 1)) 1)        :: match: diagonal + 1
+                             else (max (nth prev j) (head cur))) in   :: else max(up, left)
+                    again((tail c), (add j 1), [ v cur ])
+                end)
+             (replicate (add n 1) 0)          :: row 0 (empty prefix of a) is all zeros
+             xs))
+
+  :: =========================================================================
+  :: ready-made sample inputs so demos and tutorial panels are one-liners.
+  :: =========================================================================
+  dp_houses0 = fn [_] -> [ 2 [ 7 [ 9 [ 3 [ 1 0 ] ] ] ] ]    :: house robber -> 12 (2+9+1)
+  dp_set0    = fn [_] -> [ 3 [ 34 [ 4 [ 12 [ 5 [ 2 0 ] ] ] ] ] ]  :: subset-sum 9 -> yes (4+5)
+  dp_part0   = fn [_] -> [ 1 [ 5 [ 11 [ 5 0 ] ] ] ]         :: partition -> yes ({1,5,5} vs {11})
+  dp_coins0  = fn [_] -> [ 1 [ 2 [ 5 0 ] ] ]                :: coin-change ways for 5 -> 4
+  :: knapsack items [weight value], capacity 5 -> best value 7 ((2,3)+(3,4))
+  dp_items0  = fn [_] -> [ [ 2 3 ] [ [ 3 4 ] [ [ 4 5 ] [ [ 5 6 ] 0 ] ] ] ]
+end

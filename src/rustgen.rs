@@ -38,26 +38,87 @@ fn prim_arity(name: &str) -> Option<usize> {
     }
 }
 
-/// True when the AST ever BINDS one of the primitive names (a gate parameter,
-/// a let, or a loop variable named add/sub/mul/div/mod/lt/dec). The native
-/// backend emits those names as Rust primitives and const-folds them with no
-/// scope information, so such a program must run on the interpreter — where
-/// lexical shadowing is honored — and Anvil declines it.
-fn shadows_prim(ast: &Ast) -> bool {
-    let binds = |n: &str| prim_arity(n).is_some();
+/// Alpha-rename any binder of a primitive name (add/sub/mul/div/mod/lt/dec) to a
+/// fresh non-primitive name, so the native backend — which emits those names as
+/// Rust operators and const-folds them with no scope awareness — can still compile
+/// a program that uses, say, `sub` or `div` as an ordinary local. `env` maps a
+/// currently-shadowed primitive name to its replacement; `ctr` gensyms fresh names.
+/// Renaming follows lexical scope: a non-primitive binding of the same name (or a
+/// re-binding) shadows the rename, and `let`/`loop` initialisers are rewritten in
+/// the OUTER scope (they cannot see the binding they introduce).
+fn fresh(n: &str, ctr: &mut usize) -> String {
+    let f = format!("{}__shadow{}", n, *ctr);
+    *ctr += 1;
+    f
+}
+fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize) -> Ast {
+    let go = |a: &Ast, e: &HashMap<String, String>, c: &mut usize| Box::new(unshadow(a, e, c));
     match ast {
-        Ast::Gate(params, body) => params.iter().any(|p| binds(p)) || shadows_prim(body),
-        Ast::Let(n, v, b) => binds(n) || shadows_prim(v) || shadows_prim(b),
-        Ast::Loop(bindings, body) => {
-            bindings.iter().any(|(n, v)| binds(n) || shadows_prim(v)) || shadows_prim(body)
+        Ast::Var(v) => Ast::Var(env.get(v).cloned().unwrap_or_else(|| v.clone())),
+        Ast::Lit(_) | Ast::Tag(_) | Ast::Text(_) | Ast::Nil => ast.clone(),
+        Ast::Inc(e) => Ast::Inc(go(e, env, ctr)),
+        Ast::Head(e) => Ast::Head(go(e, env, ctr)),
+        Ast::Tail(e) => Ast::Tail(go(e, env, ctr)),
+        Ast::IsCell(e) => Ast::IsCell(go(e, env, ctr)),
+        Ast::Fast(nm, e) => Ast::Fast(nm.clone(), go(e, env, ctr)),
+        Ast::Eq(a, b) => Ast::Eq(go(a, env, ctr), go(b, env, ctr)),
+        Ast::If(c, a, b) => Ast::If(go(c, env, ctr), go(a, env, ctr), go(b, env, ctr)),
+        Ast::Tuple(xs) => Ast::Tuple(xs.iter().map(|x| unshadow(x, env, ctr)).collect()),
+        Ast::Again(xs) => Ast::Again(xs.iter().map(|x| unshadow(x, env, ctr)).collect()),
+        Ast::Call(f, xs) => Ast::Call(f.clone(), xs.iter().map(|x| unshadow(x, env, ctr)).collect()),
+        Ast::Case(s, arms) => Ast::Case(
+            go(s, env, ctr),
+            arms.iter().map(|(p, e)| (p.clone(), unshadow(e, env, ctr))).collect(),
+        ),
+        Ast::Let(n, v, b) => {
+            let v2 = unshadow(v, env, ctr); // initialiser is in the outer scope
+            let mut env2 = env.clone();
+            let name = if prim_arity(n).is_some() {
+                let f = fresh(n, ctr);
+                env2.insert(n.clone(), f.clone());
+                f
+            } else {
+                env2.remove(n); // a plain binding shadows any active rename
+                n.clone()
+            };
+            Ast::Let(name, Box::new(v2), Box::new(unshadow(b, &env2, ctr)))
         }
-        Ast::Inc(e) | Ast::Head(e) | Ast::Tail(e) | Ast::IsCell(e) | Ast::Fast(_, e) => shadows_prim(e),
-        Ast::Eq(a, b) => shadows_prim(a) || shadows_prim(b),
-        Ast::If(c, a, b) => shadows_prim(c) || shadows_prim(a) || shadows_prim(b),
-        Ast::Case(s, arms) => shadows_prim(s) || arms.iter().any(|(_, e)| shadows_prim(e)),
-        Ast::Tuple(xs) | Ast::Again(xs) => xs.iter().any(shadows_prim),
-        Ast::Call(_, args) => args.iter().any(shadows_prim),
-        Ast::Lit(_) | Ast::Tag(_) | Ast::Text(_) | Ast::Nil | Ast::Var(_) => false,
+        Ast::Gate(params, body) => {
+            let mut env2 = env.clone();
+            let params2 = params
+                .iter()
+                .map(|p| {
+                    if prim_arity(p).is_some() {
+                        let f = fresh(p, ctr);
+                        env2.insert(p.clone(), f.clone());
+                        f
+                    } else {
+                        env2.remove(p);
+                        p.clone()
+                    }
+                })
+                .collect();
+            Ast::Gate(params2, Box::new(unshadow(body, &env2, ctr)))
+        }
+        Ast::Loop(binds, body) => {
+            let mut env2 = env.clone();
+            let binds2 = binds
+                .iter()
+                .map(|(n, v)| {
+                    let v2 = unshadow(v, env, ctr); // initialiser in the outer scope
+                    let name = if prim_arity(n).is_some() {
+                        let f = fresh(n, ctr);
+                        env2.insert(n.clone(), f.clone());
+                        f
+                    } else {
+                        env2.remove(n);
+                        n.clone()
+                    };
+                    (name, v2)
+                })
+                .collect();
+            Ast::Loop(binds2, Box::new(unshadow(body, &env2, ctr)))
+        }
     }
 }
 
@@ -488,13 +549,30 @@ fn vrender(v: &V) -> String {
 /// Compile a Latte expression (with its library closure) to a standalone Rust program.
 pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> {
     let program = latte::gather_program(expr_src, libs)?;
-    // lexical shadowing of a primitive name is interpreter territory: decline
-    // BEFORE const-folding, which would rewrite the shadowed name blindly
-    for (n, _, b) in &program {
-        if shadows_prim(b) {
-            return Err(format!("arm '{}' locally binds a primitive name; running interpreted", n));
-        }
-    }
+    // A local that shadows a primitive name (e.g. `sub` as a substring index) used to
+    // force the whole program onto the interpreter. Instead, alpha-rename such binders
+    // — including arm parameters — to fresh names so native compilation still applies.
+    let program: Vec<(String, Vec<String>, Ast)> = program
+        .into_iter()
+        .map(|(n, params, b)| {
+            let mut ctr = 0usize;
+            let mut env: HashMap<String, String> = HashMap::new();
+            let params2 = params
+                .iter()
+                .map(|p| {
+                    if prim_arity(p).is_some() {
+                        let f = fresh(p, &mut ctr);
+                        env.insert(p.clone(), f.clone());
+                        f
+                    } else {
+                        p.clone()
+                    }
+                })
+                .collect();
+            let b2 = unshadow(&b, &env, &mut ctr);
+            (n, params2, b2)
+        })
+        .collect();
     // fold constants in every arm
     let program: Vec<Arm> = program
         .into_iter()
@@ -766,6 +844,12 @@ mod tests {
             "(let k = 10 in (map (fn [x] -> (add x k)) [1 [2 [3 0]]]))",
             "(len (legal (initial 0)))",
             "(choose (initial 0))",
+            // a local that shadows the `sub` primitive must be alpha-renamed and still
+            // match the interpreter (the value 9, not a primitive subtraction)
+            "(let sub = 9 in (add sub 1))",
+            // shadowing inside a lambda and a loop, with the real primitive used nearby
+            "(let div = 100 in (sub div (mul 2 3)))",
+            "(foldl (fn [sub x] -> (add sub x)) 0 [10 [20 [30 0]]])",
         ];
         for (i, e) in cases.iter().enumerate() {
             assert_eq!(interp(e), native(e, i), "mismatch on {}", e);

@@ -37,6 +37,7 @@ mod gpu;
 mod conlang;
 mod sentiment;
 mod game;
+mod dbservice;
 mod rustgen;
 mod icomb;
 mod repl;
@@ -270,6 +271,22 @@ fn main() {
         "gui" | "start" => cmd_gui(&args[1..]),
         "tensor" => numerics::cmd_tensor(&args[1..]),
         "ddia" => ddia::cmd_ddia(&args[1..]),
+        "algo" => ddia::cmd_algo(&args[1..]),
+        "dsa" => ddia::cmd_dsa(&args[1..]),
+        "wgraph" => ddia::cmd_wgraph(&args[1..]),
+        "numth" => ddia::cmd_numth(&args[1..]),
+        "bits" => ddia::cmd_bits(&args[1..]),
+        "strings" => ddia::cmd_strings(&args[1..]),
+        "grid" => ddia::cmd_grid(&args[1..]),
+        "design" => ddia::cmd_design(&args[1..]),
+        "trees" => ddia::cmd_trees(&args[1..]),
+        "dp" => ddia::cmd_dp(&args[1..]),
+        "intervals" => ddia::cmd_intervals(&args[1..]),
+        "search" => ddia::cmd_search(&args[1..]),
+        "graphs" => ddia::cmd_graphs(&args[1..]),
+        "backtrack" => ddia::cmd_backtrack(&args[1..]),
+        "greedy" => ddia::cmd_greedy(&args[1..]),
+        "db" => dbservice::cli(&args[1..]),
         "ml" => numerics::cmd_ml(&args[1..]),
         "nn" => numerics::cmd_nn(&args[1..]),
         "fin" => numerics::cmd_fin(&args[1..]),

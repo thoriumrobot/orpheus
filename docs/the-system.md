@@ -56,14 +56,16 @@ Documents under `docs/` open as plain editable frames with `System.Edit <name>`
 
 ## Tools are texts
 
-The header links (Trade, Charts, Finance, Plan, Acplan, Db, Sym, Findb, Trace, Derive,
-Debug, Conlang, GPU, Net, News, Forge, Format, Docs) open **tool texts** — editable
+The header links (Trade, Charts, Finance, Plan, Acplan, Db, Algo, Dsa, Wgraph, Numth, Bits, Strings, Grid, Design, Trees, Dp, Intervals, Search, Graphs, Backtrack, Greedy, Sym, Findb, Data, Trace,
+Derive, Debug, Conlang, GPU, Net, News, Forge, Format, Docs) open **tool texts** — editable
 command sheets, exactly Oberon's `Draw.Tool` idea. (Acplan drives the accountable-planning
-tool — quadratic vote → plan → vouchers → audit — Db drives the composed database —
+tool — quadratic vote → plan → vouchers → audit — Db drives the composed database — Algo demonstrates the five algorithm-design paradigms (Skiena), Dsa the interview data structures & coding patterns, Wgraph the weighted-graph algorithms (Dijkstra, MST), Numth the number-theory warm-ups (GCD, sieve, modular exponentiation), Bits the bit-manipulation tricks (on bitwise ops now in std), Strings the string algorithms (reverse, anagrams, Rabin-Karp search), Grid the matrix/grid algorithms (number of islands, grid DP, spiral), Design the data-structure design classics (min-stack, queue from two stacks, LRU cache), Trees the binary-tree techniques (traversals, height, LCA, validate-BST), Dp the dynamic-programming classics (knapsack, LCS, subset-sum, coin-change ways), Intervals the interval techniques (merge, meeting rooms, intersection), Search the binary-search variants (lower/upper bound, rotated arrays, peak finding, search-on-the-answer), Graphs the graph decision problems (topological sort, cycle detection, components, bipartite), Backtrack the combinatorial search problems (generate parentheses, combination sum, palindrome partitioning, word search), Greedy the greedy algorithms (jump game, gas station, partition labels, candy, task scheduler) —
 state, index queries, MVCC history — Sym is a database-backed symbol index over
-the system's own code: which modules define a name, with shadowing flagged — and
+the system's own code: which modules define a name, with shadowing flagged —
 Findb stores a window of market prices in that same database and reads it back for a
-sparkline and a lag-1 model. They embed live HTML returned by pure-Latte arms in
+sparkline and a lag-1 model — and Data is the **persistent** database: named stores
+on an on-disk write-ahead log that survive restarts (`src/dbservice.rs`, also `latte
+db …` and `/api/db`). They embed live HTML returned by pure-Latte arms in
 `lib/acplan.lat`, `lib/db.lat`, `lib/symbols.lat`, and `lib/findb.lat`.)
 
 ## Tools in pure Latte — Rust is not required
