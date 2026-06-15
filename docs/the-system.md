@@ -68,6 +68,12 @@ on an on-disk write-ahead log that survive restarts (`src/dbservice.rs`, also `l
 db …` and `/api/db`). They embed live HTML returned by pure-Latte arms in
 `lib/acplan.lat`, `lib/db.lat`, `lib/symbols.lat`, and `lib/findb.lat`.)
 
+The fifteen links from **Algo** through **Greedy** are the coding-interview *technique
+modules* — heavily-commented Latte libraries, each with an interactive tutorial (opened with
+`System.OpenText <name>-techniques`) and a CLI demo (`latte <module> <topic>`). Their full
+catalog — arms, representation conventions, and the recipe for adding your own — is in
+`docs/interview-techniques.md` (open it here with `System.Edit interview-techniques`).
+
 ## Tools in pure Latte — Rust is not required
 
 New tools are written, formatted, compiled, run, shared, and persisted without

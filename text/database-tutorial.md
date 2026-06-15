@@ -1,5 +1,11 @@
 # The composed database — an interactive tour
 
+**New here?** Two conventions used throughout these tutorials: answers follow the *loobean*
+rule where **`0` means yes/true** (so a `0` answer to “is this sorted?” means *yes*), and a
+list is written `[a b c 0]` with a trailing `0` marking the end. The primer **Start here**
+(`System.OpenText start-here`) teaches how to read the code and run these live examples from
+scratch in about ten minutes — then any tutorial here is approachable.
+
 This is a working tutorial, not a screenshot. Every framed panel below is a **live
 object**: when this text loads, the system runs a real command against the real
 database in `lib/db.lat` and embeds what comes back. The buttons run more commands

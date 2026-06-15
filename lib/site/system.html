@@ -1513,6 +1513,22 @@ function buildContents(){
       d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openDoc(n); } };
       md.appendChild(d);
     });
+    md.appendChild(el('div','hd','TUTORIALS'));
+    [['Start here (beginners)','start-here'],
+     ['All tutorials (organized)','tutorials'],
+     ['Algorithm paradigms','algorithm-techniques'],['Data structures','dsa-techniques'],
+     ['Dynamic programming','dp-techniques'],['Greedy','greedy-techniques'],
+     ['Backtracking','backtrack-techniques'],['Binary search','search-techniques'],
+     ['Weighted graphs','weighted-graphs'],['Graph problems','graph-techniques'],
+     ['String algorithms','string-techniques'],['Intervals','interval-techniques'],
+     ['Grid & matrix','grid-techniques'],['Number theory','number-theory'],
+     ['Bit manipulation','bit-manipulation'],['Binary trees','tree-techniques'],
+     ['Data-structure design','design-techniques'],['The database','database-tutorial']
+    ].forEach(function(t){
+      var d=el('div','m', t[0]);
+      d.onmousedown=function(e){ if(e.button===0||e.button===1){ e.preventDefault(); openText(t[1]); } };
+      md.appendChild(d);
+    });
     md.appendChild(el('div','hd','TOOL TEXTS'));
     Object.keys(TOOLS).forEach(function(n){
       var d=el('div','m', n+'.Tool');
@@ -2282,52 +2298,59 @@ function openDocsTool(){
 /* ---- the default desktop ------------------------------------------------- */
 var SYSTEM_TOOL =
 '# System.Tool\n'+
-'This is a TEXT: characters plus embedded objects and controls. Middle-click any\n'+
-'command line to run it; click a button; object-producing commands embed their\n'+
-'output right here, under the line you ran.\n'+
+'Orpheus is an Oberon-class system: this frame is a TEXT — prose, live objects, and\n'+
+'runnable command lines together. Middle-click any command line (or set the caret and\n'+
+'press Ctrl/Cmd+Enter) to run it. Lines that begin with # or :: are comments.\n'+
 '\n'+
-'[Chart](run: chart market days=120) [Ray-trace](run: trace w=96 h=72) [Trace a call tree](run: debug (fib 6))\n'+
+'## QUICK START\n'+
+'[Market chart](run: chart market days=120) [Ray-trace a scene](run: trace w=96 h=72) [Trace a call tree](run: debug (fib 6))\n'+
+'[▸ Browse all tutorials](run: System.OpenText tutorials)\n'+
+'Object-producing commands — chart, gfx, trace, ta, trade, fin, gpu, derive, plan —\n'+
+'embed their result directly under the line you run.\n'+
 '\n'+
 '## DOCUMENTATION\n'+
 '(the index of docs/ loads here)\n'+
 '\n'+
-'## TOOLS\n'+
-'Every tool text is one click away in the header or the Contents viewer (right):\n'+
-'Trade, Chart, Fin, Plan, Trace, Debug, Derive, Conlang, Gpu, Net, News,\n'+
-'Forge (team coding), Format (the Latte formatter) — plus\n'+
-'the Draw editor, the soundlib/phono conlang pages, the chess and xiangqi\n'+
-'boards, and the Facet page editor as pages (all listed under Contents).\n'+
+'## TUTORIALS\n'+
+'Interactive, runnable tutorials — each opens as a live text whose examples run as it\n'+
+'loads. Browse the organized index, or jump straight in:\n'+
+'[▸ Start here (beginners)](run: System.OpenText start-here) [▸ All tutorials (organized)](run: System.OpenText tutorials)\n'+
+'[Paradigms](run: System.OpenText algorithm-techniques) [Data structures](run: System.OpenText dsa-techniques) [Dynamic programming](run: System.OpenText dp-techniques) [Greedy](run: System.OpenText greedy-techniques) [Backtracking](run: System.OpenText backtrack-techniques)\n'+
+'[Binary search](run: System.OpenText search-techniques) [Graphs](run: System.OpenText graph-techniques) [Weighted graphs](run: System.OpenText weighted-graphs) [Strings](run: System.OpenText string-techniques) [Intervals](run: System.OpenText interval-techniques)\n'+
+'[Grids](run: System.OpenText grid-techniques) [Trees](run: System.OpenText tree-techniques) [Design](run: System.OpenText design-techniques) [Number theory](run: System.OpenText number-theory) [Bits](run: System.OpenText bit-manipulation) [Database](run: System.OpenText database-tutorial)\n'+
 '\n'+
-'## TOOLS IN PURE LATTE — never leave the GUI\n'+
-'New tools need no Rust and no terminal. The whole loop lives here:\n'+
-'1. System.New <name> opens a fresh module frame; write arms in Latte.\n'+
-'2. Latte has STRING LITERALS ("text", with \\" \\n escapes) and std has the\n'+
-'cord toolkit: cat, catall, joincords, numtext, fixtext, bytelen — arithmetic\n'+
-'jets are arbitrary-precision, so cords of any length compute natively.\n'+
-'3. Return [%html <cord>] or [%svg <cord>] from an arm and the result EMBEDS\n'+
-'as a live object where you ran it; plain values print; `ui Tool.arm` makes\n'+
-'panels. Try it (hello.Mod below is compiled at boot):\n'+
+'## TOOLS\n'+
+'Every tool text is one click away — via the header links or the Contents viewer (right):\n'+
+'Trade · Chart · Fin · Plan · Trace · Debug · Derive · Conlang · Gpu · Net · News ·\n'+
+'Forge (team coding) · Format (the Latte formatter). Pages too — the Draw editor, the\n'+
+'conlang builders, the chess and xiangqi boards, and the Facet editor — all under Contents.\n'+
+'\n'+
+'## BUILD YOUR OWN TOOL — no Rust, no terminal\n'+
+'1  System.New <name> opens a fresh module frame; write arms in Latte.\n'+
+'2  Latte has string literals and a cord toolkit (cat, catall, joincords, numtext,\n'+
+'   fixtext, bytelen); arithmetic is arbitrary-precision, so cords of any size compute.\n'+
+'3  Return [%html <cord>] or [%svg <cord>] and the result EMBEDS as a live object;\n'+
+'   plain values print; ui Tool.arm builds a panel. Try it (hello.Mod compiles at boot):\n'+
 'hello.badge 9\n'+
 'hello.spark [3 [9 [5 [12 [7 0]]]]]\n'+
-'4. Format (menu) keeps the source canonical; Compile makes it live;\n'+
-'Store persists it to pkg/ (reloaded every start); Forge.Share sends it to\n'+
-'the team. The system\u2019s command set is just your Latte source.\n'+
+'4  Format keeps the source canonical, Compile makes it live, Store persists it to\n'+
+'   pkg/ (reloaded every start), Forge.Share sends it to the team.\n'+
 '\n'+
-'## VIEWER HANDLING (the Oberon gestures)\n'+
-'Drag a title bar up/down to resize the viewer. Inter-click the MIDDLE button\n'+
-'while dragging (or Alt+drag, or drag sideways) to LIFT the viewer and drop it\n'+
-'anywhere — any position, any column. Columns:\n'+
+'## VIEWERS & TRACKS — the Oberon gestures\n'+
+'Drag a title bar up or down to resize a viewer. Inter-click the MIDDLE button while\n'+
+'dragging (or Alt+drag, or drag sideways) to LIFT a viewer and drop it in any track.\n'+
+'Add a column, remove one, or move the marked viewer:\n'+
 'System.OpenTrack\n'+
 'System.CloseTrack\n'+
 'System.Move *\n'+
 '\n'+
-'## YOURS\n'+
-'Texts: System.NewText notes \u00b7 System.Texts \u00b7 Store is in each text\'s menu, and\n'+
-'stored tool texts override these defaults next run. Packages: edit hello.Mod\n'+
-'below, Compile (menu), then:\n'+
+'## TEXTS & PACKAGES\n'+
+'Open a fresh text (its Store menu writes text/<name>.md), or list the stored ones:\n'+
+'System.NewText notes\n'+
+'System.Texts\n'+
+'Edit hello.Mod (right), Compile from its menu, then run an arm:\n'+
 'hello.fib 20\n'+
-'Quit is in the header (or run System.Quit).\n';
-
+'Quit from the header, or run System.Quit. Stored tool texts override these defaults next run.';
 var HELLO_MOD =
 'import std\n'+
 'core hello\n'+

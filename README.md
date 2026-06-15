@@ -23,7 +23,7 @@ Windows binaries**.
 
 ```sh
 cargo build --release          # ./target/release/latte  (zero dependencies)
-cargo test                     # 183 unit tests across all layers
+cargo test                     # 298 unit tests across all layers
 ./latte eval "(mul 6 7)"     # 42   — standard library is linked automatically
 ./latte evolve serdā nūn     # SCArs: heardō   nū̃
 ./latte serve                # Hymn hosts ./lib/site at 127.0.0.1:8080
@@ -382,6 +382,43 @@ A full walkthrough — signed numbers, tensors, drawing charts, and designing/tr
 own model (including the fixed-point precision floor and the stable learning-rate range) —
 is in [`docs/visualization-and-ml.md`](docs/visualization-and-ml.md).
 
+## Coding-interview technique libraries
+
+Fifteen **technique modules** cover the recurring coding-interview categories (the
+Toptal / LeetCode canon), each a heavily-commented Latte library paired with an interactive
+tutorial that explains *why* each algorithm is correct. They are ordinary builtin libraries —
+in scope everywhere, and each arm also compiles natively through Anvil.
+
+| Module | Prefix | Covers |
+|--------|--------|--------|
+| `algo` | `al_` | Skiena's five paradigms (D&C, DP, greedy, backtracking, graph traversal) |
+| `dsa` | `ds_` | two pointers, sliding window, Floyd cycle, stack, heap, BST, trie, union-find |
+| `wgraph` | `wg_` | Dijkstra, Kruskal & Prim (weighted graphs) |
+| `numth` | `nt_` | GCD/LCM, sieve, modular exponentiation, binomials, Fibonacci |
+| `bits` | `bm_` | XOR tricks, add-without-`+`, bitmask subsets, popcount DP |
+| `strings` | `st_` | palindrome, anagram, Rabin-Karp rolling hash, LCP, RLE |
+| `grid` | `gr_` | islands (flood fill), grid DP, transpose/rotate, spiral |
+| `design` | `dz_` | min-stack, queue from two stacks, LRU cache |
+| `trees` | `tr_` | traversals, height, invert, max path, LCA, validate-BST |
+| `dp` | `dp_` | stairs, robber, subset-sum, knapsack, LCS, coin-change ways |
+| `intervals` | `iv_` | merge, insert, meeting rooms (sweep line), intersection |
+| `search` | `se_` | lower/upper bound, rotated array, peak, search-on-the-answer |
+| `graphs` | `gp_` | Kahn topo sort, cycle detection, components, bipartite |
+| `backtrack` | `bk_` | parentheses, combination sum, palindrome partition, word search |
+| `greedy` | `gd_` | jump game, gas station, partition labels, candy, task scheduler |
+
+```sh
+latte dp optimisation        # a worked table: 0/1 knapsack, LCS
+latte eval "(se_isqrt 17)"   # 4   — call any arm directly, no import
+latte greedy gas             # gas-station circuit demo
+```
+
+Each module is reachable four ways: a CLI demo (`latte <module> <topic>`), the library arms
+themselves, a GUI **tool text** with live buttons (header links Algo … Greedy), and an
+interactive tutorial (`text/*-techniques.md`, opened with `System.OpenText`). The full catalog —
+arms, conventions, and the recipe for adding your own — is in
+[`docs/interview-techniques.md`](docs/interview-techniques.md).
+
 ## The GUI — an Oberon-class system surface
 
 `latte serve`, open `/`. The display is tracks of **viewers** (title bar + menu
@@ -703,6 +740,9 @@ Latte on the Loom.
 | `src/rustgen.rs` | Anvil: the optimizing Latte → Rust compiler (`latte rustc`) |
 | `lib/chessml.lat` | chess evaluator with piece values learned by gradient descent in Latte; human-vs-machine play |
 | `docs/adding-libraries.md` | guide to writing and registering a new Latte library |
+| `lib/{algo,dsa,wgraph,numth,bits,strings,grid,design,trees,dp,intervals,search,graphs,backtrack,greedy}.lat` | the fifteen coding-interview technique libraries (heavily commented) |
+| `text/*-techniques.md` | the interactive technique tutorials (live, run line by line in the GUI) |
+| `docs/interview-techniques.md` | catalog of the technique modules — arms, conventions, recipe |
 | `docs/latte-language.md` | the Latte language reference (values, syntax, modules, semantics) |
 | `docs/facet-language.md` | the Facet markup-language reference (holes, directives, tool calls) |
 | `docs/scars-sound-changes.md` | the SCArs sound-change rule-language reference |
