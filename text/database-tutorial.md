@@ -4,7 +4,10 @@
 rule where **`0` means yes/true** (so a `0` answer to “is this sorted?” means *yes*), and a
 list is written `[a b c 0]` with a trailing `0` marking the end. The primer **Start here**
 (`System.OpenText start-here`) teaches how to read the code and run these live examples from
-scratch in about ten minutes — then any tutorial here is approachable.
+scratch in about ten minutes — then any tutorial here is approachable. This particular tutorial
+builds on data-systems ideas (LSM-trees, write-ahead logs, MVCC); if those words are new, the
+**data-intensive guide** opens with a plain-language on-ramp that explains them
+(`System.Edit data-intensive`).
 
 This is a working tutorial, not a screenshot. Every framed panel below is a **live
 object**: when this text loads, the system runs a real command against the real

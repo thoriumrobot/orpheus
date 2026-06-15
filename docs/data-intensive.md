@@ -10,6 +10,11 @@ It closes with a tour of how **Orpheus itself** is a data-intensive system, so t
 algorithms here are not toys bolted on the side: the host's event log, gossip,
 logical clocks, and convergent state are the same ideas running for real.
 
+**New to data systems?** If terms like *LSM-tree*, *replication*, or *consensus* are
+unfamiliar, read the **beginner's on-ramp** just below ("New to data systems? Start
+here") before Part I — it explains why this whole field exists, what each part answers
+in plain language, and the vocabulary, in about ten minutes.
+
 ## Running the examples
 
 Three ways, same code:
@@ -46,6 +51,120 @@ is `0` when equal and `if (c) then A else B` takes `A` when `c` is `0`. **Lists*
 end in `0`: `[1 2 3 0]`. These libraries follow one convention worth memorizing:
 **a predicate/relation returns `0` for "yes."** So `(bloom_test f k)` is `0` when
 `k` is possibly present, and `(vc_conflict a b)` is `0` when there is a conflict.
+
+---
+
+---
+
+# New to data systems? Start here
+
+This section is the on-ramp. The parts that follow are written for someone preparing for
+interviews, so they move quickly and use the field's vocabulary freely. Read this first and
+that vocabulary will already make sense. No prior database or distributed-systems experience is
+assumed — only patience and a willingness to run the examples.
+
+## Why this whole field exists
+
+Picture one program, on one computer, with one disk. It stores data and hands it back. For a
+long time that is enough. Then one of three pressures arrives, and *every* technique in this
+guide is an answer to one of them:
+
+- **The data outgrows one disk.** You have more data than a single machine can hold, so you must
+  spread it across many machines (*Partitioning*) and store it cleverly on each (*Storage and
+  retrieval*).
+- **The traffic outgrows one machine.** More users are reading and writing than one machine can
+  serve, so you keep copies on several machines to share the load (*Replication*) — and now those
+  copies can disagree.
+- **Machines fail.** Disks die, networks drop, programs crash mid-write. A serious system must
+  keep working and keep its data correct anyway (*Transactions*, *Replication*, *Consensus*).
+
+"Data-intensive" means the hard part is the **data** — its size, its rate of change, the need to
+keep it correct across failures — not raw arithmetic. That is the opposite of "compute-intensive"
+work like rendering or simulation.
+
+## The one mindset: there is no free lunch
+
+The single most useful habit when studying this material is to ask, for every design, *what did
+it give up to get what it gained?* Faster writes usually cost slower reads. Keeping copies in
+sync instantly costs availability when the network breaks. More safety costs more coordination.
+The interviews in this guide are mostly about naming these trade-offs out loud, so train the
+reflex now: every technique buys something and pays for it somewhere.
+
+## A map of the guide, in plain language
+
+Each part answers one plain question. Skim this, then dive in:
+
+- **Part I — Storage and retrieval.** Where do I put a write, and how do I find it again
+  quickly? (B-trees, LSM-trees, Bloom filters.)
+- **Part II — Encoding and evolution.** How do I save data to bytes so that a newer or older
+  version of the program can still read it?
+- **Part III — Replication.** I keep copies on several machines so one death does not lose data —
+  how do I keep the copies in step, and what happens when they disagree?
+- **Part IV — Partitioning.** The data is too big for one machine, so I split it across many —
+  which machine holds which key, and how do I add machines without reshuffling everything?
+- **Part V — Transactions and isolation.** Many people change the data at the same time — how do
+  I stop their changes from corrupting each other?
+- **Part VI — Time, order, and consensus.** Separate machines have no shared clock — how do they
+  agree on what happened first, and how do they agree on a single decision even when some fail?
+- **Parts VII–VIII — Batch and stream processing.** How do I process an enormous pile of data —
+  all at once (batch), or piece by piece as it streams in?
+- **Part IX — Probabilistic structures.** How do I count or measure a gigantic stream
+  *approximately* but in tiny memory (how many unique visitors? which items are hot)?
+- **Part IX½ — A composed database.** All of the above, assembled into one small but real working
+  database you can read end to end.
+
+## Keep this glossary handy
+
+These words recur everywhere below. Plain-language definitions:
+
+- **index** — a side structure that lets you find data fast without scanning everything, like a
+  book's index.
+- **B-tree** — the classic index that updates data *in place*; great for reads. **LSM-tree** —
+  an index that only ever *appends* new data and tidies up later; great for writes.
+- **memtable / SSTable** — in an LSM-tree, the small in-memory buffer of recent writes
+  (memtable) and the sorted on-disk files it is flushed into (SSTables).
+- **tombstone** — a little marker that records "this key was deleted" (you cannot erase from an
+  append-only file, so you append a deletion note).
+- **compaction** — the background tidy-up that merges those files and discards overwritten and
+  deleted entries.
+- **read / write amplification** — doing more work under the hood than the request implies: a
+  read touching many files, or a byte being rewritten many times during compaction.
+- **replica** — one of several copies of the data on different machines. **partition / shard** —
+  one slice of the data when it is split across machines.
+- **consistency** — how up-to-date and in-agreement the copies are. **eventual consistency** —
+  copies may lag briefly but converge if writes stop.
+- **transaction** — a group of changes that must all happen or none happen. **isolation** —
+  keeping concurrent transactions from seeing each other's half-finished work.
+- **MVCC / snapshot** — keeping multiple versions of each value so a reader sees a consistent
+  *snapshot* of the data as of a moment, without blocking writers.
+- **idempotent** — safe to apply more than once with the same effect (important when a message
+  might be delivered twice).
+- **quorum** — requiring a majority of replicas to agree on a read or write, so reads and writes
+  overlap on at least one up-to-date copy.
+- **vector clock** — a per-machine tally that detects whether two updates are ordered or are
+  genuine concurrent conflicts. **CRDT** — a data type designed so concurrent edits *always*
+  merge cleanly, no conflict possible.
+- **consensus** — getting separate machines to agree on a single value or order even when some
+  crash (Raft is the algorithm shown here). **leader** — the one replica others follow.
+- **log / WAL** — an append-only record of every change; a *write-ahead log* is written before
+  the change is applied, so a crash can be recovered by replaying it.
+- **hash function** — a function turning data into a fixed-size number, used to place keys,
+  test membership (Bloom filters), and estimate counts (HyperLogLog).
+
+## How to study this guide
+
+A method that works well here:
+
+1. **Read the one-paragraph idea** at the top of a section first — what problem it solves —
+   before looking at any code.
+2. **Run the sample one-liner** (every example ships a `<name>_sample` fixture) and read what
+   comes back, matching it to the idea.
+3. **Read the "In an interview" notes** — that is where the trade-offs live, and the trade-offs
+   are the real content.
+4. **Return to the glossary** whenever a word feels fuzzy; the words are reused part to part.
+
+Start with Part I; the later parts lean on its vocabulary. Take one section at a time — this is a
+guide to *study*, not to skim.
 
 ---
 

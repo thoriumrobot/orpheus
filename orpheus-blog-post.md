@@ -28,7 +28,10 @@ Orpheus is built in layers, each a small idea that the next one stands on:
 - **The libraries** — written in Latte itself: a standard library (`std`), signed fixed-point and
   vector/tensor math (`num`, `tensor`, `vec`), a linear-regression learner (`ml`), an economic
   planner (`plan`), plotting (`plot`), a full chess engine (`chess`), and a chess evaluator whose
-  piece values are *learned by gradient descent in Latte* (`chessml`).
+  piece values are *learned by gradient descent in Latte* (`chessml`). On top of those sit two
+  large **teaching collections** — fifteen coding-interview technique modules and a
+  data-intensive (DDIA) library set, each written to be read and paired with a live tutorial
+  (described below).
 - **The surfaces** — Facet (a markup language), Hymn (a web server), a browser GUI, SCArs (a
   sound-change engine for constructed languages), Mocha (an app environment), Forge (collaborative
   coding), and a content-addressed distributed runtime.
@@ -146,7 +149,44 @@ Everything is a subcommand of `latte`:
   themselves, served at `/docs`** and now **editable in place** (an Edit/Save toolbar writes the
   Markdown straight back to disk, true to Oberon's every-text-is-a-document spirit); and the
   complete **Ligurian reference grammar hosted at `/grammar`**.
+- `latte <module> [<topic>]` — run a coding-interview **technique demo**: `latte dp
+  optimisation` (0/1 knapsack, LCS), `latte greedy gas`, `latte search answer`, and a dozen
+  more (`algo`, `dsa`, `wgraph`, `numth`, `bits`, `strings`, `grid`, `design`, `trees`,
+  `intervals`, `graphs`, `backtrack`). Each prints a worked table; the same arms are callable
+  directly (`latte eval "(se_isqrt 17)"`).
+- `latte ddia [<topic>]` — run the **data-intensive** demos following Kleppmann's DDIA:
+  `latte ddia bloom`, `lsm`, `mvcc`, `raft`, `crdt`, `hll`, … each a runnable example of the
+  technique, with a composed database (`lib/db.lat`) tying them together.
 - `latte node` — join a content-addressed, event-logged distributed runtime.
+
+## A library you can study from
+
+Beyond the demos, Orpheus carries a teaching collection: a few dozen Latte libraries that work
+through the standard coding-interview and data-systems canon, each written to be *read* — every
+line commented — and each paired with an interactive tutorial.
+
+Fifteen **technique modules** cover the recurring interview categories: algorithm paradigms,
+data-structure patterns, weighted graphs, number theory, bit manipulation, strings, grids,
+data-structure design, binary trees, dynamic programming, intervals, binary search, graph
+decision problems, backtracking, and greedy algorithms. A separate set follows Martin
+Kleppmann's *Designing Data-Intensive Applications* — B-trees and LSM-trees, Bloom filters,
+vector clocks, CRDTs, consistent hashing, MVCC, Raft consensus, HyperLogLog and Count-Min
+sketches — and assembles them into one small but real composed database (`lib/db.lat`: an
+LSM-tree store with a write-ahead log, a Bloom filter, a secondary index, and MVCC snapshot
+isolation). Building these stretched the standard library too, which gained a bitwise toolkit, a
+general merge sort, and cord↔byte conversion along the way.
+
+What makes them more than a code dump is the way you read them. Each technique has a CLI demo
+(`latte dp optimisation`, `latte greedy gas`, `latte ddia bloom`) and, in the GUI, an
+**interactive tutorial**: a live text whose every framed example runs against the real library
+as the page loads, so you read the explanation and watch the actual result appear together. Edit
+a line, middle-click, and it re-runs. The tutorials are written at a semantic level — they
+explain *why* each algorithm is correct (the loop invariant, the exchange argument, the
+recurrence), not just what it does. For newcomers, a **"Start here" primer** front-loads how to
+read the code and the handful of conventions everything uses — including the live-by-hand trace
+of a binary search — and the data-intensive guide opens with a plain-language on-ramp explaining
+the field's vocabulary; every tutorial links back to them. The whole collection is covered by the
+differential test suite, so a regression in any arm fails the build.
 
 ## Some engineering worth calling out
 
