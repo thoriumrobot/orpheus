@@ -17,6 +17,43 @@ Tools run **in parallel**: Hymn serves every request on its own thread, so you
 can middle-click `trace w=160 h=120`, then `trade live=1`, then keep editing a
 document while both fill in.
 
+## Opening documents, modules, and pages
+
+The system holds several *kinds* of thing, and each kind has its own open
+command. The names look alike, so the trick is matching the command to the
+kind. In particular **`System.Open` opens module source, while `System.OpenText`
+opens a saved text** — reaching for `System.OpenText` to open a module is the
+common slip, and it reports `no such text` (it only ever looks in `text/`).
+
+| To open… | Command | Lives in | Opens as |
+|----------|---------|----------|----------|
+| a **module's source** (a library or your package) | `System.Open <name>` (or `Edit.Open <name>`) | `lib/`, `pkg/` | an editable source frame titled `<name>.Mod`, with Compile / Store / Format in its menu |
+| a **new, empty module** | `System.New <name>` | — | a source frame seeded with a `core <name>` skeleton |
+| a **saved text** (one you wrote and Stored) | `System.OpenText <name>` | `text/` | a text frame, embedded objects rehydrated by re-running their commands |
+| a **new, blank text** | `System.NewText [name]` (or the header **✚ Text** link) | — | an empty text frame — blank, named if you pass a name |
+| a **manual / docs page** | `System.Edit <name>` (or the **Docs** link / `System.Docs`) | `docs/` | a rendered, editable document frame (Syntax shows the raw markdown; Save writes back) |
+| a **tool text** (Trade, Plan, Charts, Db, …) | `System.Tool <name>`, or the matching header link | built in, or `text/<name>-tool.md` | a tool text with live buttons and fields |
+| a **hosted page** (Draw, Chess, Phono, Editor, Grammar, …) | `System.Page <path>`, or a Contents / header link | served by Hymn | a page viewer inside the desktop (the menu's **↗ Tab** pops it to a browser tab) |
+
+Two rules of thumb resolve almost every "which command?" question:
+
+- **Type the bare name, never the frame's title.** A module opened with
+  `System.Open btree` is *titled* `btree.Mod`, but you open it with `btree`:
+  `System.Open btree.Mod` fails, because the `.Mod` is display-only and a module
+  name is letters/digits/`_` with no dot. Likewise a text Stored as `notes`
+  reopens with `System.OpenText notes`, not `notes.Text`.
+- **Source vs. document.** `System.Open` / `System.New` are for *code you
+  Compile* (it lives in `lib/` or `pkg/`); `System.OpenText` and `System.Edit`
+  are for *prose you read or run* (texts in `text/`, manuals in `docs/`).
+
+You rarely need to remember a name. **Click to open:** the **Modules** viewer
+(right track) lists every loaded module — click one to open its source; the
+**Contents** viewer above it indexes every manual page, tool text, and hosted
+page — click an entry to open it. **List from a command:** `System.Modules`
+refreshes the module list, `System.Texts` lists the saved texts on disk, and
+`System.Docs` opens the documentation index. However a frame was opened, it then
+moves, resizes, marks, and Stores like any other.
+
 ## Texts with embedded objects
 
 Inside a **text frame** (System.Tool is one; the header's **✚ Text** link or
@@ -319,3 +356,38 @@ values learned by gradient descent in lib/xiangqiml.lat, driving a native
 Latte data: `trace w=96 h=72 scene=[ … ]` renders any sphere list (the format
 is documented in Trace.Tool), or edit the `spheres` arm of lib/trace.lat and
 Compile.
+
+## Command reference
+
+A compact index of the System commands. They are all just text — middle-click a
+line to run it, or click the matching header link or menu button. A trailing
+`*` makes a command act on the **marked** viewer (click a title bar to mark it,
+shown by a ✷ star); a name argument is the bare name, never the `.Mod`/`.Text`
+title.
+
+Open and create:
+
+- `System.Open <module>` / `Edit.Open <module>` — open module source (`lib/`, `pkg/`)
+- `System.New <module>` — new module frame (a `core` skeleton)
+- `System.OpenText <name>` — open a saved text (`text/`); `System.Texts` lists them
+- `System.NewText [name]` — new blank text (also the header **✚ Text** link)
+- `System.Edit <doc>` — open a manual page (`docs/`); **Docs** / `System.Docs` is the index
+- `System.Tool <name>` — open a tool text (or use its header link)
+- `System.Page <path>` — open a hosted page in a viewer; **↗ Tab** sends it to a browser tab
+- `System.Modules` — refresh the Modules list
+
+Edit and persist (act on the marked frame):
+
+- **Compile** (`Compiler.Compile *`) — load the marked module into the running system
+- **Store** — persist: a module to `lib/`/`pkg/`; a text with `Edit.StoreText [name]` to `text/` (prompts for a name if untitled); a doc with `Edit.Save` to `docs/`
+- **Format** (`Edit.Format *`) — run the compile-checked source formatter
+- `System.Def` (**≡ Def**) — look up the definition of a selected function (double-click a name, then run)
+
+Viewers and layout:
+
+- **mark** — click a title bar (the ✷ star); `*` then targets that viewer
+- `System.Grow *` / `System.Copy *` / `System.Close *` — enlarge / clone / close
+- `System.Move *` — send the marked viewer to the next track
+- drag a title bar to resize; middle-inter-click while dragging to relocate it
+- `System.OpenTrack` (⊞) / `System.CloseTrack` (⊟) — add / remove a column
+- `System.Clear` — clear the Log; `System.Quit` — stop Orpheus
