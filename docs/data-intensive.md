@@ -1067,8 +1067,10 @@ where to read more. Everything above the host is written *in Latte*.
 - **The Formatter** — `Edit.Format *` formats the **marked** source frame,
   provably meaning-preserving (the result must re-parse to the same AST). How to
   mark and format is in `the-system.md`.
-- **Definition lookup (`System.Def`)** — highlight a function name anywhere in the
-  GUI and click **≡ Def** (or run `System.Def`); the host runs the `lookup` library
+- **Definition lookup (`System.Def`)** — select a function name anywhere in the
+  GUI (in a code frame, **double-click the name** to select the word, or drag to
+  highlight it) and click **≡ Def** (or run `System.Def`, or `System.Def <name>`);
+  the host runs the `lookup` library
   (`lk_lookup`) over every module's source and shows the function's doc comment and
   body. The lookup itself is a Latte tool: it treats a module as a list of line
   cords and matches on a line's byte prefix, so finding `  name` followed by a space

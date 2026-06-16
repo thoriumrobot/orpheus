@@ -128,7 +128,8 @@
   <span class="links">
     <a href="#" onclick="exec('System.OpenTrack');return false" title="add a column (System.OpenTrack)">⊞ Track</a>
     <a href="#" onclick="exec('System.CloseTrack');return false" title="remove a column (System.CloseTrack)">⊟</a>
-    <a href="#" onclick="exec('System.Def');return false" title="look up the definition of the highlighted function (System.Def)">≡ Def</a>
+    <a href="#" onclick="exec('System.Def');return false" title="look up a function's definition — double-click its name (or drag to select it), then click (System.Def)">≡ Def</a>
+    <a href="#" onclick="newText();return false" title="open a new blank text frame (System.NewText)">✚ Text</a>
     <a href="#" onclick="openPage('Draw','/draw');return false" title="the graphics editor — drawings embed in texts" style="font-weight:700;color:#ffe9a8">✎ Draw</a><a class="pg" href="/draw" target="_blank" title="in a browser tab">↗</a>
     <a href="#" onclick="openTool('Trade');return false" title="trading tool text">Trade</a><a class="pg" href="/trade" target="_blank" title="page in a browser tab">↗</a>
     <a href="#" onclick="openTool('Chart');return false" title="chart tool text">Charts</a><a class="pg" href="/chart" target="_blank">↗</a>
@@ -892,19 +893,35 @@ function saveDoc(v){
 
 /* ---- TEXTS: create, store, load (the documents-with-objects) ---------------- */
 function newText(name){
-  var v = makeViewer({name:(name||'untitled')+'.Text', track:'user', kind:'text',
-    content:'A new text. Type anything; middle-click a command line to run it —\nobject-producing commands embed their result right here in the text.\n\nchart bar 3 1 4 1 5 9 2 6\ngfx Tool.rings 5\n',
+  var nm = name||'untitled';
+  var v = makeViewer({name:nm+'.Text', track:'user', kind:'text',
     menu:textMenu,
-    foot:'a TEXT — characters and embedded objects; Store saves it (with its objects) to text/'+(name||'untitled')+'.md'});
-  v.textname = name||'untitled';
+    foot:'a blank TEXT — type a command line and middle-click it (e.g. chart bar 3 1 4 1 5 9 2 6 · gfx Tool.rings 5). Store saves it to text/'+nm+'.md'+(nm==='untitled'?' — Store will ask for a file name (or name it now with System.NewText <name>)':'')});
+  setTextContent(v, ''); // start with a single empty editable line — a blank canvas
+  v.textname = nm;
   mark(v);
+  return v;
 }
-function storeText(v){
+/* rename a text frame in place: its file name (textname), title bar, and footer */
+function setTextName(v, name){
+  v.textname = name;
+  v.name = name + '.Text';
+  var t = v.box && v.box.querySelector('.menu .name'); if(t) t.textContent = v.name;
+  var f = v.box && v.box.querySelector('.foot'); if(f) f.textContent = 'text/'+name+'.md — Store writes it back (objects serialized as ```tool fences)';
+}
+function storeText(v, explicitName){
   if(!v||v.kind!=='text'){ logOut('Edit.StoreText: mark a text frame first', true); return; }
-  var name = v.textname || v.name.replace(/\.Text$/,'') || 'untitled';
+  // pick a file name: an explicit Save-As name, else the frame's name (if it has
+  // a real one), else ask for one — so a blank "untitled" frame gets named on save.
+  var name = (explicitName||'').trim();
+  if(!name) name = (v.textname && v.textname!=='untitled') ? v.textname : '';
+  if(!name && typeof prompt==='function') name = (prompt('Save this text as  text/NAME.md\nfile name:', '') || '').trim();
+  if(!name){ logOut('Edit.StoreText: give the text a file name — Edit.StoreText <name>, or name it with System.NewText <name>', true); return; }
+  if(!/^[A-Za-z0-9_-]+$/.test(name)){ logOut('Edit.StoreText: a file name may use letters, digits, _ and - only (no spaces or dots) — got "'+name+'"', true); return; }
+  setTextName(v, name); // the frame now owns this name; later Stores go to the same file
   fetch('/api/text?name='+encodeURIComponent(name),{method:'POST',body:textToMarkdown(v)})
     .then(function(r){return r.text();})
-    .then(function(msg){ logOut(msg==='saved' ? 'stored text/'+name+'.md (objects serialized as ```tool fences)' : msg, msg!=='saved'); });
+    .then(function(msg){ logOut(msg==='saved' ? 'stored text/'+name+'.md (reopen with System.OpenText '+name+')' : msg, msg!=='saved'); });
 }
 function openText(name){
   fetch('/api/text?name='+encodeURIComponent(name))
@@ -1113,6 +1130,46 @@ function runObjectCommand(line, done){
 }
 
 /* ---- the command interpreter -------------------------------------------- */
+/* the identifier under a caret position in plain text (letters/digits/_, as the
+   server's is_ident accepts) — used to look up a definition without selecting */
+function wordAt(s, p){
+  if(!s) return '';
+  var L=/[A-Za-z0-9_]/, a=p, b=p;
+  while(a>0 && L.test(s.charAt(a-1))) a--;
+  while(b<s.length && L.test(s.charAt(b))) b++;
+  return s.slice(a,b);
+}
+/* resolve the function name to look up for System.Def. In priority order:
+   an explicit argument, a selection inside any source-frame <textarea>
+   (window.getSelection() can't see those), the document selection (rich-text
+   frames, Log, docs), then the word under the caret in the marked/active frame. */
+function defnTarget(rest, fromViewer){
+  if(rest && rest.trim()) return rest.trim();
+  // prefer a selection in the marked/active source frame (Oberon marking semantics)
+  var fv = marked || fromViewer;
+  if(fv && fv.textarea && fv.textarea.selectionEnd>fv.textarea.selectionStart){
+    var ms=fv.textarea.value.slice(fv.textarea.selectionStart, fv.textarea.selectionEnd).trim();
+    if(ms) return ms;
+  }
+  // a highlighted name inside any source frame (textarea selections are invisible to getSelection)
+  for(var k=0;k<viewers.length;k++){
+    var ta=viewers[k].textarea;
+    if(ta && ta.selectionEnd>ta.selectionStart){
+      var s=ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
+      if(s) return s;
+    }
+  }
+  // a selection in a rich-text frame, the Log, or a doc
+  var sel = window.getSelection && window.getSelection();
+  var str = sel ? String(sel).trim() : '';
+  if(str) return str;
+  // nothing selected: the word under the caret in the marked/active textarea
+  if(fv && fv.textarea) return wordAt(fv.textarea.value, fv.textarea.selectionStart).trim();
+  // or under a collapsed caret in a rich-text frame
+  if(sel && sel.anchorNode && sel.anchorNode.nodeType===3)
+    return wordAt(sel.anchorNode.nodeValue, sel.anchorOffset).trim();
+  return '';
+}
 function resolveArgs(line){
   var sel=(window.getSelection && String(window.getSelection()))||'';
   return line.replace(/\^/g, function(){ return sel.trim(); });
@@ -1133,8 +1190,8 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.OpenTrack'){ logEcho(line); openTrackCol(); return; }
   // ---- System.Def : look up the definition of a highlighted function ----
   if(headTok==='System.Def'){
-    var nm=(rest||(window.getSelection&&String(window.getSelection()))||'').trim();
-    if(!nm){ logOut('System.Def: highlight a function name, or run  System.Def <name>', true); return; }
+    var nm=defnTarget(rest, fromViewer);
+    if(!nm){ logOut('System.Def: highlight a function name (or click in it), or run  System.Def <name>', true); return; }
     logEcho('System.Def '+nm);
     fetch('/api/defn?name='+encodeURIComponent(nm)).then(function(r){return r.text();}).then(function(out){
       logOut(out, /no definition|highlight a function|lookup error/.test(out));
@@ -1190,7 +1247,13 @@ function exec(line, fromViewer, ctx){
   if(headTok==='System.NewText'){ logEcho(line); newText(rest||'untitled'); return; }
   if(headTok==='System.OpenText'){ logEcho(line); if(rest) openText(rest); else listTexts(); return; }
   if(headTok==='System.Texts'){ logEcho(line); listTexts(); return; }
-  if(headTok==='Edit.StoreText'){ logEcho(line); storeText(targetViewer(rest, fromViewer)); return; }
+  if(headTok==='Edit.StoreText'){
+    logEcho(line);
+    var sp=rest.split(/\s+/).filter(Boolean);
+    var saveAs=(sp[0]==='*') ? sp.slice(1).join(' ') : sp.join(' '); // "* name" or "name" → Save As
+    storeText(marked||fromViewer, saveAs);
+    return;
+  }
   if(headTok==='System.Tool'){ logEcho(line); openTool(rest||'Trade'); return; }
   if(headTok==='System.Quit'){
     logEcho(line);

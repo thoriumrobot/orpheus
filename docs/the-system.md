@@ -19,8 +19,9 @@ document while both fill in.
 
 ## Texts with embedded objects
 
-Inside a **text frame** (System.Tool is one; `System.NewText notes` makes a
-fresh one), an object-producing command embeds its output *into the text*,
+Inside a **text frame** (System.Tool is one; the header's **✚ Text** link or
+`System.NewText` opens a fresh blank one, and `System.NewText <name>` names it
+up front), an object-producing command embeds its output *into the text*,
 directly under the line you ran:
 
 ```
@@ -42,14 +43,24 @@ Run the same commands from a non-text frame (the Log, a module) and each tool
 fills its own output viewer instead (`Chart.Out`, `Trade.Out`, …) — several at
 once.
 
-## Saving and loading texts
+## Naming and saving texts
 
-Texts persist **with their objects**. The Store entry in a text's menu (or
-`Edit.StoreText`) serializes the text to `text/<name>.md`: ordinary lines as
-markdown, each embedded object as a ` ```tool <command>` fence recording the
-command that made it. Loading (`System.OpenText <name>`) replays each fence —
-the objects **rehydrate by re-running their commands**, so a stored text with a
-live chart reopens with a live chart. `System.Texts` lists what's on disk.
+A new text starts **blank and untitled** (the header's **✚ Text** link, or
+`System.NewText`). To save it, press **Store** in the text's menu: if the text
+has no name yet, Store **asks for a file name**, then writes it to
+`text/<name>.md` and **renames the frame to match** — so it now has a title and
+the next Store goes to that same file (no more prompts). You can also name it up
+front when you create it (`System.NewText <name>`), or save under a chosen name
+at any time with **`Edit.StoreText <name>`** — a Save-As that both writes
+`text/<name>.md` and renames the frame. File names use letters, digits, `_` and
+`-` (no spaces or dots); an empty or cancelled name saves nothing.
+
+Texts persist **with their objects**: ordinary lines save as markdown, and each
+embedded object as a ` ```tool <command>` fence recording the command that made
+it. Loading (`System.OpenText <name>`) replays each fence — the objects
+**rehydrate by re-running their commands**, so a stored text with a live chart
+reopens with a live chart. `System.Texts` lists what's on disk; texts live in
+the top-level `text/` directory (alongside the technique tutorials).
 
 Documents under `docs/` open as plain editable frames with `System.Edit <name>`
 (Save writes back); open as many as you like, side by side.
@@ -208,14 +219,24 @@ ones and `CloseTrack` restores what was beneath (the hierarchy is
   `Viewers` module likewise "delivers hints as to where it might best be
   placed". Tool outputs, sources, and texts spread across your columns
   instead of piling into one.
-- **`System.Def`** (or the header's ≡ Def) looks up the definition of the
-  **highlighted** function: select a name in any viewer and run it, and its doc
-  comment and body are fetched and printed to the Log. When several libraries define
-  the same name — common in the one flat scope — it reports *all* of them and which
-  one wins by load order, then shows the winner's definition, so a name resolving to
-  an unexpected body is no longer a mystery. The extractor is a Latte program
-  (`lib/lookup.lat`); the **Sym** tool makes the same who-defines-what query
-  interactive, backed by the database (`lib/symbols.lat`); see `data-intensive.md`.
+- **`System.Def`** (or the header's ≡ Def) looks up the definition of a
+  function. **You mark the function by selecting its name, then run Def.** In a
+  **code text frame** — a `.Mod` source, or any module opened with `System.Open`
+  — the quickest gesture is to **double-click the function name** (that selects
+  the whole word), then click **≡ Def** in the header; you can also drag the
+  mouse across the name to highlight it. The same works in a text, in the Log,
+  or in a doc. (As a shortcut in a code frame you may instead just click *inside*
+  the name, leaving the caret in it without selecting, **provided that frame is
+  the marked viewer** — click its title bar to mark it, shown by the ✷ star —
+  and Def takes the word under the caret.) To skip selecting altogether, type
+  `System.Def <name>` on any line and middle-click it. Either way the
+  definition — the function's doc comment and body — is fetched and printed to
+  the Log. When several libraries define the same name (common in the one flat
+  scope) it reports *all* of them and which one wins by load order, then shows
+  the winner's definition, so a name resolving to an unexpected body is no longer
+  a mystery. The extractor is a Latte program (`lib/lookup.lat`); the **Sym**
+  tool makes the same who-defines-what query interactive, backed by the database
+  (`lib/symbols.lat`); see `data-intensive.md`.
 
 ## The desktop
 
