@@ -467,7 +467,11 @@ function makeViewer(opts){
 
 /* plain source frames (modules, raw markdown) */
 function wireFrame(ta, v){
-  ta.addEventListener('mousedown', function(e){ if(e.button===1) e.preventDefault(); }); // focus only — does not move the mark
+  var midTs = 0; // time of the last middle-button press (for paste suppression)
+  ta.addEventListener('mousedown', function(e){ if(e.button===1){ midTs = e.timeStamp; e.preventDefault(); } }); // middle: run a line, never move the mark or paste
+  ta.addEventListener('paste', function(e){ // drop the X11 primary-selection paste a middle-click fires (Firefox); Ctrl/⌘+V is untouched
+    if(midTs && e.timeStamp - midTs < 300){ midTs = 0; e.preventDefault(); e.stopPropagation(); }
+  });
   ta.addEventListener('auxclick', function(e){
     if(e.button===1){ e.preventDefault(); execText(v, lineAtPoint(ta, e.clientY)); }
   });
@@ -503,7 +507,11 @@ function execText(v, lineText){
    active elements". Objects remember their command (data-cmd), so the text
    serializes to markdown (```tool <cmd>``` fences) and rehydrates on load. */
 function wireRichText(rt, v){
-  rt.addEventListener('mousedown', function(e){ if(e.button===1) e.preventDefault(); }); // focus only — does not move the mark
+  var midTs = 0; // time of the last middle-button press (for paste suppression)
+  rt.addEventListener('mousedown', function(e){ if(e.button===1){ midTs = e.timeStamp; e.preventDefault(); } }); // middle: run a line, never move the mark or paste
+  rt.addEventListener('paste', function(e){ // drop the X11 primary-selection paste a middle-click fires (Firefox); Ctrl/⌘+V is untouched
+    if(midTs && e.timeStamp - midTs < 300){ midTs = 0; e.preventDefault(); e.stopPropagation(); }
+  });
   rt.addEventListener('click', function(e){
     var b=e.target.closest ? e.target.closest('button.runbtn') : null;
     if(!b) return;
