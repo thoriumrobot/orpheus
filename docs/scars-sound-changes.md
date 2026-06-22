@@ -148,3 +148,114 @@ latte evolve ligā nīvō mazdā         => liɣō  nīvō→…  (full Heart Sp
   syntax.
 - **Graphemes are whatever you write** (Unicode welcome: `ɣ`, `ā`, `kʷ`); the engine treats
   each whitespace-separated token in a rule as one segment.
+
+---
+
+## 7. Implementation: how much of the SCA runs in Latte
+
+SCArs is being migrated stage by stage out of the Rust host (`src/sca.rs`) and
+into Latte, so the sound-change machinery lives in the same hot-loadable language
+as everything else. The split today:
+
+- **Matching engine — Latte (`lib/sca.lat`).** The scan-and-splice rewriter
+  (`matchseq`/`applyrule`/`applyrules`) that does the actual rule application runs
+  on the Loom; the host loads `lib/sca.lat` to build the engine.
+- **Tokeniser — Latte (`lib/scatok.lat`).** Grapheme **longest-match**
+  tokenisation now runs in Latte too. It works at the byte level but steps by
+  whole UTF-8 codepoints, so multibyte letters (`ā`, `ñ`, combining marks) are
+  never split, and multi-letter graphemes (digraphs like `th`, `kʷ`) win over
+  their prefixes. `(tokenize inventory word)` returns the segment list.
+  This is the migration of `src/sca.rs::tokenize`.
+- **Rewrite core, end to end — Latte (`lib/scarun.lat`).** `scarun` chains the
+  two stages with Latte versions of the host's `word_segments` (a word → its
+  boundary-padded segment list) and `seglist_to_string` (segments → cord, with
+  the `#` padding dropped), so a word can be rewritten with *no* Rust except the
+  rule-string parse: `(run inventory compiled-rules word)`. It is checked
+  end to end on intervocalic voicing (`s>z/a_a`: `kasa → kaza`), deletion
+  (`t>/n_`: `anta → ana`), and a digraph rewrite (`th>s` with inventory `th`:
+  `thath → sas`). The tokeniser is now a **registered builtin** (`import`-free
+  `tokenize`); the older all-in-one driver libraries `sca.lat`/`scarun.lat` —
+  whose arm names `apply`/`run` are deliberately generic and would clash with
+  `chess`/`finbond` in the global set — stay loaded explicitly for development.
+  The user-facing entry points are the `latte sca` / `scar` / `evolve` commands in
+  §4, which now run the Latte pipeline (see the close of this section).
+- **Rule compiler — Latte (`lib/scaparse.lat`).** Parsing a rule *string* into
+  concrete tagged tokens — `class NAME = …` declarations, category
+  **correspondence** (parallel classes mapping member-for-member, `p t k → b d g`),
+  the cartesian expansion of every class choice, wildcard `*`, boundary `#`, and
+  `/ PRE _ POST` contexts — now runs in Latte too. `(compile src)` turns a `.sca`
+  source into `[rules graphemes]`, and `(apply_src src word)` does the whole job —
+  parse, tokenise, apply, stringify — in one call. This required a little new
+  Latte text tooling (`splitb`/`words`/`trim`/`before`, an association-list class
+  table) since the language had no string-splitting before. It is checked against
+  the Rust host for equality on intervocalic voicing (`s>z/a_a`: `kasa → kaza`),
+  deletion (`t>/n_`: `anta → ana`), a digraph rewrite (`th>s`: `thath → sas`), and
+  the full correspondence rule above (`apataka → abadaga`, `kasta → kasta`,
+  `opek → obek` — all identical to `latte sca --file`). To stay loadable beside
+  the built-ins without the generic-name clashes (`apply` collides with chess,
+  `run` with finbond), `scaparse` carries a private copy of the matching engine
+  under `sc_`-prefixed names and imports only `std` and `scatok`; load it with
+  `latte eval --lib scaparse=lib/scaparse.lat --lib scatok=lib/scatok.lat
+  "(apply_src … )"`.
+- **Prosodic passes + full `evolve` — Latte (`lib/scapros.lat`).** The two passes
+  that need syllable/stress structure rather than segmental rewriting — Phase VI
+  stressed-vowel **breaking** (`a→ao`, `e→ea`, `o→uo` in a stressed open syllable,
+  blocked by vowel/`v`/`ɣ` onsets and closed syllables) and Phase VII
+  **nasalisation** (a vowel before `m`/`n` + a non-vowel goes nasal and drops the
+  nasal consonant; long vowels take a combining tilde) — now run in Latte too,
+  over a single-codepoint list obtained with `(tokenize 0 word)`. `(evolve src
+  word)` chains the whole thing: strip acute stress, compile + apply the rules,
+  then break, nasalise, and drop the `#` padding. It is checked for **equality
+  with the host `evolve` on all 28 `ligurian_*` test words** — the 13
+  Solar→Heart cases (`ligā→liɣō`, `sālā→hōlō`, `weidā→veiðō`, …) and the 15
+  breaking/nasalisation cases (`zelā→zealō`, `bendā→mẽdō`, `kamtón→gãtõ`,
+  `ōn→ū̃`, …).
+
+With this the entire SCA — tokenise, parse/compile, apply, break, nasalise,
+stringify, i.e. Phases II–VII of the Ligurian pipeline — runs in Latte; nothing of
+the sound-change *logic* is Rust-only any more, and the migration is now **wired
+into the system rather than loaded for development**:
+
+- `scatok`, `scaparse` and `scapros` are registered **builtin libraries**
+  (alongside `std`, `chess`, `finbond`, …), so their arms — `tokenize`,
+  `compile`, `apply_src`, `evolve`, … — resolve in `eval`, the REPL, the GUI
+  console and the Facet runtime with no `import`. (The one global name clash,
+  `nuclei` in `lexis`, was renamed to `vnuclei`.)
+- The user-facing **`latte evolve` and `latte sca` commands now run the Latte
+  implementation** (`src/sca.rs::evolve_latte` / `run_sca_latte`). Compilation is
+  preferred: they build to native via Anvil and fall back to the adaptive engine
+  (interpret-cold/JIT-hot) only when native compilation declines. Two notes on the
+  native path:
+  - The Latte→Rust emitter was extended to **alpha-rename binders that collide with
+    Rust keywords** (`as`, `type`, `move`, …) — the `scaparse` arm `zip2 = fn [as
+    bs] …` previously emitted `fn arm_zip2(as: V, …)`, which is not valid Rust and
+    forced a fallback. With that fixed, the rule engine (`apply_src` and ad-hoc
+    `latte sca …` with normal-length cords) now **compiles to native and is
+    differential-tested through it**.
+  - The full `evolve` / `--file` runs **now compile to native as well**. Cords in
+    this nock-like system are base-256 atoms, and the native backend originally
+    capped atoms at `u128` (16 bytes), so the ~250-byte Ligurian rule *source*
+    passed to `compile` overflowed and forced a fallback. The backend was extended
+    to carry long cords as byte-vector atoms (`V::Big`) and to jet the cord ops
+    (`bytes`/`frombytes`/`cat`/`catall`/`bytelen`) to byte-vector operations instead
+    of base-256 arithmetic — no general bignum required. And rather than baking each
+    word into the program (a `rustc` build per word), the backend compiles the whole
+    614-rule evolution **once** into a binary that takes the word as a runtime input
+    over stdin (`run_native_with_input`, with the word bound to `__in`). So the first
+    word pays a one-time ~6 s build and every word after it — sharing that one cached
+    binary — runs in ~50 ms, about 5× faster than the adaptive engine (~0.25 s).
+
+The Rust engine and passes (`evolve` / `run_sca` in `src/sca.rs`) are kept as the
+**differential oracle** — the `SCArs.apply` Facet path still calls them, and the
+test suite asserts the Latte path matches them byte-for-byte. Coverage, all inside
+`cargo test` (302 passing): `latte_evolve_matches_host_and_expected` runs all 28
+`ligurian_*` words through `evolve_latte` and checks both the expected Heart-Speech
+form and equality with the Rust `evolve`; `latte_run_sca_matches_host` does the
+same for ad-hoc rules (intervocalic voicing, deletion, digraph longest-match,
+ordered multi-rule, class-conditioned deletion, stressed-open-syllable breaking,
+category correspondence); `latte_known_outputs` pins `apataka→abadaga`,
+`ligā→liɣō`, `zelā→zealō`, `bendā→mẽdō`, `ōn→ū̃`; and
+`sca_latte_libs_are_registered_builtins` guards the registration. Each stage thus
+carries its own checks — longest-match and multibyte codepoints (`scatok`);
+intervocalic voicing, deletion, digraph, correspondence (`scaparse`); breaking and
+nasalisation equality (`scapros`).

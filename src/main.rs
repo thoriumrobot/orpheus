@@ -38,7 +38,11 @@ mod conlang;
 mod sentiment;
 mod game;
 mod dbservice;
+mod httpd;
 mod rustgen;
+mod anvild;
+mod registry;
+mod fuzz;
 mod icomb;
 mod repl;
 
@@ -122,22 +126,171 @@ fn cmd_cache(args: &[String]) {
     let dir = rustgen::cache_dir();
     match args.get(0).map(|s| s.as_str()) {
         Some("clear") | Some("clean") => {
-            match std::fs::remove_dir_all(&dir) {
-                Ok(_) => println!("cleared compiled-program cache at {}", dir.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!("cache already empty ({})", dir.display())
-                }
-                Err(e) => eprintln!("cache: {}", e),
+            let n = rustgen::cache_clear();
+            println!("cleared {} compiled program(s) from {}", n, dir.display());
+        }
+        Some("metrics") | Some("stats-detail") => {
+            let m = rustgen::metrics_snapshot();
+            let saved = m.est_saved_ms();
+            println!("builds:         {} ({} ms total, {} ms avg)", m.builds, m.build_ms_total, m.avg_build_ms());
+            println!("cache hits:     {}", m.hits);
+            println!("remote pulls:   {}", m.pulls);
+            println!("build failures: {} (see `latte cache log`)", m.build_failures);
+            let total = m.builds + m.hits + m.pulls;
+            let rate = if total > 0 { 100 * (m.hits + m.pulls) / total } else { 0 };
+            println!("reuse rate:     {}% of {} native runs avoided a build", rate, total);
+            println!("est. rustc time saved: {:.1} s", saved as f64 / 1000.0);
+        }
+        Some("log") => {
+            let tail = rustgen::build_log_tail(16 * 1024);
+            if tail.trim().is_empty() {
+                println!("no native build failures logged");
+            } else {
+                print!("{}", tail);
             }
         }
-        Some("path") | None => {
-            let n = std::fs::read_dir(&dir).map(|d| d.filter(|e| {
-                e.as_ref().ok().map(|e| e.file_name().to_string_lossy().starts_with('e')).unwrap_or(false)
-            }).count()).unwrap_or(0);
-            println!("{}", dir.display());
-            println!("{} cached program(s); set ORPHEUS_CACHE to relocate, `latte cache clear` to empty", n);
+        Some("verify") => {
+            let repair = args.iter().any(|a| a == "--repair" || a == "--fix");
+            let (ok, corrupt, no_sc) = rustgen::cache_verify(repair);
+            println!(
+                "verified {} ok, {} corrupt{}, {} without sidecar",
+                ok,
+                corrupt,
+                if repair && corrupt > 0 { " (purged)" } else if corrupt > 0 { " (run with --repair to purge)" } else { "" },
+                no_sc
+            );
         }
-        Some(other) => eprintln!("cache: unknown subcommand '{}' (try: path | clear)", other),
+        Some("warm") => {
+            let expr = args[1..].join(" ");
+            if expr.is_empty() {
+                eprintln!("usage: latte cache warm \"<expr>\"   (precompile so a later run is instant)");
+                return;
+            }
+            let libs_owned = latte::all_libs();
+            let libs: Vec<&str> = libs_owned.iter().map(|s| s.as_str()).collect();
+            let t0 = std::time::Instant::now();
+            match rustgen::warm_native(&expr, &libs) {
+                Ok(true) => println!("warmed in {:.1}s; subsequent runs use the cached native binary", t0.elapsed().as_secs_f64()),
+                Ok(false) => println!("already warm"),
+                Err(e) => eprintln!("warm: {}", e),
+            }
+        }
+        Some("path") | Some("status") | None => {
+            let (n, bytes) = rustgen::cache_stats();
+            let (val, unit) = if bytes >= 1 << 20 {
+                (bytes as f64 / (1u64 << 20) as f64, "MiB")
+            } else {
+                (bytes as f64 / 1024.0, "KiB")
+            };
+            println!("{}", dir.display());
+            let cap = rustgen::cache_cap_bytes();
+            let cap_str = if cap == 0 {
+                "unbounded".to_string()
+            } else {
+                format!("{} MiB cap, LRU eviction", cap >> 20)
+            };
+            println!(
+                "{} cached program(s), {:.1} {} on disk (opt-level {}, {}); `latte cache warm \"<expr>\"` to prebuild, `latte cache clear` to empty",
+                n, val, unit, std::env::var("ORPHEUS_OPT").unwrap_or_else(|_| "0".to_string()), cap_str
+            );
+            match rustgen::shared_store_dir() {
+                Some(d) => println!("shared store: {} (toolchain {})", d.display(), rustgen::toolchain_id()),
+                None => println!("shared store: off (set ORPHEUS_CACHE_SHARED to a dir to share builds across hosts)"),
+            }
+            let m = rustgen::metrics_snapshot();
+            println!(
+                "metrics: {} builds, {} hits, {} pulls, ~{:.1}s rustc saved (`latte cache metrics` for detail)",
+                m.builds, m.hits, m.pulls, m.est_saved_ms() as f64 / 1000.0
+            );
+        }
+        Some(other) => eprintln!("cache: unknown subcommand '{}' (try: status | metrics | verify [--repair] | log | warm \"<expr>\" | clear)", other),
+    }
+}
+
+fn cmd_anvil(args: &[String]) {
+    match args.get(0).map(|s| s.as_str()) {
+        Some("serve") | Some("start") => {
+            // Foreground here; callers daemonize via `setsid … &`. Reuses the same Anvil cache as
+            // the CLI, so anything the daemon builds is immediately runnable by other processes.
+            if anvild::ping() {
+                eprintln!("anvild already running");
+                return;
+            }
+            eprintln!("anvild serving on the Anvil cache socket (Ctrl-C or `latte anvil stop` to quit)");
+            if let Err(e) = anvild::serve() {
+                eprintln!("anvild: {}", e);
+            }
+        }
+        Some("registry") => {
+            match args.get(1).map(|s| s.as_str()) {
+                Some("serve") => {
+                    let addr = args.get(2).map(|s| s.as_str()).unwrap_or("127.0.0.1:8099");
+                    let root = args.get(3).map(|s| s.as_str()).unwrap_or("/tmp/anvil-registry");
+                    if registry::registry_key().is_none() {
+                        eprintln!("warning: ORPHEUS_REGISTRY_KEY not set — uploads will be rejected (reads only)");
+                    }
+                    if let Err(e) = registry::serve(addr, root) {
+                        eprintln!("registry: {}", e);
+                    }
+                }
+                _ => eprintln!("usage: latte anvil registry serve [addr] [root]   (set ORPHEUS_REGISTRY_KEY to sign)"),
+            }
+        }
+        Some("shrink") => {
+            let expr = args[1..].join(" ");
+            if expr.is_empty() {
+                eprintln!("usage: latte anvil shrink \"<expr>\"   (minimize to the smallest non-native subterm)");
+                return;
+            }
+            if !fuzz::not_fully_native(&expr) {
+                println!("nothing to shrink: this program is fully native (matches the interpreter)");
+                return;
+            }
+            let mut pred = |c: &str| fuzz::not_fully_native(c);
+            let min = fuzz::shrink_with(&expr, &mut pred, 200);
+            println!("minimized to {} chars (from {}):\n  {}", min.len(), expr.len(), min);
+        }
+        Some("fuzz") => {
+            let iters: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
+            let seed: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
+            });
+            println!("differential fuzz: {} iterations, seed {} (native vs interpreter)", iters, seed);
+            match fuzz::run(iters, seed) {
+                Ok(st) => println!(
+                    "ok — no divergence: {} agreed, {} native-declined, {} skipped",
+                    st.agreed, st.declined, st.skipped
+                ),
+                Err(e) => {
+                    eprintln!("DIVERGENCE FOUND (reproduce with the seed above):\n{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("ping") => println!("{}", if anvild::ping() { "up" } else { "down" }),
+        Some("stop") => println!("{}", if anvild::stop() { "stopped" } else { "no daemon" }),
+        Some("stats") => match anvild::stats() {
+            Some((n, b)) => println!("daemon cache: {} program(s), {:.1} MiB", n, b as f64 / (1u64 << 20) as f64),
+            None => println!("no daemon"),
+        },
+        Some("warm") => {
+            let expr = args[1..].join(" ");
+            if expr.is_empty() {
+                eprintln!("usage: latte anvil warm \"<expr>\"");
+                return;
+            }
+            if !anvild::ping() {
+                eprintln!("no daemon (start one with `latte anvil serve`)");
+                return;
+            }
+            let libs = latte::all_libs();
+            let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+            println!("{}", if anvild::warm(&expr, &refs) { "warmed" } else { "warm failed" });
+        }
+        _ => eprintln!("usage: latte anvil <serve|ping|stop|stats|warm \"<expr>\"|fuzz [iters] [seed]|shrink \"<expr>\"|registry serve [addr] [root]>"),
     }
 }
 
@@ -247,6 +400,7 @@ fn main() {
     match cmd {
         "cli" | "console" | "--cli" => cmd_cli(),
         "cache" => cmd_cache(&args[1..]),
+        "anvil" => cmd_anvil(&args[1..]),
         "net" => cmd_net(&args[1..]),
         "node" => cmd_node(&args[1..]),
         "eval" => cmd_eval(&args[1..]),
@@ -256,7 +410,7 @@ fn main() {
         "sca" => cmd_sca(&args[1..]),
         "evolve" => {
             for w in &args[1..] {
-                match sca::evolve(w) {
+                match sca::evolve_latte(w) {
                     Ok(h) => println!("{}  ->  {}", w, h),
                     Err(e) => eprintln!("evolve error: {}", e),
                 }
@@ -291,6 +445,16 @@ fn main() {
         "nn" => numerics::cmd_nn(&args[1..]),
         "fin" => numerics::cmd_fin(&args[1..]),
         "trade" | "advisor" => numerics::cmd_trade(&args[1..]),
+        "money" | "bonds" | "lab" => {
+            // `latte bonds` / `latte lab` are shorthand for `latte money bonds` / `latte money lab`
+            if args[0] == "bonds" || args[0] == "lab" {
+                let mut a = vec![args[0].clone()];
+                a.extend_from_slice(&args[1..]);
+                numerics::cmd_money(&a[..]);
+            } else {
+                numerics::cmd_money(&args[1..]);
+            }
+        }
         "fetch" => numerics::cmd_fetch(&args[1..]),
         "ta" | "indicators" => numerics::cmd_ta(&args[1..]),
         "debug" => {
@@ -595,7 +759,7 @@ fn cmd_sca(args: &[String]) {
             Err(e) => { eprintln!("sca: cannot read {}: {}", path, e); return; }
         };
         for word in &args[2..] {
-            match sca::run_sca(word, &[src.clone()]) {
+            match sca::run_sca_latte(word, &[src.clone()]) {
                 Ok(out) => println!("{}  -->  {}", word, out),
                 Err(e) => eprintln!("{} ! {}", word, e),
             }
@@ -614,7 +778,7 @@ fn cmd_sca(args: &[String]) {
     }
     let word = &args[0];
     let rules: Vec<String> = args[1..].to_vec();
-    match sca::run_sca(word, &rules) {
+    match sca::run_sca_latte(word, &rules) {
         Ok(out) => {
             let rulestr = if rules.is_empty() { "(no rules)".to_string() } else { rules.join("  ") };
             println!("{}  --[ {} ]-->  {}", word, rulestr, out);
@@ -673,6 +837,7 @@ fn cmd_eval(args: &[String]) {
     let mut force_interp = false;
     let mut force_net = false;
     let mut force_rebuild = false;
+    let mut explain = false;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--lib" {
@@ -700,6 +865,8 @@ fn cmd_eval(args: &[String]) {
             force_net = true;
         } else if args[i] == "--rebuild" {
             force_rebuild = true;
+        } else if args[i] == "--explain" || args[i] == "--why" {
+            explain = true;
         } else {
             rest.push(args[i].clone());
         }
@@ -707,6 +874,14 @@ fn cmd_eval(args: &[String]) {
     }
     let src = rest.join(" ");
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    if explain {
+        match rustgen::native_check(&src, &refs) {
+            Ok(()) => println!(
+                "native: yes — compiles to native code (if a run still falls back, see `latte cache log`)"
+            ),
+            Err(reason) => println!("native: no — {} → runs on the interpreter", reason),
+        }
+    }
     // `--net`: evaluate on the interaction-net engine (the numeric fragment), audited.
     if force_net {
         match icomb::run_str(&src) {
@@ -715,12 +890,25 @@ fn cmd_eval(args: &[String]) {
         }
         return;
     }
-    // The optimizing compiler (Anvil) is the default engine: compile to native Rust, build (with a
-    // per-expression binary cache so repeats are instant), and run. Fall back to the interpreter
-    // when compilation isn't possible (rustc unavailable, an unsupported construct, or a runtime
-    // domain error) — never silently wrong, since on success the two agree exactly.
+    // The optimizing compiler (Anvil) is the default engine. Policy, in order:
+    //   1. binary already cached  → run it in-process (fast, no rustc);
+    //   2. cold + daemon running  → ask the resident compiler to build in the background and answer
+    //                               this call on the interpreter (so we never stall on a cold build);
+    //   3. cold + no daemon       → build in-process now (cached for next time);
+    //   4. anything declines      → interpreter.
+    // On success the compiled and interpreted engines agree exactly, so a fallback is never wrong.
     if !force_interp {
-        if let Some(out) = eval_native(&src, &refs, force_rebuild) {
+        if force_rebuild {
+            if let Some(out) = eval_native(&src, &refs, true) {
+                println!("{}", out);
+                return;
+            }
+        } else if let Some(n) = rustgen::run_native_cached(&src, &refs) {
+            println!("{}", net::show_state(&n));
+            return;
+        } else if anvild::warm_bg(&src, &refs) {
+            // resident compiler is building in the background; fall through to the interpreter
+        } else if let Some(out) = eval_native(&src, &refs, false) {
             println!("{}", out);
             return;
         }

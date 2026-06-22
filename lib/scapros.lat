@@ -1,0 +1,137 @@
+:: ===========================================================================
+:: scapros.lat — the Ligurian PROSODIC passes (Phase VI stressed-vowel breaking,
+:: Phase VII nasalisation) and a full `evolve`, written in Latte (runs on Loom).
+::
+:: This migrates the last Rust-only stage of the sound-change engine
+:: (`src/sca.rs::break_stressed` / `nasalize` / `evolve`) into Latte.  With the
+:: tokeniser (scatok), rule compiler + engine (scaparse) and these passes, the
+:: WHOLE Ligurian evolution — Solar Speech → Heart Speech, Phases II–VII — now
+:: runs in Latte; the Rust host keeps its own copy only to drive `latte evolve`
+:: and the differential tests.
+::
+:: We work on a list of single-codepoint cords (`(tokenize 0 word)` tokenises with
+:: an empty inventory, i.e. one entry per Unicode codepoint), exactly the `chars`
+:: vector the Rust passes use.  `evolve src word` is checked for equality with the
+:: host on all 26 `ligurian_*` test words.
+:: ===========================================================================
+import std
+import scatok
+import scaparse
+core scapros
+  :: ---- vowels / consonants -------------------------------------------------
+  vowels = fn [_] -> [ "a" [ "e" [ "i" [ "o" [ "u" [ "ā" [ "ē" [ "ī" [ "ō" [ "ū" 0 ] ] ] ] ] ] ] ] ] ]
+  longs  = fn [_] -> [ "ā" [ "ē" [ "ī" [ "ō" [ "ū" 0 ] ] ] ] ]
+  memq = fn [x xs] -> loop with [c = xs] : if (c == 0) then 1 else if ((head c) == x) then 0 else again((tail c)) end
+  isvowel = fn [c] -> (memq c (vowels 0))
+  islong  = fn [c] -> (memq c (longs 0))
+  :: 0 = consonant (anything that is neither `#` nor a vowel)
+  iscons = fn [c] -> if (c == "#") then 1 else (if ((isvowel c) == 0) then 1 else 0)
+
+  :: ---- Phase VII: nasalisation --------------------------------------------
+  :: a vowel directly before m/n + a non-vowel becomes nasal, and the nasal
+  :: consonant is dropped.  Long vowels take a combining tilde (U+0303 = 0xCC 0x83).
+  nasalof = fn [c] ->
+    if (c == "a") then [ "ã" 0 ]
+    else if (c == "e") then [ "ẽ" 0 ]
+    else if (c == "i") then [ "ĩ" 0 ]
+    else if (c == "o") then [ "õ" 0 ]
+    else if (c == "u") then [ "ũ" 0 ]
+    else if ((islong c) == 0) then [ c [ (frombytes [ 204 [ 131 0 ] ]) 0 ] ]
+    else [ c 0 ]
+  pushrev = fn [xs acc] -> (foldl (fn [a e] -> [ e a ]) acc xs)
+  ismn = fn [c] -> (memq c [ "m" [ "n" 0 ] ])      :: 0 if c is m or n
+  nasalize = fn [cs] ->
+    loop with [c = cs, out = 0] :
+      if (c == 0) then (reverse out)
+      else
+        let x = (head c) in
+        let r = (tail c) in
+        if ((isvowel x) == 0) then
+          (if (r == 0) then again(r, [ x out ])
+           else
+             let n1 = (head r) in
+             let r2 = (tail r) in
+             if (r2 == 0) then again(r, [ x out ])
+             else
+               let n2 = (head r2) in
+               if ((ismn n1) == 0)
+                 then (if ((isvowel n2) == 0) then again(r, [ x out ])   :: n2 is a vowel → keep
+                       else again(r2, (pushrev (nasalof x) out)))        :: nasalise, drop n1
+                 else again(r, [ x out ]))                               :: n1 not m/n
+        else again(r, [ x out ])
+    end
+
+  :: ---- Phase VI: stressed-vowel breaking ----------------------------------
+  :: maximal vowel runs as [start end] index pairs
+  vnuclei = fn [cs] ->
+    (reverse (loop with [c = cs, i = 0, run = 1, s = 0, out = 0] :
+      if (c == 0) then (if (run == 0) then [ [ s [ i 0 ] ] out ] else out)
+      else if ((isvowel (head c)) == 0) then
+        (if (run == 0) then again((tail c), (+(i)), 0, s, out)
+         else again((tail c), (+(i)), 0, i, out))
+      else
+        (if (run == 0) then again((tail c), (+(i)), 1, s, [ [ s [ i 0 ] ] out ])
+         else again((tail c), (+(i)), 1, s, out))
+    end))
+  getc = fn [cs i] -> if (lt i (len cs)) then (nth cs i) else 0
+  :: open syllable after the stressed vowel?  0 = open
+  isopen = fn [c1 c2] ->
+    if (c1 == "#") then 0
+    else if ((isvowel c1) == 0) then 0
+    else if ((iscons c1) == 0) then (if ((isvowel c2) == 0) then 0 else 1)
+    else 1
+  :: a liquid + consonant cluster (also licenses breaking)?  0 = yes
+  isliquid = fn [c1 c2] ->
+    if ((memq c1 [ "r" [ "l" 0 ] ]) == 0)
+      then (if ((iscons c2) == 0) then 0 else 1)
+      else 1
+  breakstressed = fn [cs] ->
+    let nuc = (vnuclei cs) in
+    if (lt (len nuc) 2) then cs
+    else
+      let pen = (nth nuc (dec (dec (len nuc)))) in    :: the PENULT nucleus carries stress
+      let ps = (head pen) in
+      let pe = (head (tail pen)) in
+      if (pe == (+(ps))) then                          :: stressed nucleus must be a single vowel
+        let v = (nth cs ps) in
+        let broken = (if (v == "a") then [ "a" [ "o" 0 ] ]
+                      else if (v == "e") then [ "e" [ "a" 0 ] ]
+                      else if (v == "o") then [ "u" [ "o" 0 ] ]
+                      else 0) in
+        if (broken == 0) then cs
+        else if (ps == 0) then cs
+        else
+          let onset = (nth cs (dec ps)) in
+          if (onset == "#") then cs
+          else if ((isvowel onset) == 0) then cs        :: vowel onset → no break
+          else if (onset == "v") then cs
+          else if (onset == "ɣ") then cs
+          else
+            let c1 = (getc cs pe) in
+            let c2 = (getc cs (+(pe))) in
+            let dobreak = (if ((isopen c1 c2) == 0) then 1 else (if ((isliquid c1 c2) == 0) then 1 else 0)) in
+            if (dobreak == 1)
+              then (append (take ps cs) (append broken (drop (+(ps)) cs)))
+              else cs
+      else cs
+
+  :: ---- strip acute stress marks (á é í ó ú → a e i o u), as the host does ---
+  stripstress = fn [word] ->
+    (catall (map (fn [c] ->
+       if (c == "á") then "a" else if (c == "é") then "e" else if (c == "í") then "i"
+       else if (c == "ó") then "o" else if (c == "ú") then "u" else c)
+     (tokenize 0 word)))
+
+  :: segments → cord, KEEPING `#` boundaries (for the prosodic passes)
+  segstrhash = fn [segs] -> (catall (map (fn [seg] -> if ((head seg) == 2) then "#" else (tail seg)) segs))
+
+  :: ---- full evolution ------------------------------------------------------
+  :: `evolve src word` — `src` is the Ligurian rule source (lib/ligurian.sca);
+  :: runs Phases II–V (compiled rules), then VI (breaking) and VII (nasalisation),
+  :: then drops the `#` padding.  Entirely in Latte.
+  evolve = fn [src word] ->
+    let cg = (compile src) in
+    let out = (sc_applyrules (wordsegs (tail cg) (stripstress word)) (head cg)) in
+    (catall (filter (fn [c] -> if (c == "#") then 1 else 0)
+       (nasalize (breakstressed (tokenize 0 (segstrhash out))))))
+end

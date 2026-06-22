@@ -1,0 +1,127 @@
+:: ===========================================================================
+:: finmoney.lat — GLOBAL MONEY SUPPLY (M2) across the major central banks, stored
+:: in and queried THROUGH lib/db.lat.  Each central bank is ONE record in the
+:: database; the DATABASE does the work — ranking the banks by how fast they are
+:: expanding the money supply, averaging the global stance, finding the fastest /
+:: slowest, and filtering the banks in an easing (expansionary) regime — and a
+:: text-frame [%html] dashboard renders the result.  Companion to lib/finbond.lat,
+:: whose bond model feeds on the same money-supply signal.
+::
+:: ---------------------------------------------------------------------------
+:: THE DATA — M2 / broad-money YEAR-OVER-YEAR growth, in percent x100
+:: ---------------------------------------------------------------------------
+:: Curated reference anchors, the latest value published by each authority (the
+:: reference month is stored in every record as a YYYYMM number).  Source: the
+:: TheGlobalEconomy.com aggregation of national central-bank / statistics-office
+:: releases — Fed H.6 (US), ECB (euro area), PBoC (China), BoJ (Japan), BoE (UK),
+:: RBI (India), BoC (Canada), BCB (Brazil), SNB (Switzerland), RBA (Australia),
+:: BoK (Korea), CBR (Russia), Banxico (Mexico), CBRT (Turkey), SAMA (Saudi),
+:: SARB (South Africa), Riksbank (Sweden), NBP (Poland), BI (Indonesia), MAS
+:: (Singapore), HKMA (Hong Kong), CBC (Taiwan), Norges Bank (Norway) — snapshot
+:: June 2026.  A teaching/demo snapshot: a live feed would refresh these from FRED
+:: (M2SL), the ECB Data Portal and each authority's release.  Rising M2 growth =
+:: monetary EASING, historically bullish for bonds (see lib/finbond.lat).
+:: ===========================================================================
+import std
+import num
+import db
+core finmoney
+  :: ---- the record + store -------------------------------------------------
+  :: a money-supply record: [ 1:name  2:M2-YoY-growth(%x100)  3:asof(YYYYMM) ]
+  fm_rec  = fn [name g ym] -> [ [1 name] [ [2 g] [ [3 ym] 0 ] ] ]
+  :: open the store with a secondary index on the growth field (2) so the planner
+  :: can probe banks by growth; threshold 64 keeps it all in one live segment.
+  fm_open = fn [_] -> (db_open 2 0 64)
+  fm_put  = fn [fd code name g ym] -> (db_put fd code (fm_rec name g ym))
+
+  :: ---- the embedded anchors: [ code name growth(%x100) asof ] -------------
+  fm_data = fn [_] -> [
+    [ %us %unitedstates  426 202511 0 ]
+    [ %ea %euroarea      262 202512 0 ]
+    [ %cn %china         854 202512 0 ]
+    [ %jp %japan         177 202511 0 ]
+    [ %gb %unitedkingdom 334 202512 0 ]
+    [ %in %india         963 202506 0 ]
+    [ %ca %canada        471 202512 0 ]
+    [ %br %brazil        967 202602 0 ]
+    [ %ch %switzerland   506 202601 0 ]
+    [ %au %australia     718 202512 0 ]
+    [ %kr %southkorea    886 202509 0 ]
+    [ %ru %russia       1500 202506 0 ]
+    [ %mx %mexico        693 202601 0 ]
+    [ %tr %turkey       3901 202511 0 ]
+    [ %sa %saudiarabia   873 202512 0 ]
+    [ %za %southafrica   810 202512 0 ]
+    [ %se %sweden        287 202512 0 ]
+    [ %pl %poland       1040 202512 0 ]
+    [ %id %indonesia     959 202512 0 ]
+    [ %sg %singapore     621 202512 0 ]
+    [ %hk %hongkong     1161 202512 0 ]
+    [ %tw %taiwan        518 202511 0 ]
+    [ %no %norway        722 202512 0 ]
+    0 ]
+
+  :: build the database from the anchors (one db_put per bank).  The result is a
+  :: live db value; everything below queries it through lib/db.lat.
+  fm_load = fn [_] ->
+    (foldl (fn [fd r] -> (fm_put fd (nth r 0) (nth r 1) (nth r 2) (nth r 3)))
+           (fm_open 0) (fm_data 0))
+
+  :: every bank record (the two-letter codes all fall in this cord range)
+  fm_all = fn [fd] -> (db_scan fd %a %zzz)
+
+  :: ---- the DATABASE does the analysis ------------------------------------
+  :: ranking, aggregation and filtering are db.lat operations, not ad-hoc folds.
+  fm_ranked  = fn [fd] -> (db_orderd 2 (fm_all fd))   :: banks by M2 growth, fastest first
+  fm_top     = fn [fd n] -> (db_topn n 2 (fm_all fd)) :: the n fastest expanders
+  fm_avg     = fn [fd] -> (db_avg 2 (fm_all fd))      :: cross-bank average M2 growth
+  fm_fastest = fn [fd] -> (db_max 2 (fm_all fd))      :: the loosest policy
+  fm_slowest = fn [fd] -> (db_min 2 (fm_all fd))      :: the tightest policy
+  fm_count   = fn [fd] -> (db_count (fm_all fd))
+  :: the banks easing at least `thresh` (growth >= thresh): the DB filters them
+  fm_easing  = fn [fd thresh] ->
+    (db_where (fn [e] -> if (lt (db_fieldof e 2) thresh) then 1 else 0) (fm_all fd))
+  :: a single bank by its code
+  fm_bank    = fn [fd code] -> (db_get fd code)
+
+  :: ---- percent formatting (hundredths -> "x.yy%") ------------------------
+  fm_pad2 = fn [r] -> if (lt r 10) then (catall [ "0" (numtext r) 0 ]) else (numtext r)
+  fm_pct  = fn [g] -> (catall [ (numtext (div g 100)) "." (fm_pad2 (mod g 100)) "%" 0 ])
+
+  :: ---- TEXT-FRAME FRONT END — [%html cord] dashboard ----------------------
+  :: a proportional expansion bar (the 39% Turkey anchor maps to ~98px)
+  fm_bar = fn [g] ->
+    let w = (div (mul g 100) 4000) in
+    (catall [ "<span style=\"display:inline-block;height:9px;border-radius:2px;background:#5059c8;width:"
+              (numtext w) "px\"></span>" 0 ])
+  fm_trow = fn [e] ->
+    let f = (db_rec e) in
+    (catall [ "<tr><td>" (db_field f 1) "</td><td align=right>" (fm_pct (db_field f 2))
+              "</td><td>" (fm_bar (db_field f 2)) "</td><td align=right>" (numtext (db_field f 3))
+              "</td></tr>" 0 ])
+  fm_rows = fn [fd] -> (catall (map (fn [e] -> (fm_trow e)) (fm_ranked fd)))
+  fm_dash = fn [fd] ->
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Global money supply &middot; M2 year-over-year growth</h3>"
+        "<p style=\"color:#8a8676;margin:.2em 0\">"
+          (numtext (fm_count fd)) " central banks &middot; ranked by the database &middot; cross-bank average "
+          (fm_pct (fm_avg fd)) " &middot; fastest " (fm_pct (fm_fastest fd))
+          " &middot; tightest " (fm_pct (fm_slowest fd)) "</p>"
+        "<table class=\"m\"><tr><th align=left>economy</th><th>M2 YoY</th><th align=left>expansion</th><th>as of</th></tr>"
+        (fm_rows fd)
+        "</table><p style=\"color:#8a8676\">rising M2 growth = monetary easing (historically bullish for bonds &mdash; see finbond)</p></div>" 0 ]) ]
+  fm_dash0 = fn [_] -> (fm_dash (fm_load 0))
+
+  :: ---- feed the money supply THROUGH the db<->tensor bridge ------------------
+  :: The cross-bank growth column projected to a tensor (lib/tensor.lat operates on it)
+  :: and standardized by the database's own column statistics — a z-score per bank says
+  :: how many standard deviations its easing sits from the global mean, the kind of
+  :: normalized feature an ML model consumes.  All of it computed inside the database.
+  fm_stats  = fn [fd] -> (db_colstats [2 0] (fm_all fd))
+  fm_tensor = fn [fd] -> (db_tensor [2 0] (fm_all fd))
+  fm_zmat   = fn [fd] -> (db_zmatrix [2 0] (fm_all fd) (fm_stats fd))
+  :: the standardized growth (z-score) of one bank, straight from the database
+  fm_z      = fn [fd code] ->
+    let st = (fm_stats fd), g = (db_field (tail (fm_bank fd code)) 2) in
+    (db_zrow st (db_frow [2 0] [ %x [%rec [ [2 g] 0 ] ] ]))
+end

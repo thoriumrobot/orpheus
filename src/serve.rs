@@ -13,13 +13,45 @@
 //! concurrent requests use SCArs without races.
 
 use crate::knot::{Knot, N};
-use crate::{check, facet, latte, sca, sha3};
-use std::collections::HashMap;
+use crate::{check, facet, latte, sca};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
+use crate::httpd::{self, Request, Response, simple, base_headers, etag_of, parse_range, content_type, percent_decode, httpdate};
+
+// ----- the GUI/web routing surface over the shared httpd core ---------------
+struct HymnHandler {
+    root: String,
+    editor: Option<EditorHandle>,
+    chess: Option<ChessHandle>,
+}
+
+impl httpd::Handler for HymnHandler {
+    fn handle(&self, req: &Request) -> Response {
+        if req.path.starts_with("/api/") {
+            api_handle(req, &self.editor, &self.chess, &self.root)
+        } else if self.editor.is_some() && req.path == "/" {
+            // the GUI's home is the System console
+            respond_for(req, resolve(&self.root, "/system", ""))
+        } else {
+            respond_for(req, resolve(&self.root, &req.path, &req.query))
+        }
+    }
+}
+
+fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>, chess: Option<ChessHandle>) {
+    println!("Hymn — Orpheus web server (HTTP/1.1)");
+    println!("  hosting '{}' at http://{}/", root, listen);
+    if editor.is_some() {
+        println!("  WYSIWYG editor at  http://{}/editor   (live Facet preview, save/load)", listen);
+    }
+    println!("  keep-alive · ETag/304 · Range/206 · fonts · SCArs-powered Facet pages");
+    let handler = HymnHandler { root: root.to_string(), editor, chess };
+    if let Err(e) = httpd::serve(listen, std::sync::Arc::new(handler)) {
+        eprintln!("Hymn: cannot bind {}: {}", listen, e);
+    }
+}
+
 
 /// A shared, editable document backing the WYSIWYG editor: a Mocha `editor` app
 /// (the document model, in Latte) on a persistent Node.
@@ -60,47 +92,7 @@ pub fn serve_gui(listen: &str, root: &str, editor: EditorHandle, chess: Option<C
     serve_with(listen, root, Some(editor), chess);
 }
 
-fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>, chess: Option<ChessHandle>) {
-    let listener = match TcpListener::bind(listen) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Hymn: cannot bind {}: {}", listen, e);
-            return;
-        }
-    };
-    println!("Hymn — Orpheus web server (HTTP/1.1)");
-    println!("  hosting '{}' at http://{}/", root, listen);
-    if editor.is_some() {
-        println!("  WYSIWYG editor at  http://{}/editor   (live Facet preview, save/load)", listen);
-    }
-    println!("  keep-alive · ETag/304 · Range/206 · fonts · SCArs-powered Facet pages");
-    for stream in listener.incoming().flatten() {
-        let root = root.to_string();
-        let editor = editor.clone();
-        let chess = chess.clone();
-        std::thread::spawn(move || {
-            let _ = handle_conn(stream, &root, editor, chess);
-        });
-    }
-}
-
 // ----- request / response model ---------------------------------------------
-struct Request {
-    method: String,
-    path: String, // decoded, query stripped
-    version: String,
-    headers: HashMap<String, String>, // lowercased keys
-    keep_alive: bool,
-    body: Vec<u8>,
-    query: String, // raw query string (after '?')
-}
-
-impl Request {
-    fn header(&self, k: &str) -> Option<&str> {
-        self.headers.get(k).map(|s| s.as_str())
-    }
-}
-
 struct Resource {
     body: Vec<u8>,
     ctype: String,
@@ -108,107 +100,10 @@ struct Resource {
     last_modified: Option<u64>, // unix seconds
 }
 
-struct Response {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    is_body_suppressed: bool, // 304: never send a body
-}
-
 // ----- connection loop ------------------------------------------------------
-fn handle_conn(stream: TcpStream, root: &str, editor: Option<EditorHandle>, chess: Option<ChessHandle>) -> std::io::Result<()> {
-    stream.set_nodelay(true).ok();
-    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".into());
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = stream;
-    loop {
-        let req = match parse_request(&mut reader)? {
-            Some(r) => r,
-            None => break, // client closed / idle timeout
-        };
-        let keep = req.keep_alive;
-        let resp = if req.path.starts_with("/api/") {
-            api_handle(&req, &editor, &chess, root)
-        } else if editor.is_some() && req.path == "/" {
-            // the GUI's home is the System console
-            respond_for(&req, resolve(root, "/system"))
-        } else {
-            respond_for(&req, resolve(root, &req.path))
-        };
-        log_line(&peer, &req, &resp);
-        write_response(&mut writer, &req, &resp)?;
-        if !keep {
-            break;
-        }
-    }
-    Ok(())
-}
-
 /// Read one request (request line + headers). Returns None at clean EOF.
-fn parse_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Request>> {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line)?;
-    if n == 0 {
-        return Ok(None);
-    }
-    let mut parts = line.trim_end().split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let target = parts.next().unwrap_or("/").to_string();
-    let version = parts.next().unwrap_or("HTTP/1.0").to_string();
-    if method.is_empty() {
-        return Ok(Some(bad()));
-    }
-    let mut headers = HashMap::new();
-    loop {
-        let mut h = String::new();
-        if reader.read_line(&mut h)? == 0 {
-            break;
-        }
-        let t = h.trim_end();
-        if t.is_empty() {
-            break; // end of headers
-        }
-        if let Some((k, v)) = t.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-        }
-        if headers.len() > 100 {
-            break; // header flood guard
-        }
-    }
-    let conn = headers.get("connection").map(|s| s.to_ascii_lowercase());
-    let keep_alive = if version == "HTTP/1.1" {
-        conn.as_deref() != Some("close")
-    } else {
-        conn.as_deref() == Some("keep-alive")
-    };
-    let clen = headers.get("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-    let mut body = Vec::new();
-    if clen > 0 && clen < 8 * 1024 * 1024 {
-        body.resize(clen, 0);
-        reader.read_exact(&mut body)?;
-    }
-    let mut tparts = target.splitn(2, '?');
-    let raw_path = tparts.next().unwrap_or("/");
-    let query = tparts.next().unwrap_or("").to_string();
-    let path = percent_decode(raw_path);
-    Ok(Some(Request { method, path, version, headers, keep_alive, body, query }))
-}
-
-fn bad() -> Request {
-    Request {
-        method: "BAD".into(),
-        path: "/".into(),
-        version: "HTTP/1.1".into(),
-        headers: HashMap::new(),
-        keep_alive: false,
-        body: Vec::new(),
-        query: String::new(),
-    }
-}
-
 // ----- routing --------------------------------------------------------------
-fn resolve(root: &str, path: &str) -> Option<Resource> {
+fn resolve(root: &str, path: &str, query: &str) -> Option<Resource> {
     if path.contains("..") {
         return None;
     }
@@ -225,7 +120,13 @@ fn resolve(root: &str, path: &str) -> Option<Resource> {
     if ext == "facet" || (ext.is_empty() && file.with_extension("facet").exists()) {
         let f = if ext == "facet" { file } else { file.with_extension("facet") };
         let src = fs::read_to_string(&f).ok()?;
-        let body = match facet::render(&src) {
+        // user input: every query parameter is seeded into the page so In.field(name, default) can
+        // read it — this is what makes a Facet page an interactive interface.
+        let params: Vec<(String, String)> = query
+            .split('&')
+            .filter_map(|p| p.split_once('=').map(|(k, v)| (k.to_string(), percent_decode(v))))
+            .collect();
+        let body = match facet::render_with(&src, &params) {
             Ok(html) => html.into_bytes(),
             Err(e) => {
                 return Some(Resource {
@@ -263,25 +164,6 @@ fn resolve(root: &str, path: &str) -> Option<Resource> {
     Some(Resource { body, ctype: ctype.to_string(), cacheable, last_modified })
 }
 
-fn content_type(ext: &str) -> Option<(&'static str, bool)> {
-    Some(match ext {
-        "css" => ("text/css; charset=utf-8", false),
-        "txt" | "sca" | "lat" => ("text/plain; charset=utf-8", false),
-        "md" => ("text/markdown; charset=utf-8", false),
-        "html" | "htm" => ("text/html; charset=utf-8", false),
-        "js" => ("text/javascript; charset=utf-8", false),
-        "json" => ("application/json; charset=utf-8", false),
-        "svg" => ("image/svg+xml; charset=utf-8", false),
-        "png" => ("image/png", true),
-        "ico" => ("image/x-icon", true),
-        "woff2" => ("font/woff2", true),
-        "woff" => ("font/woff", true),
-        "ttf" => ("font/ttf", true),
-        "otf" => ("font/otf", true),
-        _ => return None,
-    })
-}
-
 // ----- the WYSIWYG editor API (dynamic) -------------------------------------
 /// Handle `/api/*`: live Facet rendering and document save/load for the editor.
 fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<ChessHandle>, root: &str) -> Response {
@@ -294,6 +176,30 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                 Err(e) => format!("<pre style=\"color:#b00020\">Facet error: {}</pre>", html_escape(&e)),
             };
             simple(200, "text/html; charset=utf-8", html.into_bytes())
+        }
+        // live widget evaluation: POST `expr=<facet-expr>&name=value&…`; render the single
+        // expression against the supplied inputs and return its text. This is what powers
+        // Live.box — the page's interactive widgets call back here as the user types. Results are
+        // a pure function of the request body, so a small bounded cache makes repeats instant.
+        ("POST", "/api/eval") => {
+            let body = String::from_utf8_lossy(&req.body).into_owned();
+            let mut expr = String::new();
+            let mut inputs: Vec<(String, String)> = Vec::new();
+            for pair in body.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    let (k, v) = (percent_decode(k), percent_decode(v));
+                    if k == "expr" {
+                        expr = v;
+                    } else {
+                        inputs.push((k, v));
+                    }
+                }
+            }
+            // eval_live memoizes on the canonical (expr, inputs) keyed by library generation, so it
+            // is both fast and correctly invalidated when a library is edited — unlike a raw-body
+            // cache, which would serve stale results after a lib change.
+            let out = facet::eval_live(&expr, &inputs);
+            simple(200, "text/plain; charset=utf-8", out.into_bytes())
         }
         // save the whole document into the Latte `editor` app (durable, syncable)
         ("POST", "/api/save") => match editor {
@@ -1110,7 +1016,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             };
             let libs: Vec<String> = crate::latte::all_libs();
             let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-            let svg = match crate::latte::run_with_libs(&expr, &refs) {
+            let svg = match crate::rustgen::run_adaptive(&expr, &refs) {
                 Ok(scene) => crate::gfx::render_scene(&scene, 330, 270),
                 Err(e) => format!("<svg xmlns='http://www.w3.org/2000/svg' width='330' height='40'><text x='6' y='22'>{}</text></svg>", html_escape(&e)),
             };
@@ -1133,7 +1039,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             };
             let libs: Vec<String> = crate::latte::all_libs();
             let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-            let out = match crate::latte::run_with_libs(&expr, &refs) {
+            let out = match crate::rustgen::run_adaptive(&expr, &refs) {
                 Ok(n) => match panel_json(&n) {
                     Some(j) => j,
                     None => format!("{{\"error\":\"{} did not return a (panel …) value\"}}", json_escape(expr0)),
@@ -1357,7 +1263,7 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                     }
                     for i in 0..n {
                         let expr = format!("(genword {})", seed + (i as u64) * 7919);
-                        let word = match crate::latte::run_with_libs(&expr, &["std", "lexis"]) {
+                        let word = match crate::rustgen::run_adaptive(&expr, &["std", "lexis"]) {
                             Ok(v) => cord_list_to_string(&v),
                             Err(e) => format!("(error: {})", e),
                         };
@@ -1621,10 +1527,7 @@ fn is_ident(s: &str) -> bool {
 fn eval_expr(expr: &str) -> String {
     let libs: Vec<String> = crate::latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-    if let Some(n) = crate::rustgen::run_native_noun(expr, &refs) {
-        return render_result(&n);
-    }
-    match latte::run_with_libs(expr, &refs) {
+    match crate::rustgen::run_adaptive(expr, &refs) {
         Ok(v) => render_result(&v),
         Err(e) => format!("error: {}", e),
     }
@@ -1934,7 +1837,7 @@ fn lookup_definition(name: &str, root: &str) -> String {
         list = format!("[ {} {} ]", quote_line(line), list);
     }
     let expr = format!("(lk_lookup {} {})", list, quote_line(name));
-    let n = match crate::latte::run_with_libs(&expr, &["std", "lookup"]) {
+    let n = match crate::rustgen::run_adaptive(&expr, &["std", "lookup"]) {
         Ok(n) => n,
         Err(e) => return format!("lookup error: {}", e),
     };
@@ -2011,7 +1914,7 @@ fn symbol_index_html(name: &str) -> String {
     let expr = format!("(sy_html (sy_build {}) %{})", triples, name);
     let libs = crate::latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-    match crate::latte::run_with_libs(&expr, &refs) {
+    match crate::rustgen::run_adaptive(&expr, &refs) {
         Ok(n) => extract_html(&n)
             .unwrap_or_else(|| format!("<p>no symbol named <code>{}</code></p>", html_escape(name))),
         Err(e) => format!("<p>symbol lookup error: {}</p>", html_escape(&e)),
@@ -2043,7 +1946,7 @@ fn findb_dash_html(market: &str, n: usize) -> String {
     let expr = format!("(fd_dash (fd_load {}) {})", lit, n);
     let libs = crate::latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-    let body = match crate::latte::run_with_libs(&expr, &refs) {
+    let body = match crate::rustgen::run_adaptive(&expr, &refs) {
         Ok(nn) => extract_html(&nn)
             .unwrap_or_else(|| "<p>could not render the price dashboard</p>".to_string()),
         Err(e) => format!("<p>findb error: {}</p>", html_escape(&e)),
@@ -2211,116 +2114,8 @@ fn respond_for(req: &Request, res: Option<Resource>) -> Response {
     Response { status: 200, headers, body: res.body, is_body_suppressed: false }
 }
 
-fn base_headers(ctype: &str, cache: &str) -> Vec<(String, String)> {
-    vec![
-        ("Date".into(), httpdate(now_secs())),
-        ("Server".into(), "Hymn".into()),
-        ("Content-Type".into(), ctype.to_string()),
-        ("Cache-Control".into(), cache.to_string()),
-    ]
-}
-
-fn simple(status: u16, ctype: &str, body: Vec<u8>) -> Response {
-    let mut headers = base_headers(ctype, "no-cache");
-    headers.push(("Content-Length".into(), body.len().to_string()));
-    Response { status, headers, body, is_body_suppressed: false }
-}
-
-fn etag_of(body: &[u8]) -> String {
-    let d = sha3::sha3_256(body);
-    format!("\"{}\"", &sha3::hex(&d)[..16])
-}
-
-fn parse_range(h: &str, len: u64) -> Option<(u64, u64)> {
-    let spec = h.trim().strip_prefix("bytes=")?;
-    if spec.contains(',') || len == 0 {
-        return None; // we serve a single range only
-    }
-    let (a, b) = spec.split_once('-')?;
-    let (start, end) = if a.is_empty() {
-        let suffix: u64 = b.trim().parse().ok()?;
-        if suffix == 0 {
-            return None;
-        }
-        (len.saturating_sub(suffix), len - 1)
-    } else {
-        let start: u64 = a.trim().parse().ok()?;
-        let end: u64 = if b.trim().is_empty() { len - 1 } else { b.trim().parse().ok()? };
-        (start, end.min(len - 1))
-    };
-    if start > end || start >= len {
-        return None;
-    }
-    Some((start, end))
-}
-
 // ----- writing --------------------------------------------------------------
-fn write_response(w: &mut TcpStream, req: &Request, resp: &Response) -> std::io::Result<()> {
-    let reason = reason(resp.status);
-    let mut head = format!("HTTP/1.1 {} {}\r\n", resp.status, reason);
-    for (k, v) in &resp.headers {
-        head.push_str(&format!("{}: {}\r\n", k, v));
-    }
-    head.push_str(if req.keep_alive { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" });
-    head.push_str("\r\n");
-    w.write_all(head.as_bytes())?;
-    let send_body = req.method != "HEAD" && !resp.is_body_suppressed;
-    if send_body {
-        w.write_all(&resp.body)?;
-    }
-    w.flush()
-}
-
-fn reason(s: u16) -> &'static str {
-    match s {
-        200 => "OK",
-        206 => "Partial Content",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        416 => "Range Not Satisfiable",
-        500 => "Internal Server Error",
-        _ => "OK",
-    }
-}
-
-fn log_line(peer: &str, req: &Request, resp: &Response) {
-    println!("Hymn {} \"{} {} {}\" {} {}B", peer, req.method, req.path, req.version, resp.status, resp.body.len());
-}
-
 // ----- small helpers --------------------------------------------------------
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hexval(b[i + 1]), hexval(b[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hexval(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Decode a ui.lat panel noun to JSON for the GUI renderer.
 fn panel_json(n: &crate::knot::N) -> Option<String> {
     use crate::knot::Knot;
@@ -2413,34 +2208,11 @@ fn html_escape(s: &str) -> String {
 }
 
 /// Format unix seconds as an RFC 1123 HTTP date (always GMT).
-fn httpdate(secs: u64) -> String {
-    let days = (secs / 86400) as i64;
-    let rem = secs % 86400;
-    let (hh, mi, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let wday = (((days % 7) + 4) % 7 + 7) % 7; // 1970-01-01 = Thursday(4); 0=Sun
-    // civil_from_days (Howard Hinnant)
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    const WD: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MO: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!(
-        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        WD[wday as usize], d, MO[(m - 1) as usize], year, hh, mi, ss
-    )
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn req(method: &str, headers: &[(&str, &str)]) -> Request {
         let mut h = HashMap::new();
@@ -2563,6 +2335,31 @@ mod tests {
         let r = api_handle(&req, &None, &None, ".");
         assert_eq!(r.status, 200);
         assert_eq!(String::from_utf8_lossy(&r.body), "<b>liɣō</b>");
+    }
+
+    #[test]
+    fn api_eval_runs_a_live_expression() {
+        // the /api/eval endpoint backs Live.box: evaluate `expr` against posted inputs
+        let mut h = std::collections::HashMap::new();
+        let req = Request {
+            method: "POST".into(),
+            path: "/api/eval".into(),
+            version: "HTTP/1.1".into(),
+            headers: { h.insert("content-type".into(), "application/x-www-form-urlencoded".into()); h },
+            keep_alive: true,
+            // expr=SCArs.apply(word, Txt.split(rules, ";")) with word=kasa rules=k>g; a>o
+            body: "expr=SCArs.apply(word%2C%20Txt.split(rules%2C%20%22%3B%22))&word=kasa&rules=k%3Eg%3B%20a%3Eo"
+                .as_bytes()
+                .to_vec(),
+            query: String::new(),
+        };
+        let r = api_handle(&req, &None, &None, ".");
+        assert_eq!(r.status, 200);
+        assert_eq!(String::from_utf8_lossy(&r.body), "goso");
+        // a repeated identical request is served from the memo cache (same result)
+        let r2 = api_handle(&req, &None, &None, ".");
+        assert_eq!(r2.status, 200);
+        assert_eq!(String::from_utf8_lossy(&r2.body), "goso");
     }
 
     #[test]

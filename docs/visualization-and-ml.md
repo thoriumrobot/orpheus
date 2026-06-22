@@ -380,6 +380,62 @@ window; `latte ddia findb` runs the sample. See
 [data-intensive.md](data-intensive.md) for the storage details and the honest note
 on why the window is kept small.
 
+### The bond market (`lib/finbond.lat`)
+
+`finbond.lat` carries the same leak-aware pipeline to **fixed income**, where the
+predictors are different from equities/crypto and the research is fairly settled
+on *what* they are. It reuses `fin.lat`'s logistic core, train-only
+standardization, walk-forward split and transaction-cost discipline, and adds:
+
+- **A bond total-return model.** A bond's monthly total return is approximated as
+  `carry − duration·Δyield` (income earned, minus the price move a yield change
+  implies). `bondret` uses the 10-year note's modified duration (~8.5).
+- **Yield-curve features.** `frow` builds `[ level, slope, curvature, yield-
+  momentum, M2-growth ]`: the **level** (10y), **slope** (10y−2y), and
+  **curvature** (2·5y−2y−10y) are the first three principal components of the
+  curve; **momentum** is the recent yield trend (negated, so a falling yield —
+  bullish for bonds — reads positive). Level/slope/curvature plus momentum and
+  carry are the predictors Brooks & Moskowitz ("Yield Curve Premia", 2017) show
+  describe bond return premia, subsuming the curve's PCs and adding unspanned
+  signal.
+- **A money-supply (stimulus) feature.** Central banks fight weak economies by
+  expanding the money supply — cutting rates and, once rates hit zero, buying
+  bonds with newly-created money (quantitative easing, deployed in 2008–09 and
+  2020). QE raises **M2** and pushes Treasury prices up / yields down (studies put
+  the 10-year effect near −1 percentage point; Borio & Zabai 2016), while
+  quantitative tightening (2022–25) reverses it (M2 growth went negative, yields
+  rose). So **rising money-supply growth is a bullish regime for bonds**, and
+  `frow` feeds **M2 year-over-year growth** straight in as a feature; the
+  classifier learns its (expected positive) coefficient.
+
+Run it from the GUI's **eval** line or the CLI:
+
+```
+latte eval "(report 0)"     # -> [ train  test  baseline ]  as signed fractions
+latte eval "(ablate 0)"     # -> [ test_with_M2  test_without_M2  baseline ]
+```
+
+On the embedded series this reports **train 96.6%, out-of-sample 68.3%, baseline
+63.3%**, and the ablation shows the money-supply feature is pulling real weight:
+**68.3% with M2 vs 65.8% without** (both above baseline). Two honest caveats, in
+the spirit of the gold demo above:
+
+1. **The data is a curated demonstration series, not a tick feed.** The 2-, 5- and
+   10-year yields and M2 growth are *documented reference anchors* at the dated
+   turning points of the 2007–2026 monetary cycle (pre-crisis, QE1–3, taper, the
+   2018–19 hike/QT, COVID/unlimited QE, the 2021 stimulus peak, 2022–25
+   tightening, the late-2025 "QE-lite" pivot), linearly interpolated to a monthly
+   grid so the model has enough rows for a walk-forward split. The live,
+   full-resolution source is **FRED** (DGS2/DGS5/DGS10 for yields, M2SL for the
+   money stock); a `fetch`-style refresh would splice those on top, the way
+   `fin.lat` splices live Coin Metrics BTC data over its embedded fallback.
+2. **Interpolation flatters the score.** A piecewise-linear series is smoother and
+   more autocorrelated than real noisy yields, so next-month direction is easier
+   to call than it would be on raw data. The deliverable is the *methodology* —
+   the bond return model, the curve + momentum + carry features, and the
+   money-supply integration — wired into the same leak-aware pipeline; real FRED
+   data is the honest test.
+
 ---
 
 ## A graphics library (`lib/gfx.lat`)

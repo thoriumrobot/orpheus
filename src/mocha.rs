@@ -398,6 +398,42 @@ mod tests {
     }
 
     #[test]
+    fn chess_fold_native_matches_interpreter() {
+        // The chess `poke` (domove→islegal→legal) is heavy enough that the agent's default
+        // interpreter fold runs OUT OF FUEL — so before native folding, a chess node's
+        // state() could not be materialized after real moves. Native folding has no such
+        // ceiling. This test proves (a) native folds the game correctly, and (b) the native
+        // result is identical to the reference interpreter run at a high fuel budget — so
+        // persistence stays deterministic across machines.
+        let mv = |f: u128, t: u128| cell(cord("move"), cell(num(f), cell(num(t), num(0))));
+        let plies = [mv(52, 36), mv(12, 28), mv(62, 45), mv(1, 18)]; // e4 e5 Nf3 Nc6
+        let agent = Agent::from_source(CHESSGAME_LAT, "chessgame").unwrap();
+        let libs = ["std", "chess", "chessgame"];
+        let mut st = agent.initial_state();
+        let t0 = std::time::Instant::now();
+        for act in &plies {
+            let next = agent.step(act, &st).expect("native fold succeeds with no fuel limit");
+            // reference: the same poke on the interpreter at a high fuel budget
+            let expr = format!(
+                "(tail (poke {} {}))",
+                crate::dbservice::noun_to_latte(act).unwrap(),
+                crate::dbservice::noun_to_latte(&st).unwrap()
+            );
+            let reference = latte::run_with_libs_fuel(&expr, &libs, 8_000_000_000)
+                .expect("reference interpreter fold");
+            assert_eq!(next, reference, "native fold must equal the interpreter reference");
+            st = next;
+        }
+        eprintln!("[chess_fold] native==interp(high-fuel) over {} plies, {:?}", plies.len(), t0.elapsed());
+        let q = Mocha::load(CHESSGAME_LAT).unwrap();
+        let board = q.peek(&cell(cord("board"), num(0)), &st).unwrap();
+        let init = q.peek(&cell(cord("board"), num(0)), &agent.initial_state()).unwrap();
+        assert_ne!(board, init, "moves must have applied (board changed)");
+        let side = q.peek(&cell(cord("side"), num(0)), &st).unwrap();
+        assert_eq!(side.as_atom().unwrap().to_u128(), Some(1), "White to move after 4 plies");
+    }
+
+    #[test]
     fn todo_poke_and_peek() {
         let (q, _a, st) = fold("todo", TODO_LAT, &["add a", "add b", "add c", "drop b"]);
         let count = q.peek(&cell(cord("count"), num(0)), &st).unwrap();

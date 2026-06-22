@@ -1,8 +1,11 @@
 :: A Mocha lexicon app: state is a list of [solar heart] word pairs (0 = empty).
 :: The Heart form is derived by SCArs in the host at poke time; the app stores it.
+:: (Same poke/peek + tagged-action shape as todo.lat — see that file's header for the
+:: Mocha-app contract in full.)
 import std
 import mocha
 core lexicon
+  :: write: %add pushes a [solar heart] pair; %clear empties the lexicon.
   poke = fn [action state] ->
            let tag = head action in
            let arg = tail action in
@@ -11,6 +14,7 @@ core lexicon
              %clear -> (ok 0) ;
              _      -> (ok state)
            end
+  :: reads: %count of words, %all pairs, or %heart to look up a Solar word's Heart form.
   peek = fn [query state] ->
            let tag = head query in
            let arg = tail query in

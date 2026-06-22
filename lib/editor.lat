@@ -1,9 +1,11 @@
 :: The WYSIWYG editor's document model, as a Mocha app written in Latte. The whole
 :: document is a single cord (its Facet source); pokes replace it, peek returns it.
 :: Running on the Mocha runtime, the document is durable and can sync across machines.
+:: (poke/peek + tagged-action shape — see todo.lat's header for the Mocha contract.)
 import std
 import mocha
 core editor
+  :: write: %set replaces the document with the new cord; %clear empties it.
   poke = fn [action state] ->
            let tag = head action in
            let arg = tail action in
@@ -12,6 +14,7 @@ core editor
              %clear -> (ok 0) ;
              _      -> (ok state)
            end
+  :: read: %text returns the current document cord.
   peek = fn [query state] ->
            let tag = head query in
            case tag of

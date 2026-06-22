@@ -908,7 +908,53 @@ latte db people put u1 '[ [1 %alice2] [ [2 %la] 0 ] ]'   # a new MVCC version
 latte db people history u1        # both versions, newest first — survived the restart
 latte db people query nyc         # the secondary index, rebuilt on replay
 latte db people dash              # the whole live state as HTML
+latte db sales  agg 1 2           # GROUP BY field 1, SUM field 2 — analytics over on-disk data
+latte db people checkpoint        # compact the log to one entry per live key
+latte db bank   txn "a=[ [1 %usd] [ [2 70] 0 ] ] | b=[ [1 %usd] [ [2 30] 0 ] ]"  # atomic multi-key write
 ```
+
+`db.lat` already implements serializable transactions as pure values (snapshot reads, optimistic
+concurrency control, write-skew prevention — the doctors-on-call demo); the durable service exposes
+them. `begin` returns a snapshot timestamp; `txn` takes that snapshot, the keys the caller read, and
+the writes to apply. It runs `db_commit`, which validates the read-set (aborting if any read key has
+a committed version newer than the snapshot, which is what closes write skew) and then applies every
+write or none. On commit the whole write-set is appended to the log as one crash-atomic batch — a
+`T<n>` framing line followed by its n `P` lines, written and flushed together — and on recovery a
+batch with fewer than n lines following it (a write torn by a crash) is dropped whole, so a
+transaction is all-or-nothing across a restart. The CLI `txn` form (empty read-set) is an atomic,
+durable multi-key write; the read-set validation that makes it serializable is exercised by the
+service tests.
+
+Because the log is appended to forever, a long-lived database would replay its whole history on
+every open. `checkpoint` (alias `compact`) bounds that: it rewrites the log as a single `P` entry
+per live key holding that key's current value, dropping superseded versions and deleted keys, then
+rebuilds the live value from the compacted log so memory and disk agree. The current state is
+preserved exactly (each record's noun is re-serialized to a Latte literal that re-evaluates to the
+same noun) and survives a restart, but the tradeoff is the standard one for a checkpoint: the
+per-version MVCC history *before* the checkpoint is collapsed to the current value; history
+accumulates again afterwards. The rewrite is installed atomically (temp file, flush, rename), so a
+crash mid-checkpoint leaves the original log intact.
+
+On top of the storage engine, `db.lat` carries a small **relational-style query/analytics layer**
+that runs as compiled Latte: `db_scan`/`db_where`/`db_pluck` (scan, filter, project),
+`db_count`/`db_sum`/`db_min`/`db_max`/`db_avg` (aggregates over a field), `db_order`/`db_topn`
+(sort and top-N), and `db_groups`/`db_groupsum`/`db_groupavg` (GROUP BY). Because `db_pluck`
+projects a queried column into a plain list — and `db_npluck` into signed fixed-point — a query
+result drops straight into the statistics/ML library (`st_mean`, `st_std`, regression) and the
+plotter (`bars`, `points`), so the database is the front of a single pipeline: **stored records →
+query/aggregate → train/visualize**, all native. This generalizes the bespoke pipeline in
+`findb.lat` (financial bars stored in the db, read back for a regression fit and a sparkline) to any
+database and any field.
+
+The same layer carries an **index-aware query planner** and relational operators. `db_select`
+runs an equality predicate through the secondary index when the field is the indexed one (a
+posting-list probe) and otherwise falls back to a scan-and-filter — the database picks the plan.
+`db_idxrange` is a true non-primary-key range scan over the indexed field; because the index is
+ordered in the dhash byte/cord collation, it is index-accelerated and correct for cord-valued
+fields (names, cities, regions), while numeric fields — which don't sort byte-wise — are ranged
+with `db_between` (a scan plus a numeric filter, the honest cost of ranging a field the index
+doesn't order). `db_and`/`db_or` compose result sets by primary key, and `db_join` is a
+nested-loop equi-join of two result sets on a chosen field from each. All of it compiles to native.
 
 Because the log is the source of truth and every layer (chains, index, Bloom filter,
 timestamp counter) is derived from it on replay, MVCC history and index queries come

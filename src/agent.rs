@@ -85,6 +85,17 @@ pub struct Agent {
     core: N,
     poke_axis: u128,
     label: String,
+    // When the module source is known, the `poke` transition can also be run by the
+    // Anvil-compiled native program (compiled once, then each [action state] piped in on
+    // stdin) so the *persistent state is folded by natively compiled code* — with no
+    // interpreter fuel ceiling. The interpreter remains the verified fallback.
+    native: Option<NativePoke>,
+}
+
+#[derive(Clone)]
+struct NativePoke {
+    expr: String,
+    libs: Vec<String>,
 }
 
 impl Agent {
@@ -125,6 +136,29 @@ impl Agent {
             core,
             poke_axis,
             label: label.to_string(),
+            native: Self::build_native(src),
+        })
+    }
+
+    /// Set up the native `poke` fold for this module, if it has a `core NAME`: register the
+    /// module as a runtime library (so Anvil can resolve `poke`) and record the expression
+    /// and library list to compile. Compilation itself is lazy (first `step`); a `None` here,
+    /// or any later native decline, transparently falls back to the interpreter.
+    fn build_native(src: &str) -> Option<NativePoke> {
+        let core_name = latte::module_core_name(src)?;
+        // Register PRIVATELY: resolvable for native compilation, but kept out of all_libs() so an
+        // app's arms (e.g. a counter/todo `add`) never shadow std arithmetic in shared evaluators.
+        latte::register_private_lib(&core_name, src);
+        let mut libs = latte::module_imports(src);
+        if !libs.iter().any(|l| l == &core_name) {
+            libs.push(core_name);
+        }
+        // `poke` returns [effects state]; the input pair [action state] arrives on stdin,
+        // so action = (head __in), state = (tail __in). (The initial state is the atom 0,
+        // which the app's own `cur` normalizes — so we must NOT index into it.)
+        Some(NativePoke {
+            expr: "(poke (head __in) (tail __in))".to_string(),
+            libs,
         })
     }
 
@@ -143,6 +177,20 @@ impl Agent {
 
     /// Apply one action: set sample = [action state], invoke `poke`, return new state.
     pub fn step(&self, action: &N, state: &N) -> Result<N, Crash> {
+        // Native fold: persistent state is updated by the Anvil-compiled `poke` (compiled
+        // once, content-addressed, then this position piped in), with no fuel ceiling. The
+        // emitted result is byte-identical to the interpreter's (the compiler is audited
+        // against it system-wide), so this changes only speed/limits, not semantics.
+        if let Some(np) = &self.native {
+            let input = cell(action.clone(), state.clone());
+            let libs: Vec<&str> = np.libs.iter().map(|s| s.as_str()).collect();
+            if let Some(prod) = crate::rustgen::run_native_with_input(&np.expr, &input, &libs, false) {
+                if let Some((_effects, new_state)) = prod.as_cell() {
+                    return Ok(new_state.clone());
+                }
+            }
+            // native unavailable/declined → verified interpreter fallback below
+        }
         let sample = cell(action.clone(), state.clone());
         let core2 = loom::edit(&Atom::from_u128(3), &sample, &self.core)?;
         let armf = slot(&Atom::from_u128(self.poke_axis), &core2)?;
@@ -240,6 +288,26 @@ mod tests {
         assert_eq!(s, num(41));
         s = a.step(&act_reset(), &s).unwrap();
         assert_eq!(s, num(0));
+    }
+
+    #[test]
+    fn agent_modules_do_not_pollute_all_libs() {
+        // Building agents must NOT leak their arms into all_libs(): a v2 counter defines a bare
+        // `add` (no %add jet) that, if visible, shadows std arithmetic and makes `(add big big)`
+        // OutOfFuel for every all-libs consumer (the native/interp fuzzer, the SCA, the GUI).
+        crate::jets::register_std_jets();
+        let _v1 = Agent::new_version(1).unwrap();
+        let _v2 = Agent::new_version(2).unwrap(); // defines a bare `add`
+        let _kv = Agent::new_kv().unwrap();
+        let names = latte::all_libs();
+        for n in ["counter", "kv"] {
+            assert!(!names.iter().any(|s| s == n), "agent module '{}' leaked into all_libs()", n);
+        }
+        // std arithmetic must still win across the full all-libs namespace (fast jetted add)
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let r = latte::run_with_libs("(add 4000000000 4000000000)", &refs)
+            .expect("all-libs `add` must be std arithmetic, not a shadowed Peano loop");
+        assert_eq!(r, num(8000000000));
     }
 
     #[test]

@@ -23,9 +23,10 @@ Every Latte value is a **Knot**:
 
 Everything else is a convention on top of those two:
 
-- **Cords (text).** A short string is an atom holding its bytes little-endian; the tag literal
-  `%heart` is the cord `"heart"`. Cords are atoms of at most 16 bytes (they fit in the machine
-  word), so they are for tags and short labels, not arbitrary prose.
+- **Cords (text).** A string is an atom holding its bytes little-endian; the tag literal
+  `%heart` is the cord `"heart"`. Cords can be any length — short ones fit a machine word, longer
+  ones are carried as byte-vector atoms — so the cord operations (`cat`, `bytelen`, `bytes`, …)
+  handle tags, labels, and arbitrary text alike, on both the interpreter and the native backend.
 - **Booleans are loobean: `0` = true, any non-zero = false.** This is the Nock convention and
   it is pervasive: `(5 == 5)` is `0`, `(lt 2 3)` is `0`, and `if` takes the *then* branch when
   its condition is `0`. Read `0` as "yes".
@@ -238,7 +239,104 @@ scope already.
   `core NAME …` body registers it live — no binary rebuild. From the GUI, open a module
   (`System.Open NAME`), edit, and run `Compiler.Compile *`.
 - **Native compilation (Anvil):** `latte rustc "<expr>"` compiles a Latte expression to Rust;
-  the GUI `eval` path uses the same compiler with a cache, falling back to the interpreter.
+  the `eval`/GUI paths use the same compiler with a content-addressed binary cache (keyed by a
+  hash of the emitted source), falling back to the interpreter when a program is outside the
+  native subset. Atoms are `u128` for numbers and byte-vector `Big` atoms for cords of any
+  length, so string-heavy code compiles natively; binders that collide with Rust keywords or
+  jetted cord ops are alpha-renamed.
+  - **Build tuning.** Native builds use `rustc -C opt-level=0` by default: for these one-shot,
+    cached programs the compile dominates the sub-second runtime, so opt-0 cuts cold-start ~7–9x
+    (≈0.9s vs ≈6.3s on the 614-rule Ligurian `evolve`) while still running several times faster
+    than the interpreter. Set `ORPHEUS_OPT=2` (or `3`) for hot, long-lived programs where runtime
+    dominates. `ORPHEUS_CACHE` relocates the cache directory.
+  - **Compile once, feed many inputs.** A program can take its input at run time (the expression
+    references the bound parameter `__in`); the binary is content-addressed by the *program*, not
+    the input, and reads each input from stdin. So a heavy program is built once and reused across
+    all inputs (e.g. the whole Ligurian evolution: one ~0.9s build, then ~50ms per word).
+  - **Cache control.** `latte cache` (status: count, size on disk, opt level, size cap), `latte
+    cache warm "<expr>"` (prebuild so a later run is instant), `latte cache clear` (reclaim disk —
+    the cache is purely derived, so this is always safe). The cache **self-bounds**: it stays under
+    a size cap (default 512 MiB, set via `ORPHEUS_CACHE_MAX` in MiB, `0` disables) by evicting the
+    least-recently-used binaries after each build. Recency is the binary's mtime, refreshed on every
+    run, so hot programs (e.g. the shared `evolve` binary) survive while stale one-offs are reclaimed.
+  - **Differential fuzzing.** The backend's safety rests on *native == interpreter on success*, so
+    a seeded fuzzer stress-tests exactly that: it generates random well-formed, terminating programs
+    from the native subset — type-aware (arithmetic operands are atoms, partial ops guarded, so most
+    programs run rather than hit domain errors) and covering the hard paths: closures with
+    free-variable capture, higher-order functions (`map`/`filter`/`foldl`/`any`/…), list operations,
+    `case`, and bounded loops. It asserts **soundness** — if the native binary yields a value, the
+    interpreter yields the same value; native *declining* (a legitimate fallback like u128-overflow
+    arithmetic) is allowed. A modest seeded run is part of the test suite; `latte anvil fuzz <iters>
+    <seed>` runs an extensive, reproducible campaign as a release gate. On a divergence it
+    **minimizes** the offending program to a small reproducer (greedy structural shrinking: collapse
+    each balanced subterm to `0`, or hoist it to be the whole program — every candidate re-checked,
+    so the reproducer is always genuine and smaller). The same shrinker powers `latte anvil shrink
+    "<expr>"`, which reduces any program to its smallest *non-native* subterm (a bug reproducer, or a
+    "what here falls back?" probe). Across hundreds of generated programs the fuzzer has found no
+    divergence.
+  - **Build metrics.** Anvil keeps lifetime counters (persisted in the cache dir, so they span
+    one-shot CLI runs): `rustc` builds and their total/average time, cache hits, shared-store pulls,
+    and build failures. `latte cache metrics` shows them with a reuse rate and an estimate of `rustc`
+    time saved (hits + pulls × average build time); `latte cache status` carries a one-line summary.
+    Counters are advisory — approximate under heavy concurrency, and a host that only ever pulls
+    reports no time saved since it has no local build to measure against.
+  - **Diagnosing fallbacks.** When a program can't run natively it falls back to the interpreter
+    (correct, but slower). To make that visible rather than silent: `latte eval --explain "<expr>"`
+    reports whether the program compiles to native code and, if not, why (e.g. `unknown function or
+    gate 'foo'`, `'add' expects 2 args, got 1`). The rarer case — a program that lowers to Rust but
+    `rustc` rejects (a codegen bug) — is captured to a bounded log; `latte cache log` shows the most
+    recent build failures with the compiler's own error text instead of swallowing them.
+  - **Integrity & self-healing.** Every built binary gets a sidecar (`<name>.sha` = `sha3` + size)
+    recorded by its producer. Before running a cached binary Anvil does a near-free size check and,
+    on a mismatch (truncation, an interrupted write), purges and rebuilds it automatically. Pulls
+    from the shared store are *fully* hash-verified before install, so a corrupt or poisoned store
+    entry — even one that preserves the original size — is rejected rather than infecting the host.
+    `latte cache verify [--repair]` audits the whole local cache by full hash and (with `--repair`)
+    purges anything corrupt so it rebuilds on next use. Full hashing is paid only on pull and on this
+    explicit command, never on the hot run path.
+  - **Shared build store (across hosts).** Set `ORPHEUS_CACHE_SHARED` to a directory (an NFS mount,
+    a synced folder, a CI cache) and the local cache becomes a read-through/write-back mirror of it:
+    on a local miss Anvil first looks in the shared store and, on a hit, copies the binary in and
+    skips `rustc` entirely; after a local build it publishes the result back. So each distinct
+    program is compiled once *across the whole fleet* rather than once per host. Artifacts are
+    namespaced by toolchain identity (`rustc` release + host target triple), so a host never pulls a
+    binary it can't run; builds use no `target-cpu=native`, keeping codegen portable across CPUs of
+    the same triple. Every shared-store operation is best-effort — any error falls through to a
+    normal local build, so the feature can never break a build, only accelerate it.
+  - **Signed networked artifact registry.** For a fleet without shared storage (CI runners, separate
+    machines), `latte anvil registry serve [addr] [root]` runs an HTTP service (on the same shared
+    server core as the Hymn web server) that holds compiled binaries. Point hosts at it with `ORPHEUS_REGISTRY=http://host:port`: on a local miss
+    Anvil pulls the binary over the network (after the shared store, before `rustc`), and after a
+    local build it publishes back — so, like the shared store, each program compiles once across the
+    fleet, but over HTTP instead of a shared filesystem. Because artifacts now cross an untrusted
+    network they are **signed**: every binary carries an HMAC-SHA3-256 MAC keyed by
+    `ORPHEUS_REGISTRY_KEY`. The server refuses to store an upload whose MAC doesn't verify (`401`),
+    and a client refuses to *install* a download whose MAC doesn't verify — so a tampered or
+    unauthenticated artifact is rejected rather than executed. Artifacts are namespaced by toolchain
+    identity exactly like the shared store, the store is kept bounded by size-capped LRU eviction
+    (`ORPHEUS_REGISTRY_MAX`, MiB), and a server holding the key re-verifies each artifact's MAC on
+    read so on-disk corruption is caught rather than served. This is a shared-key MAC (integrity + authenticity among
+    parties holding the key — the trusted-CI-builders model), deliberately *not* a public-key
+    signature: a real asymmetric scheme would need a vetted crypto library, which has no place in a
+    hand-rolled zero-dependency codebase. Transport is plain HTTP for a trusted network/loopback; all
+    operations are best-effort, falling through to a local build on any error.
+  - **Resident compile server (`anvild`).** `latte anvil serve` starts a small daemon (a Unix
+    socket under the cache dir) whose one job is *background compilation that outlives a one-shot
+    client*. With it running, a cold `latte eval`/`latte evolve` doesn't stall on `rustc`: the
+    program already on disk runs in-process; a cold one is handed to the daemon (which builds it in
+    the background) while this call is answered on the interpreter, so the next invocation — even a
+    separate process — finds the binary warm. It's opt-in (nothing starts it automatically) and
+    shares the same on-disk cache, so it never changes results, only when the build happens.
+    Commands: `latte anvil serve | ping | stop | stats | warm "<expr>"`. The trade-off is honest:
+    deferring to the interpreter for the current call is a clear win when interpreting is cheap, and
+    roughly a wash for a heavy program whose interpreter run rivals its build time — the lasting
+    benefit is that every later call is native without a foreground build. The same daemon backs the
+    system-wide adaptive policy (`run_adaptive`): every in-process surface that evaluates Latte — the
+    GUI console and pages, the data-intensive demos, the database service — runs **heavy code
+    compiled, light code interpreted**, and when the daemon is up, a cold heavy program is warmed
+    through it without stalling the request. Warm requests carry their library scope, so the daemon
+    builds the exact binary the caller will look up (a program needing non-default libraries warms
+    correctly, not under the wrong key).
 
 ---
 
@@ -270,6 +368,7 @@ end
   `if (cond) then …` runs *then* on `0`.
 - **Naturals only.** Subtraction underflows into a crash; use `import num` for signed values.
 - **Lists end in `0`.** `[1 2 3]` is *not* a 3-list — it is `[1 [2 3]]`. Write `[1 2 3 0]`.
-- **Cords are ≤ 16 bytes.** Use lists of cords for longer text.
+- **Cords are atoms (numbers).** Integer ops treat a cord as its little-endian byte value, so
+  `(add "ab" 1)` does byte arithmetic, not concatenation — use `cat` to join text.
 - **Arms aren't values; gates are.** Wrap an arm in `fn […] -> (arm …)` to pass it around.
 - **`again` only inside a `loop`, in tail position.**

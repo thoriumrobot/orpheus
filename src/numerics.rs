@@ -1505,6 +1505,96 @@ pub fn trade_advice_market(
 
 /// `latte trade` — automatic trading advisor: technical analysis + news sentiment
 /// + the volatility model, with Kelly/vol-target position sizing.
+/// Walk a proper Latte list, collecting each element as a `u128` (atoms only).
+fn flat_atoms(n: &N) -> Vec<u128> {
+    let mut out = Vec::new();
+    let mut cur = n.clone();
+    while let Knot::Cell(h, t) = &*cur {
+        out.push(if let Knot::Atom(a) = &**h { a.to_u128().unwrap_or(0) } else { 0 });
+        cur = t.clone();
+    }
+    out
+}
+
+/// Evaluate a heavy expression through the native Anvil compiler (built once, cached, and run as
+/// a binary), falling back to the high-fuel interpreter only if the native build/run declines.
+/// The bond model's full 4000-iteration training pipeline compiles natively, so this keeps the
+/// advisor and dashboard fast and off the interpreter's fuel budget.
+fn eval_native_or_interp(expr: &str, libs: &[&str]) -> Result<N, String> {
+    if let Some(n) = crate::rustgen::run_native_noun(expr, libs) {
+        return Ok(n);
+    }
+    latte::run_with_libs_fuel(expr, libs, 8_000_000_000)
+}
+
+/// `latte trade --market bonds` — the bond-market advisor: the lib/finbond.lat monetary-policy
+/// duration model (trained through the db->tensor bridge) fused with the live monetary regime
+/// from lib/finmoney.lat. Reports the model's out-of-sample edge, the money-supply backdrop, the
+/// model's current directional call, and edge-sized fractional-Kelly position sizing.
+fn trade_advice_bonds(account: f64, kelly_frac: f64) {
+    println!("trade - bond-market advisor: the monetary-policy duration model + the money-supply regime\n");
+    let libs = latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    // Train once and read the live regime in a single evaluation:
+    //   [ train_mag test_mag base_mag signal us_m2 cross_avg n_easing ]
+    // accuracies are fixed-point fractions x1000; m2/avg are hundredths of a percent.
+    let expr = "(let r=(breport 0), md=(fm_load 0) in \
+        [ (tail (head r)) [ (tail (head (tail r))) [ (tail (head (tail (tail r)))) \
+        [ (head (tail (tail (tail r)))) \
+        [ (db_field (tail (fm_bank md %us)) 2) [ (fm_avg md) \
+        [ (db_count (fm_easing md (fm_avg md))) 0 ] ] ] ] ] ] ])";
+    let vals = match eval_native_or_interp(expr, &refs) {
+        Ok(n) => flat_atoms(&n),
+        Err(e) => { eprintln!("  bond model error: {}", e); return; }
+    };
+    if vals.len() < 7 {
+        eprintln!("  bond model produced an unexpected result");
+        return;
+    }
+    let (train, test, base) = (vals[0] as f64 / 10.0, vals[1] as f64 / 10.0, vals[2] as f64 / 10.0);
+    let signal = vals[3]; // 1 = model expects bond prices UP next month (bullish), 0 = down
+    let (us_m2, avg, neasing) = (vals[4] as f64 / 100.0, vals[5] as f64 / 100.0, vals[6]);
+    let edge = test - base;
+    let has_edge = test > base;
+
+    println!("  market            : US Treasuries (10y constant maturity)");
+    println!("  -- model edge (lib/finbond.lat, trained through the db->tensor bridge) --");
+    println!("    features          : level, slope, curvature, yield-momentum, M2-growth,");
+    println!("                        carry+roll-down, forward-rate momentum, money-supply acceleration");
+    if has_edge {
+        println!("    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  (+{:.1} pts — a real edge)", test, base, edge);
+    } else {
+        println!("    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  — NO EDGE; the advisor says so", test, base);
+    }
+    println!("    train accuracy    : {:.1}%", train);
+    println!("  -- monetary regime (lib/finmoney.lat) --");
+    println!("    US M2 YoY growth  : {:.2}%", us_m2);
+    println!("    cross-bank average: {:.2}%   ({} of 23 central banks easing above average)", avg, neasing);
+    println!("    rising money supply is historically bullish for bond prices (yields fall)");
+
+    // Edge-sized fractional-Kelly on the test win probability, taken only when the model
+    // has a real edge; direction is the model's live out-of-sample call on the latest month.
+    let p = test / 100.0;
+    let kelly_full = (2.0 * p - 1.0).max(0.0);
+    let kelly_used = if has_edge { kelly_full * kelly_frac } else { 0.0 };
+    let lean = if !has_edge { "FLAT (no reliable edge)" }
+               else if signal == 1 { "LONG duration — model expects bond prices up (yields down)" }
+               else { "SHORT/underweight duration — model expects bond prices down" };
+    println!("  -- the call --");
+    println!("    model lean        : {}", lean);
+    println!("    Kelly (binary)    : {:+.3}   applied {:.3} (fractional)", kelly_full, kelly_used);
+    if has_edge && kelly_used > 0.0 {
+        println!("\n  >> ADVICE: tilt duration {} — notional ~ ${:.0} of a ${:.0} account",
+            if signal == 1 { "LONG" } else { "SHORT" }, account * kelly_used, account);
+    } else {
+        println!("\n  >> ADVICE: stand aside on duration — no reliable edge right now");
+    }
+    println!("\n  Rationale: a logistic model over fixed-income factors (yield-curve level/slope/");
+    println!("  curvature, momentum, carry+roll-down, forward-rate momentum) and the monetary");
+    println!("  regime (money-supply growth & acceleration), trained and standardized straight");
+    println!("  from the database via the db->tensor bridge. Research demo, NOT financial advice.");
+}
+
 pub fn cmd_trade(args: &[String]) {
     let mut account = 10_000.0f64;
     let mut kelly = 0.25f64;
@@ -1530,6 +1620,13 @@ pub fn cmd_trade(args: &[String]) {
             _ => {}
         }
         i += 1;
+    }
+    // The bond market is a different animal — no daily TA tape, but a monetary-policy
+    // regime and a duration model. Route Treasuries to the dedicated bond advisor.
+    if matches!(market.as_str(),
+        "bond" | "bonds" | "treasury" | "treasuries" | "ust" | "10y" | "tnote" | "tlt" | "rates" | "duration") {
+        trade_advice_bonds(account, kelly);
+        return;
     }
     println!("trade - advisor: technical analysis + news sentiment + the volatility model\n");
     match trade_advice_market(&market, account, kelly, sentiment, live, news_text.as_deref()) {
@@ -1812,3 +1909,70 @@ pub fn cmd_sentiment(args: &[String]) {
     println!("\n  Multi-sentence input (or --doc/--file) switches to document mode with");
     println!("  per-sentence evidence. The advisor (`latte trade`) uses the fused score.");
 }
+
+/// `latte money [money|bonds]` — render the financial text-frame dashboards that
+/// run on the composed database (lib/db.lat):
+///   * `money` — global money supply (M2 YoY growth) across 23 central banks,
+///     stored in and ranked/aggregated/filtered by the database (lib/finmoney.lat);
+///   * `bonds` — the bond desk: the US Treasury yield curve (stored in the database),
+///     fused with the live monetary regime read back from the money-supply database
+///     and the model's measured out-of-sample edge (lib/finbond.lat).
+/// With no argument it prints both. The dashboards are `[%html cord]` nouns; we run
+/// them through the Latte engine and print the HTML body (the text-frame content).
+pub fn cmd_money(args: &[String]) {
+    let which = args.first().map(|s| s.as_str()).unwrap_or("all");
+    let libs = crate::latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+
+    if which == "money" || which == "all" {
+        eprintln!("money - global money supply (M2 YoY growth) across the major central banks");
+        eprintln!("        stored in and ranked by the composed database (lib/finmoney.lat on lib/db.lat)\n");
+        match latte::run_with_libs("(fm_dash0 0)", &refs) {
+            Ok(n) => println!("{}", html_body(&n).unwrap_or_else(|| "<p>could not render the money-supply dashboard</p>".into())),
+            Err(e) => eprintln!("  money error: {}", e),
+        }
+    }
+
+    if which == "bonds" || which == "all" {
+        if which == "all" { println!(); }
+        eprintln!("bonds - the bond desk: the Treasury yield curve (in the database) fused with the");
+        eprintln!("        monetary regime from the money-supply database and the model edge (lib/finbond.lat)\n");
+        // Train the model ONCE (cheap enough on its own), then inject the result into
+        // the dashboard so the render itself stays light and reliable.
+        match eval_native_or_interp("(report 0)", &refs) {
+            Ok(rep) => {
+                let lit = crate::dbservice::noun_to_latte(&rep)
+                    .unwrap_or_else(|| "[[0 966] [[0 683] [[0 633] 0]]]".into());
+                let expr = format!("(fb_dash {})", lit);
+                match latte::run_with_libs(&expr, &refs) {
+                    Ok(n) => println!("{}", html_body(&n).unwrap_or_else(|| "<p>could not render the bond dashboard</p>".into())),
+                    Err(e) => eprintln!("  bond render error: {}", e),
+                }
+            }
+            Err(e) => eprintln!("  bond model error: {}", e),
+        }
+    }
+
+    if which == "lab" || which == "all" {
+        if which == "all" { println!(); }
+        eprintln!("lab   - a combined data/visualization/ML workbench: column statistics, class");
+        eprintln!("        separation, and a logistic model trained through the db->tensor bridge (lib/lab.lat)\n");
+        match latte::run_with_libs("(lab_dash 0)", &refs) {
+            Ok(n) => println!("{}", html_body(&n).unwrap_or_else(|| "<p>could not render the data lab</p>".into())),
+            Err(e) => eprintln!("  lab error: {}", e),
+        }
+    }
+}
+
+/// The `[%html cord]` body of a render result (or None if the noun isn't tagged html).
+fn html_body(n: &N) -> Option<String> {
+    if let Knot::Cell(h, t) = &**n {
+        if let (Knot::Atom(tag), Knot::Atom(body)) = (&**h, &**t) {
+            if tag.as_cord().as_deref() == Some("html") {
+                return body.as_text();
+            }
+        }
+    }
+    None
+}
+

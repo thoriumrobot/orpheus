@@ -19,7 +19,9 @@ core tensor
   :: reinterpret the same data under a new shape
   treshape = fn [t newshape] -> [ newshape (tdata t) ]
 
-  :: row-major flat offset of an index tuple under a shape
+  :: row-major flat offset of an index tuple under a shape. Horner-style: fold the
+  :: index tuple left, acc = acc*dim + idx at each axis, so [i j] under shape [m n]
+  :: lands at i*n + j.
   flatindex = fn [shape idxs] ->
                 loop with [sh = shape, ix = idxs, acc = 0] :
                   if (sh == 0) then acc
@@ -52,11 +54,16 @@ core tensor
   tscale = fn [t k] -> (tmap t (fn [x] -> (nmul x k)))
 
   :: 2-D matrix multiply: [m k] · [k n] -> [m n]
+  :: mmcell computes ONE output cell C[i,j] = sum over l<k of A[i,l]·B[l,j], using the
+  :: signed fixed-point nadd/nmul and tget's [row [col 0]] index tuples.
   mmcell = fn [a b i j k] ->
              loop with [l = 0, acc = [0 0]] :
                if (l == k) then acc
                else again(+(l), (nadd acc (nmul (tget a [i [l 0]]) (tget b [l [j 0]]))))
              end
+  :: tmatmul walks the m·n output cells as one flat counter p; (div p n, mod p n)
+  :: recovers the (row, col) for each cell, so no nested loop is needed. The result is
+  :: tagged with its [m [n 0]] shape.
   tmatmul = fn [a b] ->
               let m = (nth (tshape a) 0) in
               let k = (nth (tshape a) 1) in

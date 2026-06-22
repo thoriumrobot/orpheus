@@ -28,6 +28,11 @@ time by calling <code>SCArs.evolve</code>, the sound-change applier, which deriv
 modern <span class="heart">Heart Speech</span> form from its ancient Solar Speech
 ancestor. The page is written in <em>Facet</em>, Orpheus' markup language.</p>
 
+<p>For a hands-on tour of the environment, visit
+<a href="/tools"><b>the interactive tools page</b></a> — every system tool, from the
+sound-change applier to the Latte language, SVG charts, the market-data lab, dates, sentiment
+and SHA3 hashing, is a live widget you can drive right in the browser.</p>
+
 <h2>Core vocabulary</h2>
 <table>
   <tr><th>Solar Speech</th><th>Heart Speech (via SCArs)</th></tr>

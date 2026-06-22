@@ -500,3 +500,4 @@ mod tests {
         assert_eq!(format_checked(src), src);
     }
 }
+

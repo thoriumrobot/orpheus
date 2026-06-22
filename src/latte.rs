@@ -814,6 +814,17 @@ pub const STATS_LAT: &str = include_str!("../lib/stats.lat");
 pub const SYMBOLS_LAT: &str = include_str!("../lib/symbols.lat");
 /// Financial/trading price data stored in the composed database, read back for visualization (an SVG sparkline) and training (a lag-1 regression), via `import findb`.
 pub const FINDB_LAT: &str = include_str!("../lib/findb.lat");
+/// Practical financial machine learning for the BOND market — yield-curve level/slope/curvature, momentum/carry, a duration-based total-return model, and an M2 money-supply (stimulus) feature, via `import finbond`.
+pub const FINBOND_LAT: &str = include_str!("../lib/finbond.lat");
+/// Global money supply (M2 year-over-year growth) across the major central banks, stored in and ranked/aggregated/filtered by lib/db.lat, with a text-frame dashboard, via `import finmoney`.
+pub const FINMONEY_LAT: &str = include_str!("../lib/finmoney.lat");
+pub const LAB_LAT: &str = include_str!("../lib/lab.lat");
+/// SCArs grapheme tokeniser (longest-match over a phoneme inventory, codepoint-stepped), via `import scatok`.
+pub const SCATOK_LAT: &str = include_str!("../lib/scatok.lat");
+/// SCArs rule-string compiler (class declarations, category correspondence, wildcard/boundary/context parsing) plus a private matching engine, via `import scaparse`.
+pub const SCAPARSE_LAT: &str = include_str!("../lib/scaparse.lat");
+/// SCArs Ligurian prosodic passes (Phase VI stressed-vowel breaking, Phase VII nasalisation) and a full `evolve`, via `import scapros`.
+pub const SCAPROS_LAT: &str = include_str!("../lib/scapros.lat");
 /// The five algorithm-design paradigms from Skiena's "The Algorithm Design Manual" (divide & conquer, dynamic programming, greedy, backtracking, graph traversal), via `import algo`.
 pub const ALGO_LAT: &str = include_str!("../lib/algo.lat");
 /// Interview data structures and coding patterns (two pointers, sliding window, fast & slow, stack, prefix sums, heap, BST, trie, union-find), via `import dsa`.
@@ -894,6 +905,12 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "stats" => Some(STATS_LAT),
         "symbols" => Some(SYMBOLS_LAT),
         "findb" => Some(FINDB_LAT),
+        "finbond" => Some(FINBOND_LAT),
+        "finmoney" => Some(FINMONEY_LAT),
+        "lab" => Some(LAB_LAT),
+        "scatok" => Some(SCATOK_LAT),
+        "scaparse" => Some(SCAPARSE_LAT),
+        "scapros" => Some(SCAPROS_LAT),
         "algo" => Some(ALGO_LAT),
         "dsa" => Some(DSA_LAT),
         "wgraph" => Some(WGRAPH_LAT),
@@ -924,9 +941,51 @@ fn runtime_libs() -> &'static std::sync::Mutex<std::collections::HashMap<String,
 }
 /// Register (or replace) a library by name at run time. Afterwards `import NAME` resolves to it.
 pub fn register_runtime_lib(name: &str, src: &str) {
+    {
+        let libs = runtime_libs().lock().unwrap();
+        if libs.get(name).map(|s| s.as_str()) == Some(src) {
+            return; // already registered with identical content — avoid global churn
+        }
+    }
     runtime_libs().lock().unwrap().insert(name.to_string(), src.to_string());
-    // a changed library invalidates the compiled-library cache
+    // a changed library invalidates the compiled-library cache and bumps the lib generation
     gather_cache().lock().unwrap().clear();
+    bump_lib_generation();
+}
+
+/// Monotonic counter bumped whenever a library's *content* changes (registration/replacement).
+/// In-process caches keyed by library NAMES (rather than content) consult this to know when a
+/// cached compilation may be stale.
+static LIB_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn bump_lib_generation() {
+    LIB_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+pub fn lib_generation() -> u64 {
+    LIB_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+// Private libraries: resolvable by `resolve_lib` (so the native backend can compile a module's
+// arms), but DELIBERATELY excluded from `all_libs()`/`runtime_lib_names()`. Agent `poke` modules
+// (counter, todo, lexicon, forge, chessgame, …) register here: they must be compilable, but they
+// must NOT be merged into the shared `all_libs()` namespace, where their arms (e.g. a `todo`/v2
+// counter `add` with no `%add` jet) would shadow std arithmetic and break every consumer that
+// links "all libs" (the native/interpreter fuzzer, the SCA, the GUI's all-libs eval).
+static PRIVATE_LIBS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::OnceLock::new();
+fn private_libs() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    PRIVATE_LIBS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+/// Register a library resolvable for compilation but invisible to `all_libs()`. Idempotent.
+pub fn register_private_lib(name: &str, src: &str) {
+    {
+        let libs = private_libs().lock().unwrap();
+        if libs.get(name).map(|s| s.as_str()) == Some(src) {
+            return;
+        }
+    }
+    private_libs().lock().unwrap().insert(name.to_string(), src.to_string());
+    gather_cache().lock().unwrap().clear();
+    bump_lib_generation();
 }
 
 // Compiled-library cache: each library's arms are gathered (parsed + imports resolved) once
@@ -986,7 +1045,7 @@ pub fn all_libs() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "finbond", "finmoney", "lab", "scatok", "scaparse", "scapros", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1000,6 +1059,9 @@ pub fn all_libs() -> Vec<String> {
 /// Latte source whose `core NAME` names it, compiled into the running system.
 fn resolve_lib(name: &str) -> Option<String> {
     if let Some(s) = runtime_libs().lock().unwrap().get(name) {
+        return Some(s.clone());
+    }
+    if let Some(s) = private_libs().lock().unwrap().get(name) {
         return Some(s.clone());
     }
     if let Some(s) = builtin_lib(name) {
@@ -1099,7 +1161,7 @@ pub fn builtin_lib_names() -> Vec<String> {
         "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
-        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
+        "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "finbond", "finmoney", "lab", "scatok", "scaparse", "scapros", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1220,6 +1282,16 @@ fn split_imports(src: &str) -> (Vec<String>, String) {
         rest_lines.push(line);
     }
     (imports, rest_lines.join("\n"))
+}
+
+/// The `import` names declared by a module source (its library dependencies).
+pub fn module_imports(src: &str) -> Vec<String> {
+    split_imports(src).0
+}
+
+/// The `core NAME` declared by a module source, if any.
+pub fn module_core_name(src: &str) -> Option<String> {
+    find_core_name(src)
 }
 
 /// Evaluate a bare expression with the given built-in libraries linked in scope.
@@ -1358,12 +1430,24 @@ pub fn gather_program(
     expr_src: &str,
     libs: &[&str],
 ) -> Result<Vec<(String, Vec<String>, Ast)>, String> {
+    gather_program_in(expr_src, libs, "_")
+}
+
+/// Like `gather_program`, but `__main` takes a named parameter so the expression can
+/// reference a value supplied at run time (rather than baking every input into the
+/// program). The native backend uses this to compile a program ONCE and feed it many
+/// inputs over stdin, instead of a fresh build per distinct input.
+pub fn gather_program_in(
+    expr_src: &str,
+    libs: &[&str],
+    param: &str,
+) -> Result<Vec<(String, Vec<String>, Ast)>, String> {
     let ast = parse(expr_src)?;
     let mut lists: Vec<Vec<Arm>> = Vec::new();
     for lib in libs {
         lists.push(gather_lib(lib)?);
     }
-    lists.push(vec![("__main".to_string(), vec!["_".to_string()], ast)]);
+    lists.push(vec![("__main".to_string(), vec![param.to_string()], ast)]);
     Ok(merge_arms(lists))
 }
 
@@ -1382,6 +1466,18 @@ pub fn compile_library_program(libs: &[&str]) -> Result<(N, Vec<(String, u128)>)
 
 /// Invoke arm `name` of a compiled program on the argument tuple `args`.
 pub fn call_arm(core: &N, axes: &[(String, u128)], name: &str, args: N) -> Result<N, String> {
+    call_arm_fuel(core, axes, name, args, crate::loom::DEFAULT_FUEL)
+}
+
+/// Like `call_arm`, but with an explicit fuel budget (the SCArs Latte pipeline
+/// recompiles a large rule set per call and needs more than the default).
+pub fn call_arm_fuel(
+    core: &N,
+    axes: &[(String, u128)],
+    name: &str,
+    args: N,
+    fuel: u64,
+) -> Result<N, String> {
     let axis = axes
         .iter()
         .find(|(n, _)| n == name)
@@ -1391,7 +1487,7 @@ pub fn call_arm(core: &N, axes: &[(String, u128)], name: &str, args: N) -> Resul
         .map_err(|e| format!("{:?}", e))?;
     let armf = crate::loom::slot(&crate::atom::Atom::from_u128(axis), &core2)
         .map_err(|e| format!("{:?}", e))?;
-    crate::loom::tar(&core2, &armf).map_err(|e| format!("{:?}", e))
+    crate::loom::tar_with_fuel(&core2, &armf, fuel).map_err(|e| format!("{:?}", e))
 }
 /// self-hosting REPL). `defs` is the body of a `core` (zero or more `name = …` arms);
 /// the expression may reference those arms and the std/mold/plan libraries.

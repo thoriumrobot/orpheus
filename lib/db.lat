@@ -30,6 +30,7 @@
 :: [ts value] pairs, newest first; value is a record or the atom %tomb (a deletion).
 :: ===========================================================================
 import std
+import num
 import dhash
 import lsm
 import bloom
@@ -53,7 +54,7 @@ core db
   :: open a database: index field `idxtag`, evolve reads through `rschema` (0 = none),
   :: LSM flush threshold `thresh`.
   db_open = fn [idxtag rschema thresh] ->
-    (db_make (lsm_new thresh) (lsm_new thresh) (bloom_make 1024 4) idxtag rschema 0 0)
+    (db_make (lsm_new thresh) [ [ idxtag (lsm_new thresh) ] 0 ] (bloom_make 1024 4) idxtag rschema 0 0)
 
   :: ---- MVCC version chains (Ch.7) ------------------------------------------
   :: a chain is [ [ts val] .. ] newest first. The value visible at snapshot `ts` is
@@ -78,19 +79,37 @@ core db
   :: the latest commit timestamp for a key (0 if absent)
   db_keyts = fn [d pk] -> (chain_ts (db_chain d pk))
 
-  :: secondary-index posting lists: indexed field value -> list of primary keys
+  :: secondary-index posting lists for ONE field's LSM: a field value -> list of pks
   db_idxget = fn [index fv] -> (db_unwrap (lsm_get index fv))
   db_addpk  = fn [pks pk] -> if ((member pk pks) == 0) then pks else [ pk pks ]
   db_delpk  = fn [pks pk] -> (filter (fn [x] -> if (x == pk) then 1 else 0) pks)
   db_idxadd = fn [index fv pk] -> (lsm_put index fv (db_addpk (db_idxget index fv) pk))
   db_idxdel = fn [index fv pk] -> (lsm_put index fv (db_delpk (db_idxget index fv) pk))
-  :: move `pk` from its old indexed value's posting list to the new one. Deleting a
-  :: row (newrec %tomb) only removes it; a new row (oldrec %none) only adds it.
-  db_reindex = fn [index idxtag pk oldrec newrec] ->
-    let oldfv = if (or (oldrec == %none) (oldrec == %tomb)) then %none else (db_field oldrec idxtag),
-        newfv = if (or (newrec == %none) (newrec == %tomb)) then %none else (db_field newrec idxtag),
-        i1 = if (oldfv == %none) then index else (db_idxdel index oldfv pk) in
-    if (newfv == %none) then i1 else (db_idxadd i1 newfv pk)
+
+  :: ---- the per-field index MAP --------------------------------------------
+  :: the `index` slot is an assoc list of [field lsm]: a database can carry SEVERAL
+  :: secondary indexes, one posting-list LSM per indexed field. The primary index is on
+  :: the field `idxtag` (always present); more are added with db_addindex.
+  db_imapget = fn [imap field] ->
+    (foldl (fn [acc e] -> if ((head e) == field) then (tail e) else acc) 0 imap)
+  db_imapset = fn [imap field lsm] ->
+    (map (fn [e] -> if ((head e) == field) then [ field lsm ] else e) imap)
+  db_imapfields = fn [imap] -> (map (fn [e] -> (head e)) imap)
+  db_imaphas    = fn [imap field] -> (member field (db_imapfields imap))   :: 0 if indexed
+  db_imapcompact= fn [imap] -> (map (fn [e] -> [ (head e) (lsm_compact (tail e)) ]) imap)
+
+  :: reindex `pk` in ONE field's index for a change oldrec -> newrec: drop the old
+  :: posting, add the new one (%none/%tomb skips that side).
+  db_reindex1 = fn [imap field pk oldrec newrec] ->
+    let lsm   = (db_imapget imap field),
+        oldfv = if (or (oldrec == %none) (oldrec == %tomb)) then %none else (db_field oldrec field),
+        newfv = if (or (newrec == %none) (newrec == %tomb)) then %none else (db_field newrec field),
+        l1    = if (oldfv == %none) then lsm else (db_idxdel lsm oldfv pk),
+        l2    = if (newfv == %none) then l1  else (db_idxadd l1 newfv pk) in
+    (db_imapset imap field l2)
+  :: reindex `pk` across EVERY indexed field (the maintenance every write performs)
+  db_reindex = fn [imap pk oldrec newrec] ->
+    (foldl (fn [m field] -> (db_reindex1 m field pk oldrec newrec)) imap (db_imapfields imap))
 
   :: ---- the core state transition (no logging) ------------------------------
   :: append a new version to `pk` at timestamp `ts`, refresh the Bloom filter, and
@@ -101,7 +120,7 @@ core db
         storeval = if (op == %put) then val else %tomb,
         store2 = (lsm_put (db_store d) pk [ [ts storeval] oldchain ]),
         bloom2 = (bloom_add (db_bloom d) pk),
-        index2 = (db_reindex (db_index d) (db_idxtag d) pk oldrec storeval) in
+        index2 = (db_reindex (db_index d) pk oldrec storeval) in
     (db_make store2 index2 bloom2 (db_idxtag d) (db_rschema d) ts (db_wal d))
 
   :: ---- durability: write-ahead log (Ch.3) ----------------------------------
@@ -145,16 +164,184 @@ core db
   :: the full version history of a key (newest first) — MVCC made visible
   db_history = fn [d pk] -> (db_chain d pk)
 
-  :: secondary-index query: every live record whose indexed field equals `fv`
-  db_query = fn [d fv] ->
-    (map (fn [pk] -> [ pk (db_get d pk) ]) (db_idxget (db_index d) fv))
+  :: secondary-index query on a SPECIFIC indexed field: every live record whose `field` = fv
+  db_queryon = fn [d field fv] ->
+    (map (fn [pk] -> [ pk (db_get d pk) ]) (db_idxget (db_imapget (db_index d) field) fv))
+  :: secondary-index query on the PRIMARY field (idxtag): every live record whose value = fv
+  db_query = fn [d fv] -> (db_queryon d (db_idxtag d) fv)
+  :: render the primary keys of a result set as a space-separated cord (for the CLI)
+  db_keytext = fn [es] -> (catall (map (fn [e] -> (catall [ (head e) " " 0 ])) es))
   :: primary-key range scan [lo, hi], each key resolved to its visible record
   db_range = fn [d lo hi] ->
     (map (fn [e] -> [ (head e) (db_get d (head e)) ]) (lsm_range (db_store d) lo hi))
   :: merge LSM segments in the primary store and the secondary index
   db_compact = fn [d] ->
-    (db_make (lsm_compact (db_store d)) (lsm_compact (db_index d)) (db_bloom d)
+    (db_make (lsm_compact (db_store d)) (db_imapcompact (db_index d)) (db_bloom d)
              (db_idxtag d) (db_rschema d) (db_ts d) (db_wal d))
+
+  :: ---- query / analytics layer (relational-style, executed as compiled Latte) ---
+  :: These compose over the storage engine: every operator takes the ENTRY LIST that
+  :: db_query / db_range / db_scan produce (each entry [pk [%rec fields]]) and does
+  :: scan -> filter -> aggregate -> group -> order. Because db_pluck projects a field
+  :: into a plain numeric list, the result drops straight into the statistics library
+  :: (lib/stats.lat), the plotter (lib/plot.lat), and ML training — the same path
+  :: findb.lat hand-rolls for one series, generalized to any database and any field.
+
+  :: every live record with primary key in [lo,hi] — the scan that feeds analytics
+  db_scan  = fn [d lo hi] -> (db_range d lo hi)
+  :: the value of field `tag` in an entry
+  db_fieldof = fn [e tag] -> (db_field (db_rec e) tag)
+  :: keep entries satisfying predicate `p` (Latte convention: p returns 0 to KEEP)
+  db_where = fn [p es] -> (filter p es)
+  :: project field `tag` of every entry into a plain list — the bridge to stats/plot/ML
+  db_pluck = fn [tag es] -> (map (fn [e] -> (db_fieldof e tag)) es)
+  :: same, but lifted to signed fixed-point (num.lat) — the bridge to the statistics and
+  :: ML libraries, which compute on [sign mag] values (st_mean, st_std, regression, ...)
+  db_npluck = fn [tag es] -> (map (fn [e] -> (nint (db_fieldof e tag))) es)
+
+  :: ---- reductions over a plain value list (the kernel of the column aggregates) -------
+  :: These fold a list of values the caller has already projected (e.g. with db_pluck). They
+  :: are the single source of truth for sum/min/max, so anything holding a column — including
+  :: a chart that needs the extent of a series for axis scaling — reduces it through the DB
+  :: rather than re-implementing the fold.
+  db_lsum = fn [xs] -> (foldl (fn [a v] -> (add a v)) 0 xs)
+  db_lmin = fn [xs] -> (foldl (fn [a v] -> (min a v)) (head xs) (tail xs))
+  db_lmax = fn [xs] -> (foldl (fn [a v] -> (max a v)) (head xs) (tail xs))
+
+  :: aggregations over field `tag` of an entry list (integer fields)
+  db_count = fn [es] -> (len es)
+  db_sum   = fn [tag es] -> (db_lsum (db_pluck tag es))
+  db_min   = fn [tag es] -> (db_lmin (db_pluck tag es))
+  db_max   = fn [tag es] -> (db_lmax (db_pluck tag es))
+  db_avg   = fn [tag es] -> (div (db_sum tag es) (max 1 (db_count es)))
+
+  :: ---- column STATISTICS over a numeric field (signed fixed-point, num.lat) ------
+  :: The database computes the mean / variance / standard deviation of a field itself, so
+  :: the ML pipeline can standardize features without leaving the store.  Population
+  :: variance (matches lib/stats.lat's st_var/st_std), built on db_npluck + num.lat.
+  db_nmean = fn [tag es] -> (nmean (db_npluck tag es))
+  db_nvar  = fn [tag es] -> let xs = (db_npluck tag es), m = (nmean xs) in
+                            (nmean (map (fn [x] -> (nmul (nsub x m) (nsub x m))) xs))
+  db_nstd  = fn [tag es] -> (nsqrt (db_nvar tag es))
+  :: per-field [mean std] for a list of fields — the standardization statistics, computed
+  :: column-by-column straight from the records (no transpose needed).
+  db_colstats = fn [fields es] -> (map (fn [f] -> [ (db_nmean f es) (db_nstd f es) ]) fields)
+
+  :: ---- DB <-> TENSOR / design-matrix bridge -------------------------------------
+  :: Project a record's chosen fields to a fixed-point feature ROW; a set of records to a
+  :: design MATRIX (a list of feature rows — exactly what lib/fin.lat's regression eats);
+  :: and to a TENSOR [ [rows cols] flatdata ] that lib/tensor.lat operates on (tmatmul,
+  :: tdot, tscale...).  Field values are lifted to [sign mag] x1000, the numeric
+  :: representation shared by the statistics and tensor libraries.
+  db_frow   = fn [fields e]  -> (map (fn [f] -> (nint (db_fieldof e f))) fields)
+  db_matrix = fn [fields es] -> (map (fn [e] -> (db_frow fields e)) es)
+  db_tensor = fn [fields es] ->
+    [ [ (len es) [ (len fields) 0 ] ]
+      (foldl (fn [acc e] -> (append acc (db_frow fields e))) 0 es) ]
+  :: standardize one design-matrix row against per-column [mean std] (z-score; a zero-std
+  :: column passes through mean-centred, matching st_zscore).
+  db_zrow = fn [stats row] ->
+    loop with [ss = stats, rs = row, out = 0] :
+      if (ss == 0) then (reverse out)
+      else let ms = (head ss), x = (head rs), m = (head ms), s = (tail ms) in
+        again((tail ss), (tail rs),
+              [ (if (nlt s [0 1]) then (nsub x m) else (ndiv (nsub x m) s)) out ])
+    end
+  :: the standardized design matrix straight from the database: project + z-score in one
+  :: step against the (train-only) column statistics.
+  db_zmatrix = fn [fields es stats] -> (map (fn [r] -> (db_zrow stats r)) (db_matrix fields es))
+
+  :: ---- ML conveniences: the walk-forward split and train-only standardization ---------
+  :: split a record list into [train test] at position `n` (the first n are train).
+  db_split  = fn [n es] -> [ (take n es) [ (drop n es) 0 ] ]
+  :: the standardized design matrix using statistics fit ON THE TRAINING ROWS ONLY (the first
+  :: `split` records) — the correct discipline (no test-set leakage), done entirely in the
+  :: database. This is the one call that turns stored records into a model-ready feature matrix.
+  db_ztrain = fn [fields es split] -> (db_zmatrix fields es (db_colstats fields (take split es)))
+
+  :: order entries by field `tag` (ascending, then a descending form) and take the top n
+  db_order  = fn [tag es] -> (sortby (fn [a b] -> (lte (db_fieldof a tag) (db_fieldof b tag))) es)
+  db_orderd = fn [tag es] -> (sortby (fn [a b] -> (lte (db_fieldof b tag) (db_fieldof a tag))) es)
+  db_topn   = fn [n tag es] -> (take n (db_orderd tag es))
+
+  :: GROUP BY field `gtag`: distinct group values (first-seen order), then bucket
+  db_distinct = fn [tag es] ->
+    (foldl (fn [acc e] -> let v = (db_fieldof e tag) in
+             if ((member v acc) == 0) then acc else (append acc [ v 0 ])) 0 es)
+  db_group1 = fn [tag v es] -> (filter (fn [e] -> ((db_fieldof e tag) == v)) es)
+  db_groups = fn [tag es] -> (map (fn [v] -> [ v (db_group1 tag v es) ]) (db_distinct tag es))
+  :: group by `gtag`, summing field `atag` per group -> list of [groupval total]
+  db_groupsum = fn [gtag atag es] ->
+    (map (fn [g] -> [ (head g) (db_sum atag (tail g)) ]) (db_groups gtag es))
+  :: group by `gtag`, averaging field `atag` per group -> list of [groupval mean]
+  db_groupavg = fn [gtag atag es] ->
+    (map (fn [g] -> [ (head g) (db_avg atag (tail g)) ]) (db_groups gtag es))
+
+  :: GROUP BY / SUM over the host's explicit live-key list (used by the durable
+  :: database, whose arbitrary keys don't form a cord range): each key resolved to
+  :: its visible record, grouped on field `gtag`, summing field `atag`.
+  db_aggkeys = fn [d ks gtag atag] -> (db_groupsum gtag atag (map (fn [k] -> (db_entryk d k)) ks))
+  db_aggrow  = fn [r] -> (catall [ (head r) ": " (numtext (tail r)) "\n" 0 ])
+  db_aggtext = fn [d ks gtag atag] -> (catall (map (fn [r] -> (db_aggrow r)) (db_aggkeys d ks gtag atag)))
+
+  :: ---- index-aware query planner & relational ops --------------------------
+  :: Planning (use the index when possible), range-on-an-indexed-field, compound
+  :: predicates, and joins, layered over the scan/filter/aggregate operators above.
+
+  :: EQUALITY on `field`: probe a secondary index when one exists on `field` (the primary
+  :: or any added with db_addindex), else fall back to a scan + filter — the db picks the plan.
+  db_select = fn [d field value lo hi] ->
+    if (db_imaphas (db_index d) field)
+      then (db_queryon d field value)
+      else (db_where (fn [e] -> ((db_fieldof e field) == value)) (db_scan d lo hi))
+  :: RANGE on an indexed `field`, via that field's sorted index (cord collation); the
+  :: primary-field form keeps the old name. Numeric fields use db_between (see below).
+  db_idxrangeon = fn [d field lo hi] ->
+    (foldl (fn [acc fe] -> (append acc (db_queryon d field (head fe)))) 0 (lsm_range (db_imapget (db_index d) field) lo hi))
+  db_idxrange = fn [d lo hi] -> (db_idxrangeon d (db_idxtag d) lo hi)
+  :: add a secondary index on `field`, backfilling it from the rows already stored, so
+  :: queries on `field` become index-probes instead of scans. Idempotent.
+  db_addindex = fn [d field] ->
+    if (db_imaphas (db_index d) field) then d
+    else
+      let imap0 = (append (db_index d) [ [ field (lsm_new 256) ] 0 ]),
+          live  = (lsm_live (db_store d)) in
+      let imap1 = (foldl (fn [m e] ->
+            let pk = (head e), rec = (chain_at (db_chain d pk) (db_ts d)) in
+            (db_reindex1 m field pk %none rec)) imap0 live) in
+      (db_make (db_store d) imap1 (db_bloom d) (db_idxtag d) (db_rschema d) (db_ts d) (db_wal d))
+  :: which fields currently have a secondary index
+  db_indexes = fn [d] -> (db_imapfields (db_index d))
+  :: NUMERIC range filter on field `f`, keeping entries with lo <= value <= hi. Composes
+  :: after a scan (e.g. db_scan); not index-accelerated, because the index collation is
+  :: byte-wise, not numeric — the honest cost of ranging a field the index doesn't order.
+  db_between = fn [f lo hi es] ->
+    (db_where (fn [e] -> let v = (db_fieldof e f) in
+       (if (lt v lo) then 1 else (if (lt hi v) then 1 else 0))) es)
+
+  :: primary key of an entry
+  db_pk = fn [e] -> (head e)
+  :: AND / OR of two result sets, by primary key (compose predicates)
+  db_and = fn [xs ys] -> let yk = (map (fn [e] -> (db_pk e)) ys) in
+    (filter (fn [e] -> (member (db_pk e) yk)) xs)
+  db_or  = fn [xs ys] -> let xk = (map (fn [e] -> (db_pk e)) xs) in
+    (append xs (filter (fn [e] -> if ((member (db_pk e) xk) == 0) then 1 else 0) ys))
+  :: equi-JOIN of two result sets: every (x,y) with x.fx == y.fy, emitted as [x y]
+  db_join = fn [xs fx ys fy] ->
+    (foldl (fn [acc x] ->
+       (append acc (map (fn [y] -> [ x y ])
+                        (filter (fn [y] -> ((db_fieldof y fy) == (db_fieldof x fx))) ys))))
+     0 xs)
+
+  :: a numeric fixture for analytics demos: four orders, region in field 1 (the
+  :: indexed field — a cord, so the index's range scan is in the right order) and
+  :: amount in field 2 (numeric, ranged with db_between since the index is cord-ordered).
+  db_orders = fn [_] ->
+    (db_put (db_put (db_put (db_put (db_open 1 0 8)
+       %o1 [ [1 %west] [ [2 100] 0 ] ])
+       %o2 [ [1 %east] [ [2 250] 0 ] ])
+       %o3 [ [1 %west] [ [2 150] 0 ] ])
+       %o4 [ [1 %east] [ [2 300] 0 ] ])
 
   :: ---- transactions and isolation levels (Ch.7) ---------------------------
   :: A transaction reads at a SNAPSHOT (a timestamp) and, at commit, the database

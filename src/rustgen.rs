@@ -7,22 +7,46 @@
 //!
 //! Optimizations applied:
 //!   * constant folding   — literal-only subexpressions are evaluated at compile time;
-//!   * native primitives  — the arithmetic/▸comparison jets lower to native Rust `u128` ops
-//!                          instead of interpreting their Latte bodies on the VM;
+//!   * native primitives  — the arithmetic/▸comparison jets lower to native Rust ops (a `u128`
+//!                          fast path, widening to bignum on demand) instead of interpreting
+//!                          their Latte bodies on the VM;
 //!   * dead-arm removal   — only arms reachable from `__main` are emitted;
 //!   * let → Rust `let`   — sharing is preserved (no recomputation);
 //!   * tail calls → loops — `loop … again(..)` becomes a real Rust `loop` with mutable state;
 //!   * HOFs stay general  — lambdas compile to reusable native closures (so `map`/`filter`/
 //!                          `foldl` and friends compile straight from their Latte definitions).
 //!
-//! Atoms are represented as `u128` with checked arithmetic. This is not a divergence from the
-//! interpreter: the interpreter's own arithmetic jets are u128-bounded too — `operands()` rejects
-//! atoms that exceed u128, and `jet_add`/`jet_sub`/`jet_mul`/`jet_div`/`jet_mod`/`jet_dec` all use
-//! checked ops that crash on overflow/underflow/zero-divisor. Anvil mirrors each of these failure
-//! modes exactly (a checked op that would crash the interpreter `panic!`s the compiled program on
-//! the same inputs), so the two agree on success values *and* on which inputs fail. The single
-//! theoretical edge is a cord/tag literal longer than 16 bytes (which cannot fit u128); every tag
-//! used anywhere in the system is at most 5 bytes, so this never arises in practice.
+//! Atoms are arbitrary-precision naturals, matching the interpreter at every width. Arithmetic
+//! keeps a `u128` fast path (the overwhelmingly common case) and falls back to base-256 bignum
+//! arithmetic — carried in the same `V::Big` little-endian byte vector used for long cords — the
+//! moment a value or result exceeds `u128`. So `add`/`sub`/`mul`/`div`/`mod`/`lt`/`inc`/`dec` agree
+//! with the interpreter for naturals of any size; in particular the database's bloom filter and
+//! hash bitset, which build values hundreds or thousands of bits wide via `shl`/`pow`/`bor`, run
+//! natively instead of overflowing `u128` and falling back. The bloom/hash hot path is powers of
+//! two (`shl 1 i`, `div … 2`), special-cased to bit/byte shifts so a wide bitset stays fast; only
+//! a non-power-of-two big divisor takes the general binary long-division path. Domain errors
+//! (overflow's cousin underflow, divide-by-zero, `dec(0)`) still `panic!` the compiled program on
+//! exactly the inputs that crash the interpreter, so the two agree on success values *and* on
+//! which inputs fail. The cord operations (`bytes`/`frombytes`/`cat`/`catall`/`bytelen`) remain
+//! jetted to byte-vector ops; `vbig` keeps the canonical split (<=16 significant bytes in `V::A`,
+//! longer in `V::Big`) so equality stays a representation compare.
+//!
+//! Identifier hygiene: Latte binders are renamed for emission when they collide with a native
+//! primitive (`sub`, `div`, …), a Rust keyword (`as`, `type`, `move`, …), or a jetted cord op —
+//! see `binder_rename` — so ordinary Latte arms like `zip2 = fn [as bs] …` compile natively
+//! instead of forcing a fallback.
+//!
+//! Build & cache: each program is compiled once by `build_native` (via `rustc`, default
+//! `opt-level=0` for fast cold starts — override with `ORPHEUS_OPT`) into a content-addressed
+//! binary under `cache_dir`, reused across runs. The cache self-bounds: `evict_to_cap` drops the
+//! least-recently-used binaries (mtime, refreshed per run) once it exceeds `cache_cap_bytes`
+//! (`ORPHEUS_CACHE_MAX`, default 512 MiB). A program may also read its input from stdin at run
+//! time, so one binary serves many inputs (see `run_native_with_input`). With `ORPHEUS_CACHE_SHARED`
+//! set, the cache is a read-through/write-back mirror of a shared store (namespaced by toolchain
+//! identity), so a program is compiled once across a fleet rather than once per host. Each binary
+//! carries a `<name>.sha` integrity sidecar (hash+size): pulls are hash-verified before install and
+//! a quick size check guards each run, so corruption or a poisoned store entry self-heals. Lifetime
+//! counters (builds/hits/pulls/failures, persisted) back `latte cache metrics`.
 
 use crate::latte::{self, Ast};
 use std::collections::{HashMap, HashSet};
@@ -38,6 +62,48 @@ fn prim_arity(name: &str) -> Option<usize> {
     }
 }
 
+/// True for any reserved Rust keyword (strict, reserved-for-future, and the 2018+
+/// additions).  A Latte binder named `as`, `type`, `move`, … is a perfectly good
+/// Latte identifier but cannot be emitted verbatim as a Rust local/parameter, so it
+/// must be alpha-renamed for the native backend just like a shadowed primitive.
+fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum" | "extern"
+            | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match"
+            | "mod" | "move" | "mut" | "pub" | "ref" | "return" | "self" | "Self"
+            | "static" | "struct" | "super" | "trait" | "true" | "type" | "unsafe"
+            | "use" | "where" | "while" | "async" | "await" | "dyn" | "abstract"
+            | "become" | "box" | "do" | "final" | "macro" | "override" | "priv"
+            | "typeof" | "unsized" | "virtual" | "yield" | "try"
+    )
+}
+
+/// A binder must be alpha-renamed for native emission if it shadows a primitive
+/// (whose name the backend emits as an operator) OR collides with a Rust keyword
+/// (which is not a legal Rust identifier).
+fn binder_rename(name: &str) -> bool {
+    prim_arity(name).is_some() || is_rust_keyword(name) || cord_jet_arity(name).is_some()
+}
+
+/// Cord operations the native backend jets to byte-vector ops instead of base-256
+/// arithmetic, so cords longer than 16 bytes (which overflow u128) work natively.
+/// Like primitives, these names are emitted directly at call sites and their binders
+/// are alpha-renamed, so a local of the same name never silently captures the jet.
+fn cord_jet_arity(name: &str) -> Option<usize> {
+    match name {
+        "bytes" | "frombytes" | "catall" | "bytelen" => Some(1),
+        "cat" => Some(2),
+        _ => None,
+    }
+}
+
+/// A name the backend handles intrinsically (an arithmetic primitive or a cord jet),
+/// rather than by emitting/reaching a library arm of that name.
+fn is_native_op(name: &str) -> bool {
+    prim_arity(name).is_some() || cord_jet_arity(name).is_some()
+}
+
 /// Alpha-rename any binder of a primitive name (add/sub/mul/div/mod/lt/dec) to a
 /// fresh non-primitive name, so the native backend — which emits those names as
 /// Rust operators and const-folds them with no scope awareness — can still compile
@@ -51,8 +117,17 @@ fn fresh(n: &str, ctr: &mut usize) -> String {
     *ctr += 1;
     f
 }
-fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize) -> Ast {
-    let go = |a: &Ast, e: &HashMap<String, String>, c: &mut usize| Box::new(unshadow(a, e, c));
+fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize, arms: &HashSet<String>) -> Ast {
+    let go = |a: &Ast, e: &HashMap<String, String>, c: &mut usize| Box::new(unshadow(a, e, c, arms));
+    // A binder must be alpha-renamed when its name is one the backend treats specially at
+    // a *use* site rather than a *binding* site: a primitive/jet (emitted as an operator), a
+    // Rust keyword (not a legal identifier), OR a top-level arm. The arm case is the subtle
+    // one: `free_vars` excludes arm names from a closure's capture set (assuming they are
+    // global references), so a local that *shadows* an arm — e.g. a parameter named `field`,
+    // which is also an arm in ui.lat — would be dropped from the capture and emit as an
+    // unbound variable. Renaming the binder makes the local a distinct name that captures
+    // normally; the shadowed arm was unreachable in that scope anyway.
+    let needs_rename = |nm: &str| binder_rename(nm) || arms.contains(nm);
     match ast {
         Ast::Var(v) => Ast::Var(env.get(v).cloned().unwrap_or_else(|| v.clone())),
         Ast::Lit(_) | Ast::Tag(_) | Ast::Text(_) | Ast::Nil => ast.clone(),
@@ -63,17 +138,23 @@ fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize) -> Ast {
         Ast::Fast(nm, e) => Ast::Fast(nm.clone(), go(e, env, ctr)),
         Ast::Eq(a, b) => Ast::Eq(go(a, env, ctr), go(b, env, ctr)),
         Ast::If(c, a, b) => Ast::If(go(c, env, ctr), go(a, env, ctr), go(b, env, ctr)),
-        Ast::Tuple(xs) => Ast::Tuple(xs.iter().map(|x| unshadow(x, env, ctr)).collect()),
-        Ast::Again(xs) => Ast::Again(xs.iter().map(|x| unshadow(x, env, ctr)).collect()),
-        Ast::Call(f, xs) => Ast::Call(f.clone(), xs.iter().map(|x| unshadow(x, env, ctr)).collect()),
-        Ast::Case(s, arms) => Ast::Case(
+        Ast::Tuple(xs) => Ast::Tuple(xs.iter().map(|x| unshadow(x, env, ctr, arms)).collect()),
+        Ast::Again(xs) => Ast::Again(xs.iter().map(|x| unshadow(x, env, ctr, arms)).collect()),
+        Ast::Call(f, xs) => {
+            // a callee that names a renamed local (a shadowing binder in `env`) must follow
+            // the rename so it resolves to the local (vapply), not the shadowed arm/primitive;
+            // a genuine arm/primitive call is not in `env` and is left untouched.
+            let f2 = env.get(f).cloned().unwrap_or_else(|| f.clone());
+            Ast::Call(f2, xs.iter().map(|x| unshadow(x, env, ctr, arms)).collect())
+        }
+        Ast::Case(s, cases) => Ast::Case(
             go(s, env, ctr),
-            arms.iter().map(|(p, e)| (p.clone(), unshadow(e, env, ctr))).collect(),
+            cases.iter().map(|(p, e)| (p.clone(), unshadow(e, env, ctr, arms))).collect(),
         ),
         Ast::Let(n, v, b) => {
-            let v2 = unshadow(v, env, ctr); // initialiser is in the outer scope
+            let v2 = unshadow(v, env, ctr, arms); // initialiser is in the outer scope
             let mut env2 = env.clone();
-            let name = if prim_arity(n).is_some() {
+            let name = if needs_rename(n) {
                 let f = fresh(n, ctr);
                 env2.insert(n.clone(), f.clone());
                 f
@@ -81,14 +162,14 @@ fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize) -> Ast {
                 env2.remove(n); // a plain binding shadows any active rename
                 n.clone()
             };
-            Ast::Let(name, Box::new(v2), Box::new(unshadow(b, &env2, ctr)))
+            Ast::Let(name, Box::new(v2), Box::new(unshadow(b, &env2, ctr, arms)))
         }
         Ast::Gate(params, body) => {
             let mut env2 = env.clone();
             let params2 = params
                 .iter()
                 .map(|p| {
-                    if prim_arity(p).is_some() {
+                    if needs_rename(p) {
                         let f = fresh(p, ctr);
                         env2.insert(p.clone(), f.clone());
                         f
@@ -98,15 +179,15 @@ fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize) -> Ast {
                     }
                 })
                 .collect();
-            Ast::Gate(params2, Box::new(unshadow(body, &env2, ctr)))
+            Ast::Gate(params2, Box::new(unshadow(body, &env2, ctr, arms)))
         }
         Ast::Loop(binds, body) => {
             let mut env2 = env.clone();
             let binds2 = binds
                 .iter()
                 .map(|(n, v)| {
-                    let v2 = unshadow(v, env, ctr); // initialiser in the outer scope
-                    let name = if prim_arity(n).is_some() {
+                    let v2 = unshadow(v, env, ctr, arms); // initialiser in the outer scope
+                    let name = if needs_rename(n) {
                         let f = fresh(n, ctr);
                         env2.insert(n.clone(), f.clone());
                         f
@@ -117,7 +198,7 @@ fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize) -> Ast {
                     (name, v2)
                 })
                 .collect();
-            Ast::Loop(binds2, Box::new(unshadow(body, &env2, ctr)))
+            Ast::Loop(binds2, Box::new(unshadow(body, &env2, ctr, arms)))
         }
     }
 }
@@ -134,16 +215,27 @@ fn sanitize(name: &str) -> String {
     s
 }
 
-fn cord_to_u128(t: &str) -> Result<u128, String> {
-    let b = t.as_bytes();
-    if b.len() > 16 {
-        return Err(format!("tag %{} too long for the u128 atom backend", t));
+/// Emit a cord/tag literal as a native value: short cords (<=16 bytes) fold to a
+/// `V::A(u128)`; longer ones emit a `vbig(vec![..])` byte-vector atom, so string
+/// literals of any length compile natively. Trailing zero bytes are dropped to
+/// match `vbig`'s canonical form.
+fn emit_cord_lit(t: &str) -> String {
+    let raw = t.as_bytes();
+    let mut end = raw.len();
+    while end > 0 && raw[end - 1] == 0 {
+        end -= 1;
     }
-    let mut v: u128 = 0;
-    for (i, &byte) in b.iter().enumerate() {
-        v |= (byte as u128) << (8 * i);
+    let b = &raw[..end];
+    if b.len() <= 16 {
+        let mut v: u128 = 0;
+        for (i, &byte) in b.iter().enumerate() {
+            v |= (byte as u128) << (8 * i);
+        }
+        format!("V::A({}u128)", v)
+    } else {
+        let bytes: Vec<String> = b.iter().map(|x| format!("{}u8", x)).collect();
+        format!("vbig(vec![{}])", bytes.join(", "))
     }
-    Ok(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +327,7 @@ fn eval_prim(name: &str, xs: &[u128]) -> Option<u128> {
 // ---------------------------------------------------------------------------
 fn free_vars(ast: &Ast, bound: &HashSet<String>, arms: &HashSet<String>, out: &mut Vec<String>) {
     let see = |n: &str, out: &mut Vec<String>| {
-        if !bound.contains(n) && !arms.contains(n) && prim_arity(n).is_none() && !out.contains(&n.to_string()) {
+        if !bound.contains(n) && !arms.contains(n) && prim_arity(n).is_none() && cord_jet_arity(n).is_none() && !out.contains(&n.to_string()) {
             out.push(n.to_string());
         }
     };
@@ -319,8 +411,8 @@ fn emit(ast: &Ast, c: &mut Ctx) -> Result<String, String> {
     Ok(match ast {
         Ast::Lit(n) => format!("V::A({}u128)", n),
         Ast::Nil => "V::A(0u128)".to_string(),
-        Ast::Tag(t) => format!("V::A({}u128)", cord_to_u128(t)?),
-        Ast::Text(t) => format!("V::A({}u128)", cord_to_u128(t)?),
+        Ast::Tag(t) => emit_cord_lit(t),
+        Ast::Text(t) => emit_cord_lit(t),
         Ast::Var(n) => {
             if c.bound.contains(n) {
                 format!("{}.clone()", sanitize(n))
@@ -369,11 +461,14 @@ fn emit(ast: &Ast, c: &mut Ctx) -> Result<String, String> {
             for (pat, body) in cases.iter() {
                 if let Some(tag) = pat {
                     let kw = if first { "if" } else { "else if" };
+                    // Compare against the Big-aware cord literal so case patterns work for tags of
+                    // any length, exactly like long string/tag literals elsewhere — not just those
+                    // that fit a u128.
                     out.push_str(&format!(
-                        "{} veq(&__s{}, &V::A({}u128)) {{ {} }} ",
+                        "{} veq(&__s{}, &{}) {{ {} }} ",
                         kw,
                         id,
-                        cord_to_u128(tag)?,
+                        emit_cord_lit(tag),
                         emit(body, c)?
                     ));
                     first = false;
@@ -457,6 +552,18 @@ fn emit(ast: &Ast, c: &mut Ctx) -> Result<String, String> {
                     "dec" => format!("vdec({})", a[0]),
                     _ => unreachable!(),
                 }
+            } else if let Some(ar) = cord_jet_arity(name) {
+                if a.len() != ar {
+                    return Err(format!("'{}' expects {} args, got {}", name, ar, a.len()));
+                }
+                match name.as_str() {
+                    "bytes" => format!("vbytes({})", a[0]),
+                    "frombytes" => format!("vfrombytes({})", a[0]),
+                    "cat" => format!("vcat({}, {})", a[0], a[1]),
+                    "catall" => format!("vcatall({})", a[0]),
+                    "bytelen" => format!("vbytelen({})", a[0]),
+                    _ => unreachable!(),
+                }
             } else if c.arms.contains(name) && !c.bound.contains(name) {
                 let want = c.arity.get(name).copied().unwrap_or(a.len());
                 if a.len() != want {
@@ -510,26 +617,185 @@ const PRELUDE: &str = r#"// ---- generated by the Latte->Rust compiler (Anvil) -
 use std::rc::Rc;
 
 #[derive(Clone)]
-enum V { A(u128), C(Rc<V>, Rc<V>), F(Rc<dyn Fn(Vec<V>) -> V>) }
+enum V { A(u128), Big(Rc<Vec<u8>>), C(Rc<V>, Rc<V>), F(Rc<dyn Fn(Vec<V>) -> V>) }
 
-#[inline] fn na(v: &V) -> u128 { if let V::A(n) = v { *n } else { panic!("expected atom, got cell/fn") } }
+#[inline] fn na(v: &V) -> u128 { if let V::A(n) = v { *n } else { panic!("arithmetic on non-u128 atom (cord too long for native arithmetic)") } }
 #[inline] fn vcell(a: V, b: V) -> V { V::C(Rc::new(a), Rc::new(b)) }
 #[inline] fn vhead(v: V) -> V { if let V::C(h, _) = v { (*h).clone() } else { panic!("head of atom") } }
 #[inline] fn vtail(v: V) -> V { if let V::C(_, t) = v { (*t).clone() } else { panic!("tail of atom") } }
 #[inline] fn viscell(v: V) -> V { if let V::C(..) = v { V::A(0) } else { V::A(1) } }
 #[inline] fn viszero(v: &V) -> bool { matches!(v, V::A(0)) }
 #[inline] fn vloob(b: bool) -> V { if b { V::A(0) } else { V::A(1) } }
-#[inline] fn vinc(a: V) -> V { V::A(na(&a).checked_add(1).expect("inc overflow")) }
-#[inline] fn vdec(a: V) -> V { V::A(na(&a).checked_sub(1).expect("dec underflow")) }
-#[inline] fn vadd(a: V, b: V) -> V { V::A(na(&a).checked_add(na(&b)).expect("add overflow")) }
-#[inline] fn vsub(a: V, b: V) -> V { V::A(na(&a).checked_sub(na(&b)).expect("sub underflow")) }
-#[inline] fn vmul(a: V, b: V) -> V { V::A(na(&a).checked_mul(na(&b)).expect("mul overflow")) }
-#[inline] fn vdiv(a: V, b: V) -> V { V::A(na(&a).checked_div(na(&b)).expect("div by zero")) }
-#[inline] fn vmod(a: V, b: V) -> V { V::A(na(&a).checked_rem(na(&b)).expect("mod by zero")) }
-#[inline] fn vlt(a: V, b: V) -> V { vloob(na(&a) < na(&b)) }
+// Arithmetic keeps a u128 fast path (the common case) and falls back to arbitrary-precision
+// natural arithmetic (below) the moment a value or result exceeds u128 — so the native backend
+// agrees with the interpreter, which treats atoms as unbounded naturals, at ANY width.
+#[inline] fn vinc(a: V) -> V { if let V::A(n) = &a { if let Some(r) = n.checked_add(1) { return V::A(r); } } vadd(a, V::A(1)) }
+#[inline] fn vdec(a: V) -> V { vsub(a, V::A(1)) }
+#[inline] fn vadd(a: V, b: V) -> V {
+    if let (V::A(x), V::A(y)) = (&a, &b) { if let Some(r) = x.checked_add(*y) { return V::A(r); } }
+    vbig(bn_add(&vatom_bytes(&a), &vatom_bytes(&b)))
+}
+#[inline] fn vsub(a: V, b: V) -> V {
+    if let (V::A(x), V::A(y)) = (&a, &b) { return V::A(x.checked_sub(*y).expect("sub underflow")); }
+    let (ab, bb) = (vatom_bytes(&a), vatom_bytes(&b));
+    if bn_cmp(&ab, &bb) == std::cmp::Ordering::Less { panic!("sub underflow"); }
+    vbig(bn_sub(&ab, &bb))
+}
+#[inline] fn vmul(a: V, b: V) -> V {
+    if let (V::A(x), V::A(y)) = (&a, &b) { if let Some(r) = x.checked_mul(*y) { return V::A(r); } }
+    let (ab, bb) = (vatom_bytes(&a), vatom_bytes(&b));
+    // multiply by a power of two (e.g. shl, and pow's squaring of 2) is a bit-shift
+    if let Some(k) = bn_pow2(&bb) { return vbig(bn_shl_bits(&ab, k)); }
+    if let Some(k) = bn_pow2(&ab) { return vbig(bn_shl_bits(&bb, k)); }
+    vbig(bn_mul(&ab, &bb))
+}
+#[inline] fn vdiv(a: V, b: V) -> V {
+    if let (V::A(x), V::A(y)) = (&a, &b) { return V::A(x.checked_div(*y).expect("div by zero")); }
+    bn_divmod_v(&a, &b).0
+}
+#[inline] fn vmod(a: V, b: V) -> V {
+    if let (V::A(x), V::A(y)) = (&a, &b) { return V::A(x.checked_rem(*y).expect("mod by zero")); }
+    bn_divmod_v(&a, &b).1
+}
+#[inline] fn vlt(a: V, b: V) -> V {
+    if let (V::A(x), V::A(y)) = (&a, &b) { return vloob(x < y); }
+    vloob(bn_cmp(&vatom_bytes(&a), &vatom_bytes(&b)) == std::cmp::Ordering::Less)
+}
+// An atom too big for u128 (a cord > 16 bytes) is kept as its little-endian bytes. Cords are
+// base-256 atoms, so the cord ops (bytes/frombytes/cat/catall/bytelen) are jetted to byte-vector
+// operations rather than base-256 arithmetic; this lets the native backend handle cords of ANY
+// length without a general bignum. `vbig` normalizes (drops trailing zero bytes) and keeps the
+// canonical split: <=16 significant bytes live in V::A, longer ones in V::Big, so the two never
+// numerically overlap and equality stays a representation compare.
+fn vbig(mut b: Vec<u8>) -> V {
+    while b.last() == Some(&0) { b.pop(); }
+    if b.len() <= 16 {
+        let mut n: u128 = 0;
+        for (i, &by) in b.iter().enumerate() { n |= (by as u128) << (8 * i); }
+        V::A(n)
+    } else { V::Big(Rc::new(b)) }
+}
+fn vatom_bytes(v: &V) -> Vec<u8> {
+    match v {
+        V::A(n) => { let mut n = *n; let mut o = Vec::new(); while n > 0 { o.push((n & 0xff) as u8); n >>= 8; } o }
+        V::Big(b) => (**b).clone(),
+        _ => panic!("bytes of non-atom"),
+    }
+}
+fn vbytes(v: V) -> V { let b = vatom_bytes(&v); let mut out = V::A(0); for &by in b.iter().rev() { out = vcell(V::A(by as u128), out); } out }
+fn vfrombytes(list: V) -> V { let mut b = Vec::new(); let mut cur = list; while let V::C(h, t) = cur { b.push((na(&h) & 0xff) as u8); cur = (*t).clone(); } vbig(b) }
+fn vcat(a: V, b: V) -> V { let mut x = vatom_bytes(&a); x.extend(vatom_bytes(&b)); vbig(x) }
+fn vcatall(list: V) -> V { let mut b = Vec::new(); let mut cur = list; while let V::C(h, t) = cur { b.extend(vatom_bytes(&h)); cur = (*t).clone(); } vbig(b) }
+fn vbytelen(v: V) -> V { V::A(vatom_bytes(&v).len() as u128) }
+// ---- arbitrary-precision natural arithmetic on little-endian byte vectors ------------------
+// These back the arithmetic ops above whenever a value exceeds u128, so native results match the
+// interpreter's unbounded-natural semantics. The database's bloom filter / hash bitset works on
+// wide values via shl/shr/bit, all of which reduce to powers of two — special-cased here to
+// byte/bit shifts so a 4096-bit set stays fast; only a non-power-of-two big divisor takes the
+// general (binary long-division) path, which database code never hits.
+fn bn_sig(a: &[u8]) -> &[u8] { let mut n = a.len(); while n > 0 && a[n - 1] == 0 { n -= 1; } &a[..n] }
+fn bn_trim(mut b: Vec<u8>) -> Vec<u8> { while b.last() == Some(&0) { b.pop(); } b }
+fn bn_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let (a, b) = (bn_sig(a), bn_sig(b));
+    if a.len() != b.len() { return a.len().cmp(&b.len()); }
+    for i in (0..a.len()).rev() { if a[i] != b[i] { return a[i].cmp(&b[i]); } }
+    std::cmp::Ordering::Equal
+}
+fn bn_add(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut o = Vec::with_capacity(a.len().max(b.len()) + 1);
+    let mut carry = 0u16;
+    for i in 0..a.len().max(b.len()) {
+        let s = *a.get(i).unwrap_or(&0) as u16 + *b.get(i).unwrap_or(&0) as u16 + carry;
+        o.push((s & 0xff) as u8); carry = s >> 8;
+    }
+    if carry > 0 { o.push(carry as u8); }
+    bn_trim(o)
+}
+fn bn_sub(a: &[u8], b: &[u8]) -> Vec<u8> { // requires a >= b
+    let mut o = Vec::with_capacity(a.len());
+    let mut borrow = 0i16;
+    for i in 0..a.len() {
+        let mut d = a[i] as i16 - *b.get(i).unwrap_or(&0) as i16 - borrow;
+        if d < 0 { d += 256; borrow = 1; } else { borrow = 0; }
+        o.push(d as u8);
+    }
+    bn_trim(o)
+}
+fn bn_mul(a: &[u8], b: &[u8]) -> Vec<u8> {
+    if a.is_empty() || b.is_empty() { return Vec::new(); }
+    let mut o = vec![0u8; a.len() + b.len()];
+    for i in 0..a.len() {
+        let mut carry = 0u32; let ai = a[i] as u32;
+        for j in 0..b.len() {
+            let cur = o[i + j] as u32 + ai * b[j] as u32 + carry;
+            o[i + j] = (cur & 0xff) as u8; carry = cur >> 8;
+        }
+        let mut k = i + b.len();
+        while carry > 0 { let cur = o[k] as u32 + carry; o[k] = (cur & 0xff) as u8; carry = cur >> 8; k += 1; }
+    }
+    bn_trim(o)
+}
+fn bn_pow2(a: &[u8]) -> Option<usize> { // Some(k) iff a == 2^k
+    let s = bn_sig(a); if s.is_empty() { return None; }
+    let top = s.len() - 1;
+    if s[top].count_ones() != 1 { return None; }
+    for i in 0..top { if s[i] != 0 { return None; } }
+    Some(top * 8 + s[top].trailing_zeros() as usize)
+}
+fn bn_shl_bits(a: &[u8], k: usize) -> Vec<u8> {
+    let s = bn_sig(a); if s.is_empty() { return Vec::new(); }
+    let (bsh, bish) = (k / 8, (k % 8) as u32);
+    let mut o = vec![0u8; bsh];
+    let mut carry = 0u16;
+    for &x in s { let v = ((x as u16) << bish) | carry; o.push((v & 0xff) as u8); carry = v >> 8; }
+    if carry > 0 { o.push(carry as u8); }
+    bn_trim(o)
+}
+fn bn_shr_bits(a: &[u8], k: usize) -> Vec<u8> {
+    let s = bn_sig(a); let (bsh, bish) = (k / 8, (k % 8) as u32);
+    if bsh >= s.len() { return Vec::new(); }
+    let mut o = Vec::with_capacity(s.len() - bsh);
+    for i in bsh..s.len() {
+        let lo = (s[i] as u16) >> bish;
+        let hi = if bish > 0 && i + 1 < s.len() { (s[i + 1] as u16) << (8 - bish) } else { 0 };
+        o.push(((lo | hi) & 0xff) as u8);
+    }
+    bn_trim(o)
+}
+fn bn_lowbits(a: &[u8], k: usize) -> Vec<u8> { // a mod 2^k
+    let s = bn_sig(a); let (bsh, bish) = (k / 8, (k % 8) as u32);
+    let take = bsh + if bish > 0 { 1 } else { 0 };
+    let mut o: Vec<u8> = s.iter().take(take).cloned().collect();
+    if bish > 0 && o.len() == bsh + 1 { o[bsh] &= ((1u16 << bish) - 1) as u8; }
+    bn_trim(o)
+}
+fn bn_divmod(a: &[u8], b: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    if let Some(k) = bn_pow2(b) { return (bn_shr_bits(a, k), bn_lowbits(a, k)); }
+    match bn_cmp(a, b) {
+        std::cmp::Ordering::Less => return (Vec::new(), bn_sig(a).to_vec()),
+        std::cmp::Ordering::Equal => return (vec![1], Vec::new()),
+        _ => {}
+    }
+    let a = bn_sig(a); let nbits = a.len() * 8;
+    let mut q = vec![0u8; a.len()];
+    let mut r: Vec<u8> = Vec::new();
+    for bit in (0..nbits).rev() {
+        r = bn_shl_bits(&r, 1);
+        if (a[bit / 8] >> (bit % 8)) & 1 == 1 { if r.is_empty() { r.push(1); } else { r[0] |= 1; } }
+        if bn_cmp(&r, b) != std::cmp::Ordering::Less { r = bn_sub(&r, b); q[bit / 8] |= 1 << (bit % 8); }
+    }
+    (bn_trim(q), bn_trim(r))
+}
+fn bn_divmod_v(a: &V, b: &V) -> (V, V) {
+    let bb = vatom_bytes(b);
+    if bn_sig(&bb).is_empty() { panic!("div by zero"); }
+    let (q, r) = bn_divmod(&vatom_bytes(a), &bb);
+    (vbig(q), vbig(r))
+}
 fn veq(a: &V, b: &V) -> bool {
     match (a, b) {
         (V::A(x), V::A(y)) => x == y,
+        (V::Big(x), V::Big(y)) => x == y,
         (V::C(h1, t1), V::C(h2, t2)) => veq(h1, h2) && veq(t1, t2),
         _ => false,
     }
@@ -540,18 +806,95 @@ fn vapply(f: V, args: Vec<V>) -> V { if let V::F(g) = f { g(args) } else { panic
 fn vrender(v: &V) -> String {
     match v {
         V::A(n) => n.to_string(),
+        V::Big(b) => { let mut s = String::from("~"); for by in b.iter() { s.push_str(&format!("{:02x}", by)); } s }
         V::C(h, t) => format!("[{} {}]", vrender(h), vrender(t)),
         V::F(_) => "<fn>".to_string(),
     }
+}
+// Inverse of vrender: read a canonical noun (decimal atoms, ~hex long-cord atoms, [h t]
+// cells) supplied at run time on stdin, so one compiled binary can serve many inputs.
+fn vparse(s: &str) -> V {
+    let t: Vec<char> = s.trim().chars().collect();
+    let mut p = 0usize;
+    fn skip(t: &[char], p: &mut usize) { while *p < t.len() && t[*p].is_whitespace() { *p += 1; } }
+    fn go(t: &[char], p: &mut usize) -> V {
+        skip(t, p);
+        if *p >= t.len() { return V::A(0); }
+        if t[*p] == '[' {
+            *p += 1;
+            let h = go(t, p);
+            let tl = go(t, p);
+            skip(t, p);
+            if *p < t.len() && t[*p] == ']' { *p += 1; }
+            vcell(h, tl)
+        } else if t[*p] == '~' {
+            *p += 1;
+            let st = *p;
+            while *p < t.len() && t[*p].is_ascii_hexdigit() { *p += 1; }
+            let hb: Vec<char> = t[st..*p].to_vec();
+            let mut b = Vec::with_capacity(hb.len() / 2);
+            let mut i = 0;
+            while i + 2 <= hb.len() {
+                let hi = hb[i].to_digit(16).unwrap_or(0);
+                let lo = hb[i + 1].to_digit(16).unwrap_or(0);
+                b.push((hi * 16 + lo) as u8);
+                i += 2;
+            }
+            vbig(b)
+        } else {
+            let st = *p;
+            while *p < t.len() && t[*p].is_ascii_digit() { *p += 1; }
+            let ds: String = t[st..*p].iter().collect();
+            V::A(ds.parse::<u128>().unwrap_or(0))
+        }
+    }
+    go(&t, &mut p)
 }
 "#;
 
 /// Compile a Latte expression (with its library closure) to a standalone Rust program.
 pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> {
-    let program = latte::gather_program(expr_src, libs)?;
-    // A local that shadows a primitive name (e.g. `sub` as a substring index) used to
-    // force the whole program onto the interpreter. Instead, alpha-rename such binders
-    // — including arm parameters — to fresh names so native compilation still applies.
+    compile_to_rust_opts(expr_src, libs, None)
+}
+
+/// Compile a Latte expression to standalone Rust. When `input_param` is `Some(name)`,
+/// `__main` takes that parameter and `main()` reads a canonical noun from stdin, so the
+/// SAME binary can be run against many inputs (the program is content-addressed without
+/// the input). When `None`, the program is self-contained and `main()` runs it directly.
+fn compile_to_rust_opts(
+    expr_src: &str,
+    libs: &[&str],
+    input_param: Option<&str>,
+) -> Result<String, String> {
+    compile_to_rust_full(expr_src, libs, input_param, false)
+}
+
+/// Like `compile_to_rust_opts(.., Some("__in"))`, but `main()` is a *resident loop*: it reads
+/// length-framed canonical nouns from stdin, applies `__main` to each, and writes a length-framed
+/// result — so one long-lived process can serve many requests, amortizing process startup. Each
+/// request is independent (the generated code is pure), so the result is identical to the one-shot
+/// binary; this is purely a startup-cost optimization.
+fn compile_to_rust_worker(expr_src: &str, libs: &[&str]) -> Result<String, String> {
+    compile_to_rust_full(expr_src, libs, Some("__in"), true)
+}
+
+fn compile_to_rust_full(
+    expr_src: &str,
+    libs: &[&str],
+    input_param: Option<&str>,
+    loop_main: bool,
+) -> Result<String, String> {
+    let program = latte::gather_program_in(expr_src, libs, input_param.unwrap_or("_"))?;
+    // The set of all top-level arm names. A binder (parameter, let, or loop variable) that
+    // collides with one of these shadows the arm, and must be alpha-renamed for the native
+    // backend, exactly as primitive/keyword collisions are — otherwise a closure that
+    // captures such a local drops it (free_vars treats arm names as global) and emits an
+    // unbound variable.
+    let arm_name_set: HashSet<String> = program.iter().map(|(n, _, _)| n.clone()).collect();
+    // A local that shadows a primitive name (e.g. `sub` as a substring index) or an arm name
+    // (e.g. `field`, an arm in ui.lat) used to force the whole program onto the interpreter.
+    // Instead, alpha-rename such binders — including arm parameters — to fresh names so
+    // native compilation still applies.
     let program: Vec<(String, Vec<String>, Ast)> = program
         .into_iter()
         .map(|(n, params, b)| {
@@ -560,7 +903,7 @@ pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> 
             let params2 = params
                 .iter()
                 .map(|p| {
-                    if prim_arity(p).is_some() {
+                    if binder_rename(p) || arm_name_set.contains(p) {
                         let f = fresh(p, &mut ctr);
                         env.insert(p.clone(), f.clone());
                         f
@@ -569,7 +912,7 @@ pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> 
                     }
                 })
                 .collect();
-            let b2 = unshadow(&b, &env, &mut ctr);
+            let b2 = unshadow(&b, &env, &mut ctr, &arm_name_set);
             (n, params2, b2)
         })
         .collect();
@@ -598,7 +941,7 @@ pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> 
             let mut calls = Vec::new();
             collect_calls(body, &mut calls);
             for cnm in calls {
-                if prim_arity(&cnm).is_none() && arm_names.contains(&cnm) && !reachable.contains(&cnm)
+                if !is_native_op(&cnm) && arm_names.contains(&cnm) && !reachable.contains(&cnm)
                 {
                     work.push(cnm);
                 }
@@ -631,7 +974,36 @@ pub fn compile_to_rust(expr_src: &str, libs: &[&str]) -> Result<String, String> 
         ));
     }
 
-    out.push_str("\nfn main() {\n    let r = arm___main(V::A(0));\n    println!(\"{}\", vrender(&r));\n}\n");
+    let main_src = if loop_main {
+        r#"
+fn main() {
+    use std::io::{Write, BufRead, Read};
+    let inp = std::io::stdin();
+    let mut inp = inp.lock();
+    let out = std::io::stdout();
+    let mut out = out.lock();
+    let mut header = String::new();
+    loop {
+        header.clear();
+        match inp.read_line(&mut header) { Ok(0) | Err(_) => break, _ => {} }
+        let n: usize = match header.trim().parse() { Ok(n) => n, Err(_) => break };
+        let mut buf = vec![0u8; n];
+        if inp.read_exact(&mut buf).is_err() { break; }
+        let s = String::from_utf8_lossy(&buf);
+        let r = arm___main(vparse(&s));
+        let rendered = vrender(&r);
+        if write!(out, "{}\n{}", rendered.len(), rendered).is_err() { break; }
+        if out.flush().is_err() { break; }
+    }
+}
+"#
+        .to_string()
+    } else if input_param.is_some() {
+        "\nfn main() {\n    use std::io::Read;\n    let mut s = String::new();\n    let _ = std::io::stdin().read_to_string(&mut s);\n    let r = arm___main(vparse(&s));\n    println!(\"{}\", vrender(&r));\n}\n".to_string()
+    } else {
+        "\nfn main() {\n    let r = arm___main(V::A(0));\n    println!(\"{}\", vrender(&r));\n}\n".to_string()
+    };
+    out.push_str(&main_src);
     Ok(out)
 }
 
@@ -689,7 +1061,7 @@ fn collect_calls(ast: &Ast, out: &mut Vec<String>) {
 
 /// Parse the canonical readout emitted by a compiled program (atoms decimal, cells `[h t]`) back
 /// into a noun.
-fn parse_canon(s: &str) -> Option<crate::knot::N> {
+pub(crate) fn parse_canon(s: &str) -> Option<crate::knot::N> {
     let toks: Vec<char> = s.trim().chars().collect();
     let mut pos = 0usize;
     fn skip_ws(t: &[char], p: &mut usize) {
@@ -719,6 +1091,26 @@ fn parse_canon(s: &str) -> Option<crate::knot::N> {
             }
             let n: u128 = t[start..*p].iter().collect::<String>().parse().ok()?;
             Some(crate::knot::num(n))
+        } else if t[*p] == '~' {
+            // a long-cord atom: ~<little-endian hex bytes>
+            *p += 1;
+            let start = *p;
+            while *p < t.len() && t[*p].is_ascii_hexdigit() {
+                *p += 1;
+            }
+            let hex: String = t[start..*p].iter().collect();
+            if hex.len() % 2 != 0 {
+                return None;
+            }
+            let mut bytes = Vec::with_capacity(hex.len() / 2);
+            let hb = hex.as_bytes();
+            let mut i = 0;
+            while i < hb.len() {
+                let byte = u8::from_str_radix(std::str::from_utf8(&hb[i..i + 2]).ok()?, 16).ok()?;
+                bytes.push(byte);
+                i += 2;
+            }
+            Some(crate::knot::atom(crate::atom::Atom::from_bytes_le(bytes)))
         } else {
             None // e.g. "<fn>" — not a representable noun
         }
@@ -736,9 +1128,439 @@ pub fn run_native_noun(expr: &str, libs: &[&str]) -> Option<crate::knot::N> {
 }
 
 /// Like `run_native_noun`, but `force_rebuild` ignores any cached binary and recompiles.
-pub fn run_native_noun_opts(expr: &str, libs: &[&str], force_rebuild: bool) -> Option<crate::knot::N> {
+/// The `rustc` optimization level for native builds. Defaults to `0`: for these
+/// one-shot, content-addressed programs the build time dominates the (sub-second)
+/// runtime, so opt-level 0 cuts cold-start by ~9x (≈0.7s vs ≈6.3s on the 614-rule
+/// Ligurian evolve) while the binary still runs several times faster than the
+/// interpreter. Set `ORPHEUS_OPT=2` (or `3`) for hot, long-lived programs where
+/// runtime dominates and the one-time build cost is worth it.
+fn rustc_opt_level(src: &str) -> String {
+    if let Ok(o) = std::env::var("ORPHEUS_OPT") {
+        if !o.is_empty() {
+            return o;
+        }
+    }
+    // Optimized compilation is the DEFAULT for heavy code, system-wide: this is the single
+    // chokepoint every native build flows through (eval, the advisor, the dashboards, the
+    // server, the daemon). A large emitted program — the database (LSM + bloom + indexes) or
+    // the financial-ML stack (a DB build plus thousands of training iterations) — runs long
+    // enough that optimizing is a net win even on the FIRST build: a 4000-iteration logistic
+    // fit goes from ~19s to ~5s, so build+run drops too, and every cached run afterward is
+    // ~4x faster. `-O1` captures nearly all of `-O2`/`-O3`'s speedup here at the lowest build
+    // cost. Trivial programs stay at `-O0`, where the (tiny) build time dominates and there is
+    // nothing to optimize. The level is a deterministic function of the source, so it never
+    // collides in the content-addressed cache. `ORPHEUS_OPT` overrides for benchmarking.
+    if src.len() > 24_000 { "1".to_string() } else { "0".to_string() }
+}
+
+/// Compile emitted Rust `src` into `bin` (atomically, via a temp file + rename), under a
+/// global build lock so concurrent identical requests compile once. Returns whether `bin`
+/// is present and usable afterwards. The single point where the native toolchain is invoked.
+fn build_native(src: &str, bin: &std::path::Path, force: bool) -> bool {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CTR: AtomicUsize = AtomicUsize::new(0);
+    static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !force && bin.exists() {
+        return true; // built by another thread while we waited for the lock
+    }
+    // Read-through: a same-toolchain host may have already built this exact program and published
+    // it — to the shared dir, or to the networked registry (signature-verified). Either skips rustc.
+    if !force && (shared_pull(bin) || registry_pull(bin)) {
+        record_pull();
+        evict_to_cap();
+        return true;
+    }
+    let dir = match bin.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return false,
+    };
+    let uniq = CTR.fetch_add(1, Ordering::Relaxed);
+    let tag = format!("{}-{}", std::process::id(), uniq);
+    let rs = dir.join(format!("build-{}.rs", tag));
+    let tmp_bin = dir.join(format!("build-{}{}", tag, BIN_EXT));
+    if std::fs::write(&rs, src).is_err() {
+        return false;
+    }
+    let build_t0 = std::time::Instant::now();
+    let st = std::process::Command::new("rustc")
+        .args(["-C", &format!("opt-level={}", rustc_opt_level(src)), "--edition", "2021", "-o"])
+        .arg(&tmp_bin)
+        .arg(&rs)
+        .output();
+    let build_ms = build_t0.elapsed().as_millis() as u64;
+    let _ = std::fs::remove_file(&rs);
+    match st {
+        Ok(s) if s.status.success() => {
+            let _ = std::fs::rename(&tmp_bin, bin);
+            record_build(build_ms);
+            write_sidecar(bin); // record bytes hash+size for later integrity checks
+            // Write-back: publish so peer hosts can pull instead of rebuilding — to the shared dir
+            // and, if configured, the networked registry (signed under the shared key).
+            shared_push(bin);
+            registry_push(bin);
+            // Self-bound the cache: with the new binary in place, evict least-recently-used
+            // binaries if we're over the size cap. Done here (under BUILD_LOCK) so eviction
+            // never races a concurrent build.
+            evict_to_cap();
+            true
+        }
+        Ok(s) => {
+            let _ = std::fs::remove_file(&tmp_bin);
+            // A program that passes `compile_to_rust` but fails `rustc` is a codegen bug, not a
+            // user error — capture the compiler's stderr so it's diagnosable rather than a silent
+            // fall-through to the interpreter.
+            log_build_failure(bin, &String::from_utf8_lossy(&s.stderr));
+            false
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_bin);
+            log_build_failure(bin, &format!("could not launch rustc: {}", e));
+            false
+        }
+    }
+}
+
+fn build_log_path() -> std::path::PathBuf {
+    cache_dir().join("build-errors.log")
+}
+
+/// Return the suffix of `s` no longer than `max` bytes, starting at a line boundary (so entries are
+/// never cut mid-line). Pure, so the log-trimming policy is unit-testable.
+fn tail_from_line_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let start = s.len() - max;
+    match s[start..].find('\n') {
+        Some(i) => &s[start + i + 1..],
+        None => &s[start..],
+    }
+}
+
+/// Append a build failure (timestamped, with a short stderr excerpt) to the cache's error log,
+/// keeping the log bounded. Best-effort; diagnostics must never affect the build result.
+fn log_build_failure(bin: &std::path::Path, stderr: &str) {
+    const LOG_CAP: usize = 64 * 1024;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Keep only the first dozen lines of stderr — enough to identify the error.
+    let excerpt: String = stderr.lines().take(12).collect::<Vec<_>>().join("\n");
+    let entry = format!("[t={}] {}\n{}\n----\n", secs, name_of(bin), excerpt);
+    let path = build_log_path();
+    let mut prior = std::fs::read_to_string(&path).unwrap_or_default();
+    prior.push_str(&entry);
+    let trimmed = tail_from_line_boundary(&prior, LOG_CAP);
+    let _ = std::fs::write(&path, trimmed);
+    record_build_failure();
+}
+
+/// The tail of the build-error log (most recent failures), up to `max_bytes`. Empty if none.
+pub fn build_log_tail(max_bytes: usize) -> String {
+    let s = std::fs::read_to_string(build_log_path()).unwrap_or_default();
+    tail_from_line_boundary(&s, max_bytes).to_string()
+}
+
+/// Static native-compilation diagnosis: `Ok(())` if the program lowers to native code, otherwise
+/// `Err(reason)` explaining why it would run on the interpreter instead (e.g. an unsupported
+/// construct or an arity error). Fast — this is the `compile_to_rust` front-end, no `rustc`.
+pub fn native_check(expr: &str, libs: &[&str]) -> Result<(), String> {
+    compile_to_rust(expr, libs).map(|_| ())
+}
+
+/// Lifetime build/cache counters, persisted in the cache dir so they accumulate across one-shot CLI
+/// invocations. Approximate under heavy concurrency (read-modify-write, last-writer-wins) — they are
+/// advisory metrics, not exact accounting.
+#[derive(Default, Clone, Copy)]
+pub struct Metrics {
+    pub builds: u64,         // rustc compilations performed
+    pub build_ms_total: u64, // cumulative rustc wall time
+    pub hits: u64,           // cached binary reused without building
+    pub pulls: u64,          // binary fetched from a remote (shared store or registry); build skipped
+    pub build_failures: u64, // rustc declined (logged to build-errors.log)
+}
+
+impl Metrics {
+    pub fn avg_build_ms(&self) -> u64 {
+        if self.builds == 0 { 0 } else { self.build_ms_total / self.builds }
+    }
+    /// Estimated `rustc` time avoided: each hit or pull would otherwise have cost ~one build.
+    pub fn est_saved_ms(&self) -> u64 {
+        self.avg_build_ms().saturating_mul(self.hits + self.pulls)
+    }
+}
+
+fn parse_metrics(s: &str) -> Metrics {
+    let mut m = Metrics::default();
+    for line in s.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(k), Some(v)) = (it.next(), it.next()) {
+            let v: u64 = v.parse().unwrap_or(0);
+            match k {
+                "builds" => m.builds = v,
+                "build_ms_total" => m.build_ms_total = v,
+                "hits" => m.hits = v,
+                "pulls" => m.pulls = v,
+                "build_failures" => m.build_failures = v,
+                _ => {}
+            }
+        }
+    }
+    m
+}
+
+fn format_metrics(m: &Metrics) -> String {
+    format!(
+        "builds {}\nbuild_ms_total {}\nhits {}\npulls {}\nbuild_failures {}\n",
+        m.builds, m.build_ms_total, m.hits, m.pulls, m.build_failures
+    )
+}
+
+fn metrics_path() -> std::path::PathBuf {
+    cache_dir().join("metrics")
+}
+
+/// The current counters (zeroes if none recorded yet).
+pub fn metrics_snapshot() -> Metrics {
+    parse_metrics(&std::fs::read_to_string(metrics_path()).unwrap_or_default())
+}
+
+fn metrics_bump(f: impl FnOnce(&mut Metrics)) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let _ = std::fs::create_dir_all(cache_dir());
+    let mut m = metrics_snapshot();
+    f(&mut m);
+    let p = metrics_path();
+    let tmp = p.with_file_name(format!(
+        "metrics-{}-{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::write(&tmp, format_metrics(&m)).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn record_build(ms: u64) {
+    metrics_bump(|m| {
+        m.builds += 1;
+        m.build_ms_total += ms;
+    });
+}
+fn record_hit() {
+    metrics_bump(|m| m.hits += 1);
+}
+fn record_pull() {
+    metrics_bump(|m| m.pulls += 1);
+}
+fn record_build_failure() {
+    metrics_bump(|m| m.build_failures += 1);
+}
+
+
+/// Make a filesystem-safe path component (alphanumerics and `.`/`-`/`_` kept, everything else
+/// becomes `-`). Pure, so the toolchain-id construction is unit-testable.
+fn sanitize_component(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '-' })
+        .collect()
+}
+
+/// A stable identity for the local toolchain — `rustc` release plus host target triple — derived
+/// once from `rustc -vV`. Compiled binaries are only portable between hosts that share this id, so
+/// the shared store namespaces every artifact under it; a host never pulls a binary it can't run.
+/// (Builds use `opt-level=N` with no `target-cpu=native`, so codegen stays portable across CPUs of
+/// the same triple.)
+pub fn toolchain_id() -> &'static str {
+    static TID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TID.get_or_init(|| {
+        let (mut release, mut host) = (String::new(), String::new());
+        if let Ok(o) = std::process::Command::new("rustc").arg("-vV").output() {
+            if o.status.success() {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    if let Some(v) = line.strip_prefix("release: ") {
+                        release = v.trim().to_string();
+                    } else if let Some(v) = line.strip_prefix("host: ") {
+                        host = v.trim().to_string();
+                    }
+                }
+            }
+        }
+        if release.is_empty() {
+            release = "unknown".into();
+        }
+        if host.is_empty() {
+            host = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+        }
+        sanitize_component(&format!("rustc-{}-{}", release, host))
+    })
+    .as_str()
+}
+
+/// The shared artifact store directory, if `ORPHEUS_CACHE_SHARED` is set. A read-through/write-back
+/// mirror of the local cache that several hosts (CI runners, a team, a second machine) can share so
+/// each distinct program is compiled by `rustc` once across the fleet rather than once per host.
+pub fn shared_store_dir() -> Option<std::path::PathBuf> {
+    match std::env::var("ORPHEUS_CACHE_SHARED") {
+        Ok(s) if !s.trim().is_empty() => Some(std::path::PathBuf::from(s.trim())),
+        _ => None,
+    }
+}
+
+/// Where `bin` lives in the shared store: `<store>/<toolchain-id>/<binary-filename>`.
+fn shared_slot(bin: &std::path::Path) -> Option<std::path::PathBuf> {
+    Some(shared_store_dir()?.join(toolchain_id()).join(bin.file_name()?))
+}
+
+/// Read-through: if a matching-toolchain binary exists in the shared store, copy it into the local
+/// cache at `bin` (atomically) and report success — no `rustc`. The pulled bytes are verified
+/// against the pulled sidecar before install, so a corrupt or poisoned store entry is rejected
+/// (falling through to a local build) rather than infecting this host. Best-effort throughout.
+fn shared_pull(bin: &std::path::Path) -> bool {
+    let slot = match shared_slot(bin) {
+        Some(s) if s.exists() => s,
+        _ => return false,
+    };
+    let dir = match bin.parent() {
+        Some(d) => d,
+        None => return false,
+    };
+    let tmp = dir.join(format!("pull-{}-{}", std::process::id(), name_of(bin)));
+    if std::fs::copy(&slot, &tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+    // Pull the sidecar alongside and verify the pulled bytes against it. A store entry without a
+    // sidecar is unverifiable — reject it, since the whole point here is integrity across hosts.
+    let tmp_sc = sidecar_path(&tmp);
+    let slot_sc = sidecar_path(&slot);
+    let verified = std::fs::copy(&slot_sc, &tmp_sc).is_ok() && verify_file(&tmp) == Integrity::Ok;
+    if !verified {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&tmp_sc);
+        return false;
+    }
+    let _ = std::fs::rename(&tmp_sc, sidecar_path(bin));
+    std::fs::rename(&tmp, bin).is_ok()
+}
+
+/// Write-back: publish a freshly built `bin` (and its sidecar) to the shared store (atomically,
+/// best-effort) so other same-toolchain hosts can pull and verify it instead of rebuilding.
+fn shared_push(bin: &std::path::Path) {
+    let slot = match shared_slot(bin) {
+        Some(s) => s,
+        None => return,
+    };
+    let parent = match slot.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    // Binary first, then sidecar — a puller that sees the binary will also find its sidecar.
+    let tmp = parent.join(format!("push-{}-{}", std::process::id(), name_of(bin)));
+    if std::fs::copy(bin, &tmp).is_ok() {
+        if std::fs::rename(&tmp, &slot).is_ok() {
+            let tmp_sc = sidecar_path(&tmp);
+            if std::fs::copy(sidecar_path(bin), &tmp_sc).is_ok() {
+                let _ = std::fs::rename(&tmp_sc, sidecar_path(&slot));
+            }
+        }
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn name_of(p: &std::path::Path) -> &str {
+    p.file_name().and_then(|n| n.to_str()).unwrap_or("x")
+}
+
+/// Pull `bin` from the networked registry (if `ORPHEUS_REGISTRY`/`_KEY` are set): GET it, verify
+/// its MAC under the shared key, and install atomically. An artifact whose signature does not
+/// verify is **rejected** (never installed), so a tampered or unauthenticated response can't poison
+/// the host. Namespaced by toolchain id, like the filesystem store. Best-effort.
+fn registry_pull(bin: &std::path::Path) -> bool {
+    let url = match crate::registry::registry_url() {
+        Some(u) => u,
+        None => return false,
+    };
+    let key = match crate::registry::registry_key() {
+        Some(k) => k,
+        None => return false,
+    };
+    let full = format!("{}/{}/{}", url, toolchain_id(), name_of(bin));
+    let (status, headers, body) = match crate::registry::http_get(&full) {
+        Some(r) => r,
+        None => return false,
+    };
+    if status != 200 {
+        return false;
+    }
+    let claimed = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-orpheus-mac"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    if !crate::registry::mac_eq(claimed, &crate::registry::mac_hex(&key, &body)) {
+        return false; // unauthenticated / tampered — refuse to install
+    }
+    let dir = match bin.parent() {
+        Some(d) => d,
+        None => return false,
+    };
+    let tmp = dir.join(format!("net-{}-{}", std::process::id(), name_of(bin)));
+    if std::fs::write(&tmp, &body).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+    if std::fs::rename(&tmp, bin).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    write_sidecar(bin);
+    true
+}
+
+/// Publish a freshly built `bin` to the registry (if configured), MAC'd under the shared key so the
+/// server (and future pullers) can authenticate it. Best-effort.
+fn registry_push(bin: &std::path::Path) {
+    let (url, key) = match (crate::registry::registry_url(), crate::registry::registry_key()) {
+        (Some(u), Some(k)) => (u, k),
+        _ => return,
+    };
+    if let Ok(bytes) = std::fs::read(bin) {
+        let mac = crate::registry::mac_hex(&key, &bytes);
+        let full = format!("{}/{}/{}", url, toolchain_id(), name_of(bin));
+        let _ = crate::registry::http_put(&full, &[("x-orpheus-mac", &mac)], &bytes);
+    }
+}
+
+/// Update a cached binary's mtime to now, marking it recently used for LRU eviction.
+/// Best-effort: a binary currently being executed by another process may refuse the
+/// write-open (ETXTBSY) — that's fine, we simply skip the touch.
+fn touch(path: &std::path::Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+pub fn run_native_noun_opts(expr: &str, libs: &[&str], force_rebuild: bool) -> Option<crate::knot::N> {
     let src = compile_to_rust(expr, libs).ok()?;
     // Content-addressed: a stable sha3 of the emitted source is the cache key. Identical code →
     // identical key → the existing binary is reused (no recompile); any change to the expression
@@ -748,36 +1570,326 @@ pub fn run_native_noun_opts(expr: &str, libs: &[&str], force_rebuild: bool) -> O
     let _ = std::fs::create_dir_all(&dir);
     let bin = dir.join(format!("e{}{}", &key[..32], BIN_EXT));
     if force_rebuild || !bin.exists() {
-        // Serialize builds (they're one-time and cached); concurrent identical requests then
-        // compile once rather than each spawning their own rustc. Running stays concurrent.
-        static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if force_rebuild || !bin.exists() {
-            let uniq = CTR.fetch_add(1, Ordering::Relaxed);
-            let tag = format!("{}-{}-{}", std::process::id(), uniq, &key[..16]);
-            let rs = dir.join(format!("build-{}.rs", tag));
-            let tmp_bin = dir.join(format!("build-{}{}", tag, BIN_EXT));
-            std::fs::write(&rs, &src).ok()?;
-            let st = std::process::Command::new("rustc")
-                .args(["-O", "--edition", "2021", "-o"])
-                .arg(&tmp_bin)
-                .arg(&rs)
-                .output()
-                .ok()?;
-            let _ = std::fs::remove_file(&rs);
-            if !st.status.success() {
-                let _ = std::fs::remove_file(&tmp_bin);
-                return None;
-            }
-            let _ = std::fs::rename(&tmp_bin, &bin);
+        if !build_native(&src, &bin, force_rebuild) {
+            return None;
         }
+    } else {
+        record_hit(); // existing binary reused, no build
     }
+    touch(&bin); // mark recently used for LRU eviction
     let o = std::process::Command::new(&bin).output().ok()?;
     if !o.status.success() {
         return None;
     }
     let out = String::from_utf8_lossy(&o.stdout);
     parse_canon(&out)
+}
+
+/// Serialize a noun to the canonical readout `vparse` expects (small atoms as decimal,
+/// long-cord atoms as `~hex`, cells as `[h t]`).
+pub(crate) fn noun_to_canon(n: &crate::knot::N) -> String {
+    match &**n {
+        crate::knot::Knot::Atom(a) => {
+            if let Some(u) = a.to_u128() {
+                u.to_string()
+            } else {
+                let mut s = String::from("~");
+                for by in a.bytes_le() {
+                    s.push_str(&format!("{:02x}", by));
+                }
+                s
+            }
+        }
+        crate::knot::Knot::Cell(h, t) => format!("[{} {}]", noun_to_canon(h), noun_to_canon(t)),
+    }
+}
+
+/// Compile `expr` ONCE into a native binary that takes its input at run time (the
+/// expression references the bound parameter `__in`), then run it against `input`,
+/// which is piped in on stdin. The binary is content-addressed by the PROGRAM, not the
+/// input, so a heavy program (e.g. the 614-rule Ligurian `evolve`) is built a single
+/// time and reused across every input — turning a per-input `rustc` build into one
+/// build amortized over all inputs. Returns `None` if any stage declines (caller falls
+/// back to the interpreter).
+/// A resident native worker: a long-lived child running the loop-mode binary, which serves many
+/// requests over a length-framed stdin/stdout protocol — so repeated heavy calls (an agent fold, a
+/// db transition) amortize process startup instead of paying it per call. Killed on drop.
+struct Worker {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+impl Worker {
+    fn spawn(bin: &std::path::Path) -> Option<Worker> {
+        let mut child = std::process::Command::new(bin)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdin = child.stdin.take()?;
+        let stdout = std::io::BufReader::new(child.stdout.take()?);
+        Some(Worker { child, stdin, stdout })
+    }
+    /// One request/response round-trip. Returns None on any protocol/IO error (caller discards us).
+    fn request(&mut self, canon: &str) -> Option<crate::knot::N> {
+        use std::io::{BufRead, Read, Write};
+        write!(self.stdin, "{}\n{}", canon.len(), canon).ok()?;
+        self.stdin.flush().ok()?;
+        let mut header = String::new();
+        if self.stdout.read_line(&mut header).ok()? == 0 {
+            return None; // worker exited
+        }
+        let n: usize = header.trim().parse().ok()?;
+        let mut buf = vec![0u8; n];
+        self.stdout.read_exact(&mut buf).ok()?;
+        parse_canon(&String::from_utf8_lossy(&buf))
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn worker_pool() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<Worker>>>
+{
+    static POOL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<Worker>>>,
+    > = std::sync::OnceLock::new();
+    POOL.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Run `expr` against `input` on a resident worker. Compiles the loop-mode binary on first use
+/// (cached + memoized like the one-shot path), checks out an idle worker (or spawns one), does one
+/// round-trip, and returns it to the pool on success. Any failure returns None so the caller falls
+/// back to the one-shot path — correctness is never at risk.
+fn run_via_worker(expr: &str, input: &crate::knot::N, libs: &[&str]) -> Option<crate::knot::N> {
+    let memo_key = format!("worker\u{0}{}\u{0}{}", expr, libs.join("\u{0}"));
+    let gen = crate::latte::lib_generation();
+    let bin = {
+        let cached = native_input_memo()
+            .lock()
+            .unwrap()
+            .get(&memo_key)
+            .filter(|(g, p)| *g == gen && p.exists())
+            .map(|(_, p)| p.clone());
+        match cached {
+            Some(p) => p,
+            None => {
+                let src = compile_to_rust_worker(expr, libs).ok()?;
+                let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+                let dir = cache_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let b = dir.join(format!("w{}{}", &key[..32], BIN_EXT));
+                if !b.exists() && !build_native(&src, &b, false) {
+                    return None;
+                }
+                native_input_memo()
+                    .lock()
+                    .unwrap()
+                    .insert(memo_key, (gen, b.clone()));
+                b
+            }
+        }
+    };
+    touch(&bin);
+    // check out an idle worker for this binary, or spawn a fresh one
+    let mut w = {
+        let mut pool = worker_pool().lock().unwrap();
+        pool.get_mut(&bin).and_then(|v| v.pop())
+    }
+    .or_else(|| Worker::spawn(&bin))?;
+    let canon = noun_to_canon(input);
+    match w.request(&canon) {
+        Some(out) => {
+            let mut pool = worker_pool().lock().unwrap();
+            let total: usize = pool.values().map(|v| v.len()).sum();
+            let v = pool.entry(bin).or_default();
+            // keep a small per-binary pool, and bound the total resident workers so a suite that
+            // compiles many distinct programs can't spawn an unbounded number of processes.
+            if v.len() < 2 && total < 16 {
+                v.push(w); // return for reuse (else dropped -> killed)
+            }
+            Some(out)
+        }
+        None => None, // w dropped here (killed); caller falls back to one-shot
+    }
+}
+
+pub fn run_native_with_input(
+    expr: &str,
+    input: &crate::knot::N,
+    libs: &[&str],
+    force_rebuild: bool,
+) -> Option<crate::knot::N> {
+    use std::io::Write;
+    // Primary path: a resident worker amortizes process startup across calls. On any failure it
+    // returns None and we fall through to the one-shot spawn below — never a correctness risk.
+    if !force_rebuild {
+        if let Some(n) = run_via_worker(expr, input, libs) {
+            return Some(n);
+        }
+    }
+    // Fast path: a hot caller (an agent fold, a db transition) runs the SAME program over and
+    // over. Re-deriving the cache key means re-gathering every library and re-emitting the whole
+    // Rust source on each call — pure waste once the binary exists. Memoize (expr, libs) -> binary,
+    // guarded by the library generation so any lib (re)registration invalidates stale entries.
+    let bin: std::path::PathBuf;
+    let memo_key = format!("{}\u{0}{}", expr, libs.join("\u{0}"));
+    let gen = crate::latte::lib_generation();
+    let memo_hit = if force_rebuild {
+        None
+    } else {
+        native_input_memo()
+            .lock()
+            .unwrap()
+            .get(&memo_key)
+            .filter(|(g, p)| *g == gen && p.exists())
+            .map(|(_, p)| p.clone())
+    };
+    if let Some(p) = memo_hit {
+        record_hit();
+        bin = p;
+    } else {
+        let src = compile_to_rust_opts(expr, libs, Some("__in")).ok()?;
+        let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+        let dir = cache_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let b = dir.join(format!("i{}{}", &key[..32], BIN_EXT));
+        if force_rebuild || !b.exists() {
+            if !build_native(&src, &b, force_rebuild) {
+                return None;
+            }
+        } else {
+            record_hit();
+        }
+        native_input_memo()
+            .lock()
+            .unwrap()
+            .insert(memo_key, (gen, b.clone()));
+        bin = b;
+    }
+    touch(&bin); // mark recently used for LRU eviction
+    let mut child = std::process::Command::new(&bin)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    {
+        let stdin = child.stdin.as_mut()?;
+        stdin.write_all(noun_to_canon(input).as_bytes()).ok()?;
+    }
+    let o = child.wait_with_output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    parse_canon(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// In-process memo: (expr + libs) -> (lib generation, cached binary path). Lets a hot caller skip
+/// re-gathering libraries and re-emitting Rust just to recompute a cache key it already knows.
+fn native_input_memo(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (u64, std::path::PathBuf)>> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (u64, std::path::PathBuf)>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Run `expr` natively **only if its binary is already cached** — never triggers a `rustc`
+/// build. The daemon-aware fast path uses this: a cache hit runs in-process immediately, while
+/// a miss defers compilation to the resident server (`anvild`) rather than stalling the caller.
+/// (Re-deriving the source is cheap — it's code generation, not compilation.)
+pub fn run_native_cached(expr: &str, libs: &[&str]) -> Option<crate::knot::N> {
+    let src = compile_to_rust(expr, libs).ok()?;
+    let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+    let bin = cache_dir().join(format!("e{}{}", &key[..32], BIN_EXT));
+    if !bin.exists() {
+        return None;
+    }
+    if !quick_ok(&bin) {
+        purge_binary(&bin); // truncated/corrupt — drop it so the next path rebuilds
+        return None;
+    }
+    run_native_noun_opts(expr, libs, false)
+}
+
+/// The default execution policy for evaluating a Latte program, and the one in-process callers
+/// should reach for: **heavy code runs compiled, light code runs interpreted.** In order:
+///   1. a cached native binary always wins — no `rustc`, and this is where repeated heavy code lands;
+///   2. a cold program that looks substantial is compiled now (and cached for reuse);
+///   3. anything else — a trivial one-shot, or a program the native backend declines — runs on the
+///      interpreter, the always-correct fallback (the two engines agree by construction, enforced by
+///      the differential fuzzer), so a fallback is never wrong.
+/// This centralizes the native-first policy that `latte eval`, the SCA engine, and the GUI console
+/// each used to hand-roll.
+pub fn run_adaptive(expr: &str, libs: &[&str]) -> Result<crate::knot::N, String> {
+    if let Some(n) = run_native_cached(expr, libs) {
+        return Ok(n);
+    }
+    if worth_compiling(expr) {
+        // Prefer a resident compile daemon: it builds in the background (so this call never stalls
+        // on rustc) and dedups, and it now builds with *this* call's library scope so the binary it
+        // produces is exactly the one a later call will find cached. Only with no daemon running do
+        // we compile synchronously here (still better than interpreting heavy code repeatedly).
+        if crate::anvild::warm_bg(expr, libs) {
+            // building in the background — answer this one call on the interpreter
+        } else if let Some(n) = run_native_noun(expr, libs) {
+            return Ok(n);
+        }
+    }
+    crate::latte::run_with_libs(expr, libs)
+}
+
+/// Heuristic: is this program substantial enough that compiling it is likely to pay for the build?
+/// True when the AST contains iteration, a closure, or a call to a (possibly recursive) library arm;
+/// false for a bare literal or a tree of cheap primitives over literals like `(add 1 2)`. The cost
+/// of a wrong guess is bounded — over-compiling a trivial program wastes one cached build, while a
+/// mis-judged light program merely interprets — so a cheap structural heuristic suffices.
+pub fn worth_compiling(expr: &str) -> bool {
+    match latte::parse(expr) {
+        Ok(ast) => ast_is_heavy(&ast),
+        Err(_) => false, // doesn't parse → won't compile anyway
+    }
+}
+
+fn ast_is_heavy(a: &Ast) -> bool {
+    use Ast::*;
+    match a {
+        Lit(_) | Tag(_) | Text(_) | Nil | Var(_) => false,
+        Tuple(xs) => xs.iter().any(ast_is_heavy),
+        Inc(e) | Head(e) | Tail(e) | IsCell(e) | Fast(_, e) => ast_is_heavy(e),
+        Eq(x, y) => ast_is_heavy(x) || ast_is_heavy(y),
+        If(c, t, e) => ast_is_heavy(c) || ast_is_heavy(t) || ast_is_heavy(e),
+        Let(_, v, b) => ast_is_heavy(v) || ast_is_heavy(b),
+        Case(s, arms) => ast_is_heavy(s) || arms.iter().any(|(_, e)| ast_is_heavy(e)),
+        Gate(_, b) => ast_is_heavy(b),
+        // iteration is heavy by definition
+        Loop(..) | Again(..) => true,
+        // a call to a cheap primitive is light unless an argument is heavy; a call to a library arm
+        // (non-primitive, possibly recursive) is worth compiling
+        Call(name, args) => !is_native_op(name) || args.iter().any(ast_is_heavy),
+    }
+}
+/// already cached, never building.
+pub fn run_native_with_input_cached(
+    expr: &str,
+    input: &crate::knot::N,
+    libs: &[&str],
+) -> Option<crate::knot::N> {
+    let src = compile_to_rust_opts(expr, libs, Some("__in")).ok()?;
+    let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+    let bin = cache_dir().join(format!("i{}{}", &key[..32], BIN_EXT));
+    if !bin.exists() {
+        return None;
+    }
+    if !quick_ok(&bin) {
+        purge_binary(&bin);
+        return None;
+    }
+    run_native_with_input(expr, input, libs, false)
 }
 
 #[cfg(windows)]
@@ -814,10 +1926,588 @@ pub fn cache_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("orpheus-anvil")
 }
 
+/// Whether a cache-dir entry is a compiled program binary (`e…`/`i…`), as opposed to a
+/// transient `build-*.rs`/`build-*` artifact from an in-flight compile.
+fn is_cached_binary(name: &str) -> bool {
+    (name.starts_with('e') || name.starts_with('i'))
+        && !name.starts_with("build-")
+        && !name.ends_with(SIDECAR_EXT)
+}
+
+/// Integrity sidecar suffix. For a binary `eABC…`, `eABC….sha` holds `"<sha3hex> <size>"` written
+/// by whoever produced the binary. The cache is content-addressed by *source*, which guarantees the
+/// binary was built from the expected program; the sidecar additionally guarantees the binary's
+/// *bytes* are intact — catching truncation, bit-rot, an interrupted copy, or a poisoned shared
+/// store entry, none of which the source hash can see.
+const SIDECAR_EXT: &str = ".sha";
+
+fn sidecar_path(bin: &std::path::Path) -> std::path::PathBuf {
+    let mut s = bin.as_os_str().to_os_string();
+    s.push(SIDECAR_EXT);
+    std::path::PathBuf::from(s)
+}
+
+/// The sidecar line for a binary's bytes: `"<sha3hex> <len>"`. Pure, so it is unit-testable.
+fn sidecar_contents(bytes: &[u8]) -> String {
+    format!("{} {}", crate::sha3::hex(&crate::sha3::sha3_256(bytes)), bytes.len())
+}
+
+/// Parse a sidecar line into `(sha3hex, size)`. Pure and total.
+fn parse_sidecar(s: &str) -> Option<(String, u64)> {
+    let mut it = s.split_whitespace();
+    let hash = it.next()?.to_string();
+    let size: u64 = it.next()?.parse().ok()?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((hash, size))
+}
+
+/// Write `bin`'s integrity sidecar (atomically). Best-effort.
+fn write_sidecar(bin: &std::path::Path) {
+    if let Ok(bytes) = std::fs::read(bin) {
+        let sc = sidecar_path(bin);
+        let tmp = sidecar_path(&bin.with_file_name(format!("w-{}-{}", std::process::id(), name_of(bin))));
+        if std::fs::write(&tmp, sidecar_contents(&bytes)).is_ok() {
+            let _ = std::fs::rename(&tmp, &sc);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Integrity {
+    Ok,
+    Corrupt,
+    NoSidecar,
+}
+
+/// Cheap pre-run check: if a sidecar exists, the binary's *size* must match (catches truncation /
+/// interrupted writes at near-zero cost — no hashing). Missing sidecar ⇒ can't tell ⇒ allow.
+fn quick_ok(bin: &std::path::Path) -> bool {
+    let sc = sidecar_path(bin);
+    let txt = match std::fs::read_to_string(&sc) {
+        Ok(t) => t,
+        Err(_) => return true, // no sidecar to check against
+    };
+    match (parse_sidecar(&txt), std::fs::metadata(bin)) {
+        (Some((_, size)), Ok(m)) => m.len() == size,
+        _ => true,
+    }
+}
+
+/// Full verification: hash the binary and compare to its sidecar.
+fn verify_file(bin: &std::path::Path) -> Integrity {
+    let txt = match std::fs::read_to_string(sidecar_path(bin)) {
+        Ok(t) => t,
+        Err(_) => return Integrity::NoSidecar,
+    };
+    let (hash, size) = match parse_sidecar(&txt) {
+        Some(v) => v,
+        None => return Integrity::Corrupt, // malformed sidecar ⇒ treat as untrustworthy
+    };
+    match std::fs::read(bin) {
+        Ok(bytes) if bytes.len() as u64 == size
+            && crate::sha3::hex(&crate::sha3::sha3_256(&bytes)) == hash =>
+        {
+            Integrity::Ok
+        }
+        _ => Integrity::Corrupt,
+    }
+}
+
+/// Remove a binary and its sidecar together (self-heal a corrupt entry; next use rebuilds).
+fn purge_binary(bin: &std::path::Path) {
+    let _ = std::fs::remove_file(bin);
+    let _ = std::fs::remove_file(sidecar_path(bin));
+}
+
+/// Number of cached program binaries and their total size in bytes.
+pub fn cache_stats() -> (usize, u64) {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    if let Ok(rd) = std::fs::read_dir(cache_dir()) {
+        for e in rd.flatten() {
+            if let Some(name) = e.file_name().to_str() {
+                if is_cached_binary(name) {
+                    count += 1;
+                    if let Ok(m) = e.metadata() {
+                        bytes += m.len();
+                    }
+                }
+            }
+        }
+    }
+    (count, bytes)
+}
+
+/// Remove every cached program binary (and any stale build temporaries). Returns the
+/// number of binaries removed. The cache is purely derived, so this is always safe;
+/// programs simply rebuild on next use.
+pub fn cache_clear() -> usize {
+    let mut removed = 0usize;
+    if let Ok(rd) = std::fs::read_dir(cache_dir()) {
+        for e in rd.flatten() {
+            if let Some(name) = e.file_name().to_str() {
+                if is_cached_binary(name) {
+                    if std::fs::remove_file(e.path()).is_ok() {
+                        removed += 1;
+                    }
+                } else if name.starts_with("build-")
+                    || name.ends_with(SIDECAR_EXT)
+                    || name.starts_with("pull-")
+                    || name.starts_with("push-")
+                    || name.starts_with("w-")
+                    || name == "metrics"
+                    || name.starts_with("metrics-")
+                {
+                    let _ = std::fs::remove_file(e.path()); // sidecars, metrics + stale in-flight artifacts
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// Audit cached binaries against their integrity sidecars. Returns `(ok, corrupt, no_sidecar)`.
+/// With `repair`, corrupt binaries (and any binary with a malformed/missing-but-mismatched sidecar)
+/// are purged so the next use rebuilds them. Full hashing, so this is an explicit/on-demand check
+/// rather than something the hot run path pays for.
+pub fn cache_verify(repair: bool) -> (usize, usize, usize) {
+    let (mut ok, mut corrupt, mut no_sc) = (0usize, 0usize, 0usize);
+    let dir = cache_dir();
+    let mut bins = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_str().map(is_cached_binary).unwrap_or(false) {
+                bins.push(e.path());
+            }
+        }
+    }
+    for bin in bins {
+        match verify_file(&bin) {
+            Integrity::Ok => ok += 1,
+            Integrity::NoSidecar => no_sc += 1,
+            Integrity::Corrupt => {
+                corrupt += 1;
+                if repair {
+                    purge_binary(&bin);
+                }
+            }
+        }
+    }
+    (ok, corrupt, no_sc)
+}
+
+/// The cache size cap in bytes. `ORPHEUS_CACHE_MAX` sets it in MiB; `0` disables eviction
+/// (unbounded). Default 512 MiB — comfortably more than typical use (one shared binary per
+/// distinct program) yet small enough to keep a heavy multi-program workload from filling disk.
+pub fn cache_cap_bytes() -> u64 {
+    match std::env::var("ORPHEUS_CACHE_MAX") {
+        Ok(s) => s.trim().parse::<u64>().unwrap_or(512).saturating_mul(1 << 20),
+        Err(_) => 512 << 20,
+    }
+}
+
+/// Pure LRU eviction planner: given `(path, size, mtime)` for each cached binary and a byte
+/// `cap`, return the paths to remove — oldest (least-recently-used) first — so the remaining
+/// total fits under `cap`. Returns empty when `cap == 0` (disabled) or already within cap.
+/// Filesystem-free and deterministic, so it can be unit-tested directly.
+fn plan_evictions(
+    mut entries: Vec<(std::path::PathBuf, u64, std::time::SystemTime)>,
+    cap: u64,
+) -> Vec<std::path::PathBuf> {
+    let total: u64 = entries.iter().map(|(_, s, _)| *s).sum();
+    if cap == 0 || total <= cap {
+        return Vec::new();
+    }
+    entries.sort_by_key(|(_, _, m)| *m); // least-recently-used first
+    let mut to_free = total - cap;
+    let mut out = Vec::new();
+    for (path, size, _) in entries {
+        if to_free == 0 {
+            break;
+        }
+        out.push(path);
+        to_free = to_free.saturating_sub(size);
+    }
+    out
+}
+
+/// Enforce the cache size cap by removing least-recently-used binaries. Recency is the file
+/// mtime, refreshed on each use by `touch`. Best-effort: removing a binary another process is
+/// executing is safe on Unix (the inode lives until that process exits) and merely fails
+/// elsewhere. Intended to be called from `build_native` under the build lock.
+fn evict_to_cap() {
+    let cap = cache_cap_bytes();
+    if cap == 0 {
+        return;
+    }
+    let mut entries = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(cache_dir()) {
+        for e in rd.flatten() {
+            let is_bin = e.file_name().to_str().map(is_cached_binary).unwrap_or(false);
+            if !is_bin {
+                continue;
+            }
+            if let Ok(m) = e.metadata() {
+                let mtime = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+                entries.push((e.path(), m.len(), mtime));
+            }
+        }
+    }
+    for path in plan_evictions(entries, cap) {
+        purge_binary(&path); // binary + its sidecar
+    }
+}
+
+
+/// and the runtime-input binary (so `latte eval` and the input-fed callers are both
+/// warm). Returns Ok(true) if a build happened, Ok(false) if already warm, Err on a
+/// compile failure.
+pub fn warm_native(expr: &str, libs: &[&str]) -> Result<bool, String> {
+    let mut built = false;
+    for (input_param, prefix) in [(None, 'e'), (Some("__in"), 'i')] {
+        let src = compile_to_rust_opts(expr, libs, input_param)?;
+        let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+        let dir = cache_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let bin = dir.join(format!("{}{}{}", prefix, &key[..32], BIN_EXT));
+        if !bin.exists() {
+            if !build_native(&src, &bin, false) {
+                return Err(format!("native compile failed for {} mode", prefix));
+            }
+            built = true;
+        }
+    }
+    Ok(built)
+}
+
 #[cfg(test)]
 mod tests {
     use super::compile_to_rust;
+    use super::worth_compiling;
     use crate::latte;
+
+    #[test]
+    fn resident_worker_serves_many_requests() {
+        // The loop-mode worker must handle multiple framed requests on one process and agree with
+        // the one-shot path. Exercises: compile loop binary, spawn, two round-trips, pool reuse.
+        use crate::knot::{cell, num};
+        let expr = "(add (head __in) (tail __in))";
+        let a = super::run_via_worker(expr, &cell(num(5), num(7)), &["std"])
+            .expect("worker round-trip 1");
+        assert_eq!(a, num(12));
+        let b = super::run_via_worker(expr, &cell(num(10), num(20)), &["std"])
+            .expect("worker round-trip 2 (reused process)");
+        assert_eq!(b, num(30));
+        // worker result must equal the one-shot native path
+        let c = super::run_native_with_input(expr, &cell(num(2), num(3)), &["std"], false)
+            .expect("one-shot");
+        assert_eq!(c, num(5));
+    }
+
+    #[test]
+    fn heaviness_gate_picks_compile_for_real_work_only() {
+        // Trivial: a bare literal or a tree of cheap primitives over literals → interpret.
+        assert!(!worth_compiling("42"));
+        assert!(!worth_compiling("(add 1 2)"));
+        assert!(!worth_compiling("(add (mul 2 3) (sub 9 4))"));
+        assert!(!worth_compiling("(let x = 5 in (add x 1))"));
+        // Substantial: iteration, a call to a library arm, or a closure-driven HOF → compile.
+        assert!(worth_compiling("(map (fn [x] -> (mul x x)) (range 5))"));
+        assert!(worth_compiling("(foldl (fn [a v] -> (add a v)) 0 (range 9))"));
+        assert!(worth_compiling("(fib 30)"));
+        assert!(worth_compiling(
+            "(loop with [i = 3, acc = 0] : if (i == 0) then acc else again((dec i), (add acc i)) end)"
+        ));
+        // Doesn't parse → not worth compiling (would only fail rustc).
+        assert!(!worth_compiling("(((("));
+    }
+
+    #[test]
+    fn native_case_handles_long_tags() {
+        // Regression: a `case` whose pattern tag exceeds 16 bytes used to exceed the u128 tag
+        // backend and fall back; it must now compile natively and agree with the interpreter,
+        // just like a long tag used as a literal.
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        let t = "%this_is_a_very_long_tag_name_well_over_sixteen_bytes";
+        let expr = format!("(case {t} of {t} -> 111 ; _ -> 222 end)", t = t);
+        // the front-end no longer rejects the long tag
+        assert!(super::compile_to_rust(&expr, &refs).is_ok(), "long-tag case should lower natively");
+        // native (when rustc is available) agrees with the interpreter and takes the match arm
+        if let Some(n) = super::run_native_noun(&expr, &refs) {
+            let interp = crate::latte::run_with_libs(&expr, &refs).expect("interp runs");
+            assert_eq!(super::noun_to_canon(&n), super::noun_to_canon(&interp));
+            assert_eq!(n.as_atom().and_then(|a| a.to_u128()), Some(111));
+        }
+    }
+
+    #[test]
+    fn native_closure_captures_arm_shadowing_local() {
+        // Regression: a closure that captures a local whose name coincides with a library arm
+        // used to drop the capture (free_vars treats arm names as global references) and emit
+        // an unbound variable, forcing the whole program onto the interpreter. Binders that
+        // shadow an arm are now alpha-renamed like shadowed primitives, so such closures
+        // compile natively and agree with the interpreter.
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+
+        // synthetic: capture a local named `len` (a std arm) inside a map closure
+        let e1 = "(let len = 7 in (map (fn [e] -> (add e len)) [1 [2 [3 0]]]))";
+        assert!(super::compile_to_rust(e1, &refs).is_ok(), "arm-shadowing capture should lower natively");
+        if let Some(n) = super::run_native_noun(e1, &refs) {
+            let interp = crate::latte::run_with_libs(e1, &refs).expect("interp runs");
+            assert_eq!(super::noun_to_canon(&n), super::noun_to_canon(&interp));
+        }
+
+        // real code: db_select's scan path filters with a closure capturing its `field` and
+        // `value` parameters (`field` is itself an arm in ui.lat) — exactly the form that
+        // previously could not be compiled.
+        let e2 = "(db_pluck 1 (db_select (db_orders 0) 2 250 %o0 %o9))";
+        assert!(super::compile_to_rust(e2, &refs).is_ok(), "db_select closure should lower natively");
+        if let Some(n) = super::run_native_noun(e2, &refs) {
+            let interp = crate::latte::run_with_libs(e2, &refs).expect("interp runs");
+            assert_eq!(super::noun_to_canon(&n), super::noun_to_canon(&interp));
+        }
+    }
+
+    #[test]
+    fn native_bignum_arithmetic_exceeds_u128() {
+        // Regression: native atoms are u128, but the database's bloom filter / hash bitset builds
+        // values far wider than that (a 4096-bit set via shl/pow/bor). Those arithmetic ops used
+        // to overflow u128 at run time, panic, and silently fall back to the interpreter (which
+        // then exhausted its fuel on heavy programs). The native backend now carries
+        // arbitrary-precision naturals, so each of these compiles, runs natively, and agrees with
+        // the interpreter — exercising mul (shl/pow), add, borrow-sub, div, mod, and bitwise ops.
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        let cases = [
+            "(pow 2 4000)",                           // ~500-byte result, via repeated squaring
+            "(add (pow 2 200) (pow 2 200))",          // wide add with carry
+            "(sub (pow 2 200) 1)",                    // wide borrow across many bytes
+            "(mul (pow 2 100) (pow 2 100))",          // wide * wide
+            "(div (pow 2 200) (pow 2 100))",          // wide / wide (power-of-two fast path)
+            "(mod (pow 2 200) 1000000007)",           // wide mod small (general division)
+            "(bor (shl 1 200) 5)",                    // bitwise OR on a wide value
+            "(band (sub (pow 2 256) 1) (shl 1 200))", // bitwise AND on wide values
+            "(bit (shl 1 4000) 4000)",                // bit test high in a 4096-bit value
+        ];
+        for e in cases {
+            assert!(super::compile_to_rust(e, &refs).is_ok(), "{} should lower natively", e);
+            if let Some(n) = super::run_native_noun(e, &refs) {
+                let interp = crate::latte::run_with_libs(e, &refs).expect("interp runs");
+                assert_eq!(
+                    super::noun_to_canon(&n),
+                    super::noun_to_canon(&interp),
+                    "native and interpreter disagree on {}",
+                    e
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_compiles_full_bond_model() {
+        // The fully-featured bond model — a ~230-month feature build over eight fixed-income
+        // factors, plus a 4000-iteration logistic fit and out-of-sample evaluation — exceeds the
+        // interpreter's default fuel budget, but compiles and runs natively (the adaptive
+        // opt-level optimizes a program this large). It must lower to native code and produce the
+        // known report [ train test baseline ] = 98.6% / 70.8% / 63.3% (signed fractions x1000).
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        assert!(super::compile_to_rust("(report 0)", &refs).is_ok(), "the bond model should lower natively");
+        if let Some(n) = super::run_native_noun("(report 0)", &refs) {
+            assert_eq!(super::noun_to_canon(&n), "[[0 986] [[0 708] [[0 633] 0]]]");
+        }
+    }
+
+    #[test]
+    fn native_compiles_higher_order_idioms() {
+        // Valid functional Latte — closures passed to HOFs, a gate bound to a name and applied,
+        // a gate parameter applied twice, a comparator closure, case dispatch, and closures that
+        // capture a local whose name collides with a library arm — must all (a) lower to native
+        // code and (b) produce the SAME noun as the interpreter. This guards the native backend's
+        // completeness: a future change that drops any of these back to the interpreter trips (a),
+        // and one that miscompiles any of them trips (b).
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        let cases = [
+            // composed HOFs: foldl over a mapped list
+            "(foldl (fn [a v] -> (add a v)) 0 (map (fn [x] -> (mul x x)) [1 [2 [3 0]]]))",
+            // a gate bound to a let and then applied through a HOF
+            "(let g = (fn [x] -> (add x 1)) in (map g [1 [2 [3 0]]]))",
+            // a higher-order gate PARAMETER, applied twice inside the body
+            "(let f = (fn [k x] -> (k (k x))) in (f (fn [y] -> (add y 1)) 10))",
+            // a closure that itself calls another HOF
+            "(filter (fn [e] -> (member e [2 [4 0]])) [1 [2 [3 [4 0]]]])",
+            // a comparator closure
+            "(sortby (fn [a b] -> (lt a b)) [3 [1 [2 0]]])",
+            // case dispatch
+            "(case %xx of %xx -> 1 ; _ -> 2 end)",
+            // closures capturing a local whose name is also a library arm (the shadowing fix):
+            "(let len = 7 in (map (fn [e] -> (add e len)) [1 [2 [3 0]]]))",
+            "(let field = 1 in (foldl (fn [acc e] -> if ((head e) == field) then (tail e) else acc) 0 [[1 9] 0]))",
+            "(let nadd = 5 in (foldl (fn [a x] -> (add a (add x nadd))) 0 [1 [2 [3 0]]]))",
+        ];
+        for expr in cases {
+            assert!(
+                super::compile_to_rust(expr, &refs).is_ok(),
+                "valid HOF idiom should lower natively (regressed to interpreter): {}",
+                expr
+            );
+            if let Some(n) = super::run_native_noun(expr, &refs) {
+                let interp = crate::latte::run_with_libs(expr, &refs).expect("interp runs");
+                assert_eq!(
+                    super::noun_to_canon(&n),
+                    super::noun_to_canon(&interp),
+                    "native result diverged from the interpreter: {}",
+                    expr
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_and_interp_agree_on_rejected_programs() {
+        // Latte has no first-class primitive/arm references and no partial application: a bare
+        // function name in a value position (`add`, `db_pk`, the cord-jet `bytes`) and an
+        // under-applied primitive (`(add 1)`) are rejected by the INTERPRETER. The native backend
+        // must AGREE — it must never silently lower one of these into a value the interpreter
+        // would never produce. The invariant checked is "native accepts iff the interpreter
+        // accepts". If first-class functions are ever introduced, that is a LANGUAGE change: both
+        // engines must adopt it together (e.g. eta-expanding a bare name into a closure on both
+        // sides), and this test must be updated deliberately — its failure here is the signal that
+        // the two engines have drifted apart.
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        let rejected = [
+            "(foldl add 0 [1 [2 [3 0]]])",                 // primitive as a first-class value
+            "(map dec [3 [4 [5 0]]])",                      // primitive as a value
+            "(map bytes [%ab [%cd 0]])",                     // cord-jet as a value
+            "(map db_pk (db_scan (db_orders 0) %o0 %o9))",  // library arm as a value
+            "(add 1)",                                       // partial application
+        ];
+        for expr in rejected {
+            let interp_ok = crate::latte::run_with_libs(expr, &refs).is_ok();
+            let native_ok = super::compile_to_rust(expr, &refs).is_ok();
+            assert!(!interp_ok, "precondition: interpreter should reject this program: {}", expr);
+            assert_eq!(
+                native_ok, interp_ok,
+                "native and interpreter must agree on acceptance (no silent divergence): {}",
+                expr
+            );
+        }
+    }
+
+    #[test]
+    fn native_runtime_falls_back_gracefully_to_interpreter() {
+        // Arithmetic on a cord longer than 16 bytes exceeds the u128 the native backend uses for
+        // atoms; the emitted program lowers fine but panics at run time on such an atom, so the
+        // engine falls back to the interpreter — the always-correct reference enforced by the
+        // differential fuzzer. The user-visible result via run_adaptive (native-or-fallback) must
+        // therefore equal the interpreter's, even though the native run itself cannot complete.
+        // This pins the safety net: the boundary stays correct, never a wrong native answer.
+        let libs = latte::all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        let expr = "(add %aaaaaaaaaaaaaaaaaaaa 1)"; // a 20-byte cord atom, + 1
+        let interp = crate::latte::run_with_libs(expr, &refs).expect("interp runs");
+        // it lowers (the fallback is a *runtime* event, not a compile-time rejection)
+        assert!(super::compile_to_rust(expr, &refs).is_ok(), "long-cord arithmetic should still lower");
+        // and the adaptive path returns the interpreter's value
+        let adaptive = super::run_adaptive(expr, &refs).expect("adaptive returns a value via fallback");
+        assert_eq!(
+            super::noun_to_canon(&adaptive),
+            super::noun_to_canon(&interp),
+            "adaptive (native-or-fallback) must match the interpreter on long-cord arithmetic"
+        );
+    }
+
+    #[test]
+    fn metrics_roundtrip_and_derivations() {
+        use super::{format_metrics, parse_metrics, Metrics};
+        let m = Metrics { builds: 4, build_ms_total: 2000, hits: 10, pulls: 2, build_failures: 1 };
+        // serialize → parse is identity
+        let back = parse_metrics(&format_metrics(&m));
+        assert_eq!((back.builds, back.build_ms_total, back.hits, back.pulls, back.build_failures),
+                   (4, 2000, 10, 2, 1));
+        assert_eq!(m.avg_build_ms(), 500); // 2000/4
+        assert_eq!(m.est_saved_ms(), 6000); // (10+2)*500
+        // robust to missing/garbage lines and to no builds (no divide-by-zero)
+        let z = parse_metrics("hits 7\njunk\nbuilds notanum\n");
+        assert_eq!((z.hits, z.builds), (7, 0));
+        assert_eq!(z.avg_build_ms(), 0);
+        assert_eq!(z.est_saved_ms(), 0);
+    }
+
+    #[test]
+    fn build_log_tail_keeps_whole_lines() {
+        use super::tail_from_line_boundary;
+        let log = "line1\nline2\nline3\n";
+        // fits within max → unchanged
+        assert_eq!(tail_from_line_boundary(log, 1000), log);
+        // tight cap → drop oldest whole lines, never a partial line
+        let t = tail_from_line_boundary(log, 12);
+        assert!(t.ends_with("line3\n"));
+        assert!(!t.contains("line1")); // oldest dropped
+        for piece in t.split('\n').filter(|s| !s.is_empty()) {
+            assert!(log.contains(&format!("{}\n", piece)), "no partial lines: {:?}", piece);
+        }
+    }
+
+    #[test]
+    fn sidecar_roundtrip_and_validation() {
+        use super::{parse_sidecar, sidecar_contents};
+        let line = sidecar_contents(b"hello world");
+        let (hash, size) = parse_sidecar(&line).expect("well-formed");
+        assert_eq!(size, 11);
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        // identical bytes ⇒ identical sidecar; one different byte ⇒ different hash
+        assert_eq!(sidecar_contents(b"hello world"), line);
+        assert_ne!(sidecar_contents(b"hello worle"), line);
+        // malformed sidecars are rejected, not panicked on
+        assert!(parse_sidecar("").is_none());
+        assert!(parse_sidecar("deadbeef 10").is_none()); // hash too short
+        assert!(parse_sidecar("nothex_nothex_nothex_nothex_nothex_nothex_nothex_nothex_nothex_xx 5").is_none());
+        assert!(parse_sidecar(&format!("{} notanumber", "a".repeat(64))).is_none());
+    }
+
+    #[test]
+    fn toolchain_id_components_are_filesystem_safe() {
+        use super::sanitize_component;
+        assert_eq!(sanitize_component("1.75.0"), "1.75.0");
+        assert_eq!(sanitize_component("x86_64-unknown-linux-gnu"), "x86_64-unknown-linux-gnu");
+        // spaces, parens, slashes → '-', so a tid is always a single safe path component
+        assert_eq!(sanitize_component("rustc 1.75 (abc 2023)"), "rustc-1.75--abc-2023-");
+        assert_eq!(sanitize_component("a/b\\c:d"), "a-b-c-d");
+        assert!(!super::toolchain_id().is_empty());
+    }
+
+    #[test]
+    fn cache_eviction_plan_is_lru_and_bounded() {
+        use super::plan_evictions;
+        use std::path::PathBuf;
+        use std::time::{Duration, UNIX_EPOCH};
+        let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+        // Three 100-byte binaries, cap 150 → must free ≥150, evicting oldest-mtime first.
+        let entries = vec![
+            (PathBuf::from("new"), 100u64, at(3)),
+            (PathBuf::from("old"), 100, at(1)),
+            (PathBuf::from("mid"), 100, at(2)),
+        ];
+        assert_eq!(
+            plan_evictions(entries, 150),
+            vec![PathBuf::from("old"), PathBuf::from("mid")],
+            "evicts least-recently-used first until under cap"
+        );
+        // Already within cap → nothing removed.
+        assert!(plan_evictions(vec![(PathBuf::from("a"), 50, at(1))], 100).is_empty());
+        // cap 0 disables eviction entirely.
+        assert!(plan_evictions(vec![(PathBuf::from("a"), 999, at(1))], 0).is_empty());
+    }
 
     fn libs() -> Vec<String> {
         latte::all_libs()
@@ -888,17 +2578,17 @@ mod tests {
 
     #[test]
     fn boundary_failure_modes_match() {
-        // Anvil must agree with the interpreter on values whenever BOTH succeed,
-        // and must never silently wrap: past the u128 boundary the native
-        // backend DECLINES (None -> interpreter fallback) while the interpreter's
-        // big-number jets carry on. Domain errors (underflow, divide by zero,
-        // dec(0)) must fail on both.
+        // Anvil must agree with the interpreter on values. The native backend now carries
+        // arbitrary-precision naturals (not just u128), so values past the old u128 boundary
+        // succeed on BOTH engines and must produce the same noun — never a silent wrap. Domain
+        // errors (underflow, divide by zero, dec(0)) must still fail on both.
         let cases: &[(&str, Expect)] = &[
             ("(mul 65536 65536)", Expect::BothOk),
             ("(div 100 7)", Expect::BothOk),
             ("(add 340282366920938463463374607431768211454 1)", Expect::BothOk), // == u128::MAX
-            ("(add 340282366920938463463374607431768211455 1)", Expect::InterpOnly), // big jets carry on
-            ("(mul 18446744073709551616 18446744073709551616)", Expect::InterpOnly),
+            ("(add 340282366920938463463374607431768211455 1)", Expect::BothOk), // u128::MAX + 1 = 2^128
+            ("(mul 18446744073709551616 18446744073709551616)", Expect::BothOk), // 2^64 * 2^64 = 2^128
+            ("(pow 2 600)", Expect::BothOk), // far past u128, via repeated squaring
             ("(sub 3 5)", Expect::BothFail),
             ("(div 5 0)", Expect::BothFail),
             ("(dec 0)", Expect::BothFail),
@@ -907,7 +2597,6 @@ mod tests {
         enum Expect {
             BothOk,
             BothFail,
-            InterpOnly, // interpreter succeeds (arbitrary precision); native declines
         }
         for (i, (e, expect)) in cases.iter().enumerate() {
             let iv = interp_opt(e);
@@ -919,10 +2608,6 @@ mod tests {
                 }
                 Expect::BothFail => {
                     assert!(iv.is_none() && nv.is_none(), "{} should fail on both: interp={:?} native={:?}", e, iv, nv);
-                }
-                Expect::InterpOnly => {
-                    assert!(iv.is_some(), "{} should succeed on the interpreter (big jets)", e);
-                    assert!(nv.is_none(), "{} must DECLINE on the u128-bound native backend, not wrap", e);
                 }
             }
         }

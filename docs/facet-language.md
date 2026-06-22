@@ -65,49 +65,105 @@ A value is **true** when it is non-empty / non-zero:
 
 ---
 
-## 3. Built-in tools
+## 3. The tool registry
 
-Tools live in the host's dispatch table (`dispatch_tool` in `src/facet.rs`). The ones shipped:
+Every tool is an entry in a single **registry** in `src/facet.rs`: a `ToolSpec` records the
+module, procedure, signature, a one-line summary, and the handler function; a `ModuleSpec`
+records each module's name and summary. `dispatch_tool` routes a `Module.procedure` call to its
+handler, and — because the registry is data — the environment can describe *itself* (see the
+`Meta` module below), and a page can never document a tool that isn't actually callable.
 
-| Call | Result |
-|------|--------|
-| `SCArs.evolve(word)` | evolve a Solar word into Heart Speech through the full Ligurian pipeline (see [`scars-sound-changes.md`](scars-sound-changes.md)) |
-| `SCArs.apply(word, rule1, rule2, …)` | apply *arbitrary* sound-change rules to a word (the general engine) |
-| `Txt.upper(s)` | uppercase |
-| `Txt.cap(s)` | capitalise the first letter |
-| `Txt.join(list, sep)` | join a list into text with a separator |
+The shipped modules (44 tools in all; ask `Meta.modules()` / `Meta.tools(m)` for the live list):
 
-The sound-change tool runs on the Loom via the Latte engine (`lib/sca.lat`), so a Facet page
-is genuinely computing its content through the same VM as everything else.
+| Module | What it offers |
+|--------|----------------|
+| `SCArs` | the sound-change applier — `pie`, `evolve`, `apply(word, rule…)`, `trace` |
+| `Txt`   | composable text helpers — `upper`, `lower`, `cap`, `rev`, `trim`, `len`, `words`, `replace`, `join`, `split`, `esc` |
+| `Latte` | the whole Latte language, evaluated live — `eval(expr)` |
+| `Viz`   | render data as SVG charts — `chart(kind, numbers)` (bars / line / scatter) |
+| `Mkt`   | a market-data lab over a built-in price series — `span`, `stat`, `series`, `chart`, `vol`, `advice`, `forecast` (HAR-RV) |
+| `Date`  | civil date arithmetic — `add`, `between`, `weekday`, `ordinal`, `fromordinal` |
+| `Sent`  | text sentiment scoring — `polarity`, `label`, `counts` |
+| `Hash`  | SHA3-256 digests — `sha3`, `short` |
+| `Phono` | phonology — `presets`, `inventory`, `words`, `report`, `coin` |
+| `Meta`  | the environment describing its own tools — `modules`, `tools(module)`, `count` |
+| `Live`  | live, client-updating widgets — `box(expr, fields)`, `view(expr, fields)` (see §4) |
+
+Tools that produce SVG or HTML (`Viz.chart`, `Mkt.chart`) return raw markup, which renders
+inline because holes are not re-escaped. Everything runs on the same VM as the rest of the
+system — e.g. `Latte.eval` is the full language, and `SCArs.*` runs `lib/sca.lat` on the Loom —
+so a Facet page genuinely computes its content rather than templating canned strings.
 
 ### Adding a tool
-A new tool is one match arm in `dispatch_tool(module, proc, args)`:
+Write a handler `fn(&[Val]) -> Result<Val, String>` and add one `ToolSpec` to the registry:
 
 ```rust
-("Math", "double") => {
-    let n: u128 = arg_text(args, 0)?.parse().unwrap_or(0);
-    Ok(Val::Text((n * 2).to_string()))
+fn tool_math_double(args: &[Val]) -> Result<Val, String> {
+    Ok(Val::Num(arg_num_or(args, 0, 0) * 2))
 }
+// ... in tool_specs():
+ToolSpec { module: "Math", proc: "double", sig: "Math.double(n)",
+           summary: "twice n", handler: tool_math_double },
+// ... and once per module, in module_specs():
+ModuleSpec { name: "Math", summary: "small arithmetic helpers" },
 ```
 
-After rebuilding, `{{ Math.double(21) }}` renders `42`. Keep tools pure so pages stay
-deterministic.
+After rebuilding, `{{ Math.double(21) }}` renders `42`, `Meta.tools("Math")` lists it, and the
+tools page (§4) picks it up automatically. Keep handlers **pure** so pages stay deterministic.
 
 ---
 
-## 4. Rendering pipeline
+## 4. Live, interactive widgets
+
+A plain hole is computed once, on the server, when the page is rendered. The `Live` module turns
+a hole into a **widget the reader can drive** without leaving the page:
+
+```
+{{ Live.box("SCArs.evolve(word)",  [["word", "kasa"]]) }}      text output
+{{ Live.view("Viz.chart(kind, nums)",                          raw HTML/SVG output
+     [["kind", "bars", "bars", "line", "scatter"],
+      ["nums", "3 1 4 1 5 9"]]) }}
+```
+
+The first argument is any Facet expression; the field names in it become editable controls. The
+field list is `[[name, default, …], …]`, and the extra items pick the control:
+
+| Field shape | Control |
+|-------------|---------|
+| `[name, default]` | a text input |
+| `[name, default, opt1, opt2, …]` | a `<select>` dropdown of the options |
+| `[name, default, "~", min, max, step]` | a range slider |
+
+`Live.box` shows the result as text (escaped); `Live.view` inserts it as raw markup, so chart
+and HTML tools display live. As the reader edits a control, the widget re-evaluates the
+expression on the server through `POST /api/eval` and swaps in the new result — debounced, with
+a small cache on both client and server, and out-of-order responses dropped. With JavaScript
+off, each widget still shows its server-rendered initial value, so the page degrades cleanly.
+
+The hosted page `lib/site/tools.facet` is built entirely from these widgets: a live frame for
+every module above, so the whole tool surface is explorable in the browser.
+
+---
+
+## 5. Rendering pipeline
 
 - **Hosted files.** Hymn serves `*.facet` files from the site root, rendering them per request.
-  `lib/site/index.facet` is the example page.
+  `lib/site/index.facet` is the example page; `lib/site/tools.facet` is the interactive tool
+  catalogue (§4).
 - **Live preview API.** `POST /api/render` with a Facet body returns the rendered HTML; this is
   what the WYSIWYG editor at `/editor` uses for its live pane.
+- **Live-widget API.** `POST /api/eval` with `expr=…&name=value&…` evaluates a single expression
+  with the given field values and returns its rendered result; this is what `Live.box` /
+  `Live.view` widgets call as the reader edits a control. Results are cached (keyed by the
+  library generation, so they refresh when a lib changes) and the parse of each expression is
+  cached independently.
 - **Editing.** The `/editor` page opens and saves the hosted `*.facet` files (`GET`/`POST
   /api/file?path=NAME.facet`) and is Unicode-safe, so Heart Speech glyphs like `ɣ`, `ā`, `ō̃`
   round-trip through edit → save → render byte-for-byte.
 
 ---
 
-## 5. A complete page
+## 6. A complete page
 
 ```html
 <!doctype html>
@@ -128,9 +184,11 @@ the table changes — no compilation, no client-side code.
 
 ---
 
-## 6. Gotchas
+## 7. Gotchas
 
-- **Strings use double quotes.** `"zelā"`, not `'zelā'`.
+- **Strings use double quotes.** `"zelā"`, not `'zelā'`. Inside them the usual escapes work
+  (`\n`, `\t`, `\"`, `\\`), which matters when an expression is itself a string argument to
+  `Live.box`/`Live.view`.
 - **List items are comma-separated:** `["a", "b"]` (Facet), unlike Latte's space-separated
   `[a b 0]`.
 - **`if` truthiness is "non-empty is true"** — the opposite of Latte's loobean. An empty

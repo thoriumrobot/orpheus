@@ -106,8 +106,8 @@ core findb
     (catall [ (numtext (add px 1)) "," (numtext (add py 1)) 0 ])
   fd_sparkof = fn [ys] ->
     let n = (len ys) in
-    let lo = (foldl (fn [a v] -> (min a v)) (head ys) (tail ys)) in
-    let hi = (foldl (fn [a v] -> (max a v)) (head ys) (tail ys)) in
+    let lo = (db_lmin ys) in
+    let hi = (db_lmax ys) in
     let span = (max 1 (sub hi lo)) in
     [ %svg (catbal [
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"60\" viewBox=\"0 0 320 60\">"

@@ -1,0 +1,48 @@
+:: ===========================================================================
+:: scarun.lat — the SCArs rewrite CORE, end to end in Latte (runs on Loom).
+::
+:: Ties the two Latte stages together so a sound change can be applied to a word
+:: WITHOUT the Rust host, except for parsing a rule *string* into compiled rules
+:: (still `src/sca.rs`; see docs/scars-sound-changes.md §7):
+::
+::    word ──(scatok.tokenize)──► graphemes ──(wordsegs)──► boundary-padded
+::         ──(sca.apply with compiled rules)──► segments ──(segstr)──► word
+::
+:: Segment/rule shapes match the Rust host exactly (src/sca.rs):
+::    phoneme segment = [0 <grapheme cord>]      boundary segment = [2 0]
+::    word            = bound :: phonemes :: bound :: 0   (0-terminated)
+::    compiled rule   = [from [to [pre-reversed post]]]   (lists of tokens)
+::    token           = [tag payload]   tag 0 literal, 1 wildcard, 2 boundary
+:: ===========================================================================
+import std
+import sca
+import scatok
+core scarun
+  :: ---- word ⇄ segment list (the Rust `word_segments` / `seglist_to_string`) -
+  phonseg  = fn [g] -> [ 0 g ]              :: a phoneme segment
+  boundseg = fn [_] -> [ 2 0 ]              :: the boundary marker (#)
+
+  :: graphemes (inventory cords) + word → boundary-padded 0-terminated segments
+  wordsegs = fn [inv word] ->
+    let segs = (map (fn [g] -> (phonseg g)) (tokenize inv word)) in
+    (append [ (boundseg 0) 0 ] (append segs [ (boundseg 0) 0 ]))
+
+  :: segment list → cord, dropping the boundary padding (Rust strips '#')
+  segstr = fn [segs] ->
+    (catall (map (fn [seg] -> if ((head seg) == 2) then 0 else (tail seg)) segs))
+
+  :: ---- one-shot: apply already-compiled rules to a word -------------------
+  :: `inv` = grapheme inventory (digraphs only need listing), `rules` = compiled
+  :: rule list in the engine's shape, `word` = the input cord.  Result: the
+  :: rewritten cord.  This is exactly what `run_sca` does, minus the Rust parse.
+  run = fn [inv rules word] -> (segstr (apply (wordsegs inv word) rules))
+
+  :: ---- a tiny rule constructor, so rules can be built as Latte data --------
+  :: a literal token matching one grapheme cord
+  lit = fn [g] -> [ 0 g ]
+  :: a one-token sequence (most contexts/targets are a single segment here)
+  one = fn [t] -> [ t 0 ]
+  :: build a compiled rule  from → to / pre _ post  where each of from/to/pre/
+  :: post is already a token list (0 for empty); `pre` must be REVERSED.
+  rule = fn [from to pre post] -> [ from [ to [ pre post ] ] ]
+end

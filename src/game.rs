@@ -63,12 +63,34 @@ pub fn board_side(state: &N) -> (Vec<u128>, u128) {
 /// the GUI's `/api/chess` to play "against the model".
 pub fn ai_move(state: &N, ml: bool) -> Option<N> {
     if ml {
-        // "play the learned model": the Latte ML evaluator at 2-ply (kept as the
-        // documented machine-learning experiment, not the strongest opponent)
+        // "Play the learned model": the Latte ML evaluator (8 learned features —
+        // material + centre control + minor development + pawn advancement) driving an
+        // alpha-beta search with move ordering. We run it NATIVELY: the search program is
+        // compiled once (and, being well over the size threshold, with optimization on),
+        // then every position is piped in on stdin — no interpreter fuel limit, ~2x faster
+        // than the interpreter at the same depth. The trained weights are baked in as a
+        // literal so one binary serves the whole game. Falls back to the interpreter if the
+        // native toolchain declines.
         let a = ai()?;
+        let depth = 2;
+        if let Some(wlit) = crate::dbservice::noun_to_latte(&a.weights) {
+            let expr = format!("(choose_ab __in {} {})", wlit, depth);
+            let libs = ["std", "chess", "num", "chessml"];
+            if let Some(mv) = crate::rustgen::run_native_with_input(&expr, state, &libs, false) {
+                if mv.as_atom().is_none() {
+                    // verify the native move against the Latte rules' legal list
+                    if let (Some(f), Some(t)) = (head(&mv).map(|x| u(&x)), tail(&mv).and_then(|r| head(&r)).map(|x| u(&x))) {
+                        if legal_moves(state).iter().any(|&(lf, lt)| lf == f && lt == t) {
+                            return Some(mv);
+                        }
+                    }
+                }
+            }
+        }
+        // interpreter fallback (fuel-bounded) at the same depth
         let mv = a
             .ml
-            .call("choose_ab", cell(state.clone(), cell(a.weights.clone(), num(2))))
+            .call("choose_ab", cell(state.clone(), cell(a.weights.clone(), num(depth))))
             .ok()?;
         return if mv.as_atom().is_some() { None } else { Some(mv) };
     }
@@ -528,11 +550,8 @@ pub fn xq_command(verb: &str, f: Option<u128>, t: Option<u128>) -> String {
         }
         "move" => {
             if let (Some(f), Some(t), Some(st), Some(r)) = (f, t, xq_current(), xq_rules()) {
-                // only apply moves the Latte rules call legal
-                let legal = r
-                    .call("xqlegal", st.clone())
-                    .map(|n| move_list(&n))
-                    .unwrap_or_default();
+                // only apply moves the rules call legal (computed natively)
+                let legal = xq_legal_native(&st).map(|n| move_list(&n)).unwrap_or_default();
                 if legal.iter().any(|&(lf, lt)| lf == f && lt == t) {
                     let (board, side) = xq_board_side(&st);
                     let bn = vec_to_list(&board);
@@ -560,6 +579,19 @@ pub fn xq_command(verb: &str, f: Option<u128>, t: Option<u128>) -> String {
     xq_json()
 }
 
+/// The legal-move list, computed by the COMPILED `xqlegal` (native — no interpreter on the
+/// per-move hot path), falling back to the interpreter only if the native toolchain declines.
+/// `xqlegal` is heavy (pseudo-move generation over 90 squares, then a general-safety attack scan
+/// per move), exactly the kind of code that should be compiled by default.
+fn xq_legal_native(state: &N) -> Option<N> {
+    if let Some(n) =
+        crate::rustgen::run_native_with_input("(xqlegal __in)", state, &["std", "xiangqi"], false)
+    {
+        return Some(n);
+    }
+    xq_rules()?.call("xqlegal", state.clone()).ok()
+}
+
 /// The trained model's move. The MODEL is the Latte-learned evaluator of
 /// lib/xiangqiml.lat (piece values fit by gradient descent on Loom, once per
 /// process); the SEARCH runs natively here at 4 plies, because a 90-square
@@ -570,21 +602,24 @@ pub fn xq_command(verb: &str, f: Option<u128>, t: Option<u128>) -> String {
 /// implementations police each other, as with chess.
 fn xq_model_move(state: &N) -> Option<(u128, u128)> {
     let (board, side) = xq_board_side(state);
-    let legal = xq_rules()?
-        .call("xqlegal", state.clone())
-        .map(|n| move_list(&n))
-        .unwrap_or_default();
+    let legal = xq_legal_native(state).map(|n| move_list(&n)).unwrap_or_default();
     if legal.is_empty() {
         return None;
     }
     let w = xq_learned_values(); // the TRAINED weights (×1000), from Latte
-    let weights: [i32; 6] = if w.len() == 6 {
-        [w[0] as i32, w[1] as i32, w[2] as i32, w[3] as i32, w[4] as i32, w[5] as i32]
+    let weights: [i32; 8] = if w.len() == 8 {
+        [
+            w[0] as i32, w[1] as i32, w[2] as i32, w[3] as i32, w[4] as i32, w[5] as i32,
+            w[6] as i32, w[7] as i32,
+        ]
     } else {
-        [1000, 4000, 2000, 9000, 4500, 2000]
+        [1000, 4000, 2000, 9000, 4500, 2000, 170, 170]
     };
     let b = xqb_of(&board);
-    if let Some((f, t)) = xq_search(&b, side as i8, 4, &weights) {
+    // depth 6: the pseudo-legal search with MVV-LVA ordering + quiescence is cheap per node
+    // (legality is verified once on the chosen move, not at every node), so two extra plies over
+    // the old depth-4 cost only a few hundred ms while sharpening tactics considerably.
+    if let Some((f, t)) = xq_search(&b, side as i8, 6, &weights) {
         if legal.iter().any(|&(lf, lt)| lf == f as u128 && lt == t as u128) {
             return Some((f as u128, t as u128));
         }
@@ -608,18 +643,34 @@ fn xqcolor(p: i8) -> i8 {
 fn xqkind(p: i8) -> i8 {
     if p == 0 { 0 } else if p < 8 { p } else { p - 7 }
 }
-/// model evaluation from White's view: the LEARNED piece values (general = huge)
-fn xqeval(b: &XqBoard, w: &[i32; 6]) -> i32 {
+/// model evaluation from White's view, using the LEARNED weights: 6 material values (general =
+/// huge) plus 2 positional terms that MUST mirror lib/xiangqiml.lat `xqposvec` exactly —
+///   w[6]·fadv  (soldiers across the river, White − Black)
+///   w[7]·fcen  (horse/chariot/cannon on the central files, White − Black)
+/// so the fast native search optimises the same function the Latte model was trained to predict.
+fn xqeval(b: &XqBoard, w: &[i32; 8]) -> i32 {
     let mut e = 0i32;
-    for &p in b.iter() {
+    let mut fadv = 0i32;
+    let mut fcen = 0i32;
+    for (i, &p) in b.iter().enumerate() {
         if p == 0 {
             continue;
         }
         let k = xqkind(p);
+        let sign = if xqcolor(p) == 1 { 1 } else { -1 };
         let v = if k == 7 { 1_000_000 } else { w[(k - 1) as usize] };
-        e += if xqcolor(p) == 1 { v } else { -v };
+        e += sign * v;
+        let (r, c) = ((i / 9) as i32, (i % 9) as i32);
+        if p == 1 && r < 5 {
+            fadv += 1; // White soldier across the river
+        } else if p == 8 && r > 4 {
+            fadv -= 1; // Black soldier across the river
+        }
+        if (k == 2 || k == 4 || k == 5) && (3..=5).contains(&c) {
+            fcen += sign; // strong piece on a central file
+        }
     }
-    e
+    e + w[6] * fadv + w[7] * fcen
 }
 fn xq_onboard(r: i32, c: i32) -> bool {
     (0..10).contains(&r) && (0..9).contains(&c)
@@ -631,6 +682,11 @@ fn xq_ownside(side: i8, r: i32) -> bool {
     if side == 1 { r >= 5 } else { r <= 4 }
 }
 fn xq_moves(b: &XqBoard, side: i8) -> Vec<(usize, usize)> {
+    xq_gen(b, side, false)
+}
+/// Generate moves for `side`, MVV-LVA-ordered captures first. When `caps_only`, only captures are
+/// produced — the move set a quiescence search extends past the fixed-depth horizon.
+fn xq_gen(b: &XqBoard, side: i8, caps_only: bool) -> Vec<(usize, usize)> {
     let mut caps: Vec<(i32, usize, usize)> = Vec::new();
     let mut quiet: Vec<(usize, usize)> = Vec::new();
     let at = |r: i32, c: i32| -> i8 { if xq_onboard(r, c) { b[(r * 9 + c) as usize] } else { -1 } };
@@ -645,7 +701,7 @@ fn xq_moves(b: &XqBoard, side: i8) -> Vec<(usize, usize)> {
         }
         if v != 0 {
             caps.push((xqkind(v) as i32 * 10 - xqkind(b[from]) as i32, from, to));
-        } else {
+        } else if !caps_only {
             quiet.push((from, to));
         }
     };
@@ -767,7 +823,39 @@ fn xq_facing(b: &XqBoard) -> bool {
     }
     false
 }
-fn xq_ab(b: &XqBoard, side: i8, depth: u32, mut alpha: i32, beta: i32, w: &[i32; 6]) -> i32 {
+/// Quiescence: at the fixed-depth horizon, keep resolving CAPTURES (with a stand-pat option) so the
+/// search isn't fooled by a half-finished exchange. Negamax, White-relative-to-`side`.
+fn xq_quiesce(b: &XqBoard, side: i8, mut alpha: i32, beta: i32, w: &[i32; 8]) -> i32 {
+    if xq_general(b, 1).is_none() {
+        return if side == 1 { -2_000_000 } else { 2_000_000 };
+    }
+    if xq_general(b, 2).is_none() {
+        return if side == 1 { 2_000_000 } else { -2_000_000 };
+    }
+    let e = xqeval(b, w);
+    let stand = if side == 1 { e } else { -e };
+    if stand >= beta {
+        return beta;
+    }
+    if stand > alpha {
+        alpha = stand;
+    }
+    for (f, t) in xq_gen(b, side, true) {
+        let nb = xq_make(b, f, t);
+        if xq_facing(&nb) {
+            continue;
+        }
+        let v = -xq_quiesce(&nb, 3 - side, -beta, -alpha, w);
+        if v >= beta {
+            return beta;
+        }
+        if v > alpha {
+            alpha = v;
+        }
+    }
+    alpha
+}
+fn xq_ab(b: &XqBoard, side: i8, depth: u32, mut alpha: i32, beta: i32, w: &[i32; 8]) -> i32 {
     // captured-general / flying-general terminals (pseudo-move search)
     if xq_general(b, 1).is_none() {
         return if side == 1 { -2_000_000 } else { 2_000_000 };
@@ -776,8 +864,7 @@ fn xq_ab(b: &XqBoard, side: i8, depth: u32, mut alpha: i32, beta: i32, w: &[i32;
         return if side == 1 { 2_000_000 } else { -2_000_000 };
     }
     if depth == 0 {
-        let e = xqeval(b, w);
-        return if side == 1 { e } else { -e };
+        return xq_quiesce(b, side, alpha, beta, w);
     }
     let mut any = false;
     for (f, t) in xq_moves(b, side) {
@@ -799,7 +886,7 @@ fn xq_ab(b: &XqBoard, side: i8, depth: u32, mut alpha: i32, beta: i32, w: &[i32;
     }
     alpha
 }
-fn xq_search(b: &XqBoard, side: i8, depth: u32, w: &[i32; 6]) -> Option<(usize, usize)> {
+fn xq_search(b: &XqBoard, side: i8, depth: u32, w: &[i32; 8]) -> Option<(usize, usize)> {
     let mut best = None;
     let mut alpha = -3_000_000;
     let beta = 3_000_000;
@@ -1113,6 +1200,112 @@ pub fn cmd_game(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use crate::latte;
+
+    // walk a Latte proper list of atoms into a Vec<u128>
+    fn list_u128(n: &crate::knot::N) -> Vec<u128> {
+        let mut out = Vec::new();
+        let mut cur = n.clone();
+        while let crate::knot::Knot::Cell(h, t) = &*cur {
+            if let Some(a) = h.as_atom().and_then(|x| x.to_u128()) {
+                out.push(a);
+            }
+            cur = t.clone();
+        }
+        out
+    }
+    // walk a Latte weight vector [[sign mag] ...] into signed milli-ints
+    fn weights_vec(n: &crate::knot::N) -> Vec<i128> {
+        let mut out = Vec::new();
+        let mut cur = n.clone();
+        while let crate::knot::Knot::Cell(h, t) = &*cur {
+            if let crate::knot::Knot::Cell(sg, mag) = &**h {
+                let s = sg.as_atom().and_then(|x| x.to_u128()).unwrap_or(0);
+                let m = mag.as_atom().and_then(|x| x.to_u128()).unwrap_or(0) as i128;
+                out.push(if s == 0 { m } else { -m });
+            }
+            cur = t.clone();
+        }
+        out
+    }
+    fn signed_num(n: &crate::knot::N) -> i128 {
+        if let crate::knot::Knot::Cell(sg, mag) = &**n {
+            let s = sg.as_atom().and_then(|x| x.to_u128()).unwrap_or(0);
+            let m = mag.as_atom().and_then(|x| x.to_u128()).unwrap_or(0) as i128;
+            return if s == 0 { m } else { -m };
+        }
+        0
+    }
+
+    #[test]
+    fn rust_xqeval_matches_latte_xevalv() {
+        // The hand-written native eval MUST compute the same function the Latte model was trained
+        // to predict, weights and all — otherwise the fast search optimises the wrong thing and the
+        // two implementations silently diverge. Generals are present on every test board so the
+        // ±1,000,000 general terms (which Latte's material-only xfeat omits) cancel.
+        let libs = ["std", "xiangqi", "num", "xiangqiml"];
+        let wn = latte::run_with_libs_fuel("(xtrained 250)", &libs, 8_000_000_000).unwrap();
+        let wv = weights_vec(&wn);
+        assert_eq!(wv.len(), 8);
+        let mut weights = [0i32; 8];
+        for (i, &v) in wv.iter().enumerate() {
+            weights[i] = v as i32;
+        }
+        let boards = [
+            "(nth (xqinitial 0) 0)",
+            "(xqsetnth (xqsetnth (nth (xqinitial 0) 0) 54 0) 36 1)", // White soldier across river
+            "(xqsetnth (xqsetnth (nth (xqinitial 0) 0) 81 0) 75 4)", // White chariot to central file
+            "(xqsetnth (nth (xqinitial 0) 0) 27 0)",                 // Black soldier removed
+            "(xqsetnth (xqsetnth (nth (xqinitial 0) 0) 31 0) 49 8)", // Black soldier across river
+        ];
+        for bexpr in boards {
+            let lv = latte::run_with_libs_fuel(
+                &format!("(xevalv {} (xtrained 250))", bexpr),
+                &libs,
+                8_000_000_000,
+            )
+            .unwrap();
+            let latte_val = signed_num(&lv);
+            let bn = latte::run_with_libs_fuel(bexpr, &libs, 8_000_000_000).unwrap();
+            let bb = super::xqb_of(&list_u128(&bn));
+            let rust_val = super::xqeval(&bb, &weights) as i128;
+            assert_eq!(rust_val, latte_val, "eval mismatch on {}", bexpr);
+        }
+    }
+
+    #[test]
+    fn xqeval_rewards_river_crossing_and_central_posting() {
+        // the learned positional terms must actually move the eval in the right direction
+        let libs = ["std", "xiangqi", "num", "xiangqiml"];
+        let wn = latte::run_with_libs_fuel("(xtrained 250)", &libs, 8_000_000_000).unwrap();
+        let wv = weights_vec(&wn);
+        let mut weights = [0i32; 8];
+        for (i, &v) in wv.iter().enumerate() {
+            weights[i] = v as i32;
+        }
+        assert!(weights[6] > 0 && weights[7] > 0, "positional weights should be positive");
+        let opening = super::xqb_of(&list_u128(
+            &latte::run_with_libs_fuel("(nth (xqinitial 0) 0)", &libs, 8_000_000_000).unwrap(),
+        ));
+        let crossed = super::xqb_of(&list_u128(
+            &latte::run_with_libs_fuel(
+                "(xqsetnth (xqsetnth (nth (xqinitial 0) 0) 54 0) 36 1)",
+                &libs,
+                8_000_000_000,
+            )
+            .unwrap(),
+        ));
+        let central = super::xqb_of(&list_u128(
+            &latte::run_with_libs_fuel(
+                "(xqsetnth (xqsetnth (nth (xqinitial 0) 0) 81 0) 75 4)",
+                &libs,
+                8_000_000_000,
+            )
+            .unwrap(),
+        ));
+        let e0 = super::xqeval(&opening, &weights);
+        assert!(super::xqeval(&crossed, &weights) > e0, "crossing the river should help White");
+        assert!(super::xqeval(&central, &weights) > e0, "a central chariot should help White");
+    }
     fn val(expr: &str) -> u128 {
         latte::run_with_libs(expr, &["std", "chess"]).unwrap().as_atom().unwrap().to_u128().unwrap()
     }
@@ -1201,6 +1394,52 @@ mod tests {
         let from = super::u(&super::head(&mv).unwrap());
         let to = super::u(&super::head(&super::tail(&mv).unwrap()).unwrap());
         assert!(legal.iter().any(|&(f, t)| f == from && t == to), "ai move {}-{} must be legal", from, to);
+    }
+
+    #[test]
+    fn xqlegal_runs_natively_and_matches_interpreter() {
+        // the per-move legality check now runs as COMPILED code; it must agree with the
+        // interpreter exactly (same move list, same order) and be non-empty.
+        let states = [
+            "(xqinitial 0)",
+            "(xqapply (nth (xqinitial 0) 0) 1 [54 [36 0]])",
+        ];
+        for sx in states {
+            let st = latte::run_with_libs_fuel(sx, &["std", "xiangqi", "num"], 8_000_000_000).unwrap();
+            let native = crate::rustgen::run_native_with_input(
+                "(xqlegal __in)",
+                &st,
+                &["std", "xiangqi"],
+                false,
+            )
+            .expect("native xqlegal should compile and run");
+            let interp = latte::run_with_libs_fuel(
+                &format!("(xqlegal {})", sx),
+                &["std", "xiangqi", "num"],
+                8_000_000_000,
+            )
+            .unwrap();
+            assert_eq!(native, interp, "native xqlegal must match interpreter on {}", sx);
+            assert!(!super::move_list(&native).is_empty(), "should have legal moves: {}", sx);
+        }
+    }
+
+    #[test]
+    fn ml_opponent_plays_a_legal_move_natively() {
+        // The "play the learned model" mode (ml=true) compiles the alpha-beta search once
+        // and runs it natively (falling back to the interpreter if the toolchain is absent);
+        // either way it must return a legal move for the side to move from the opening.
+        let st = latte::run_with_libs("(initial 0)", &["std", "chess"]).unwrap();
+        let legal = legal_moves(&st);
+        let mv = ai_move(&st, true).expect("learned-model move from the opening");
+        let from = super::u(&super::head(&mv).unwrap());
+        let to = super::u(&super::head(&super::tail(&mv).unwrap()).unwrap());
+        assert!(
+            legal.iter().any(|&(f, t)| f == from && t == to),
+            "ML move {}-{} must be legal",
+            from,
+            to
+        );
     }
 
     #[test]

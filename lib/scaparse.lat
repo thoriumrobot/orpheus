@@ -1,0 +1,245 @@
+:: ===========================================================================
+:: scaparse.lat — the SCArs rule-STRING compiler, in Latte (runs on Loom).
+::
+:: This migrates the last big stage of the sound-change engine out of the Rust
+:: host (`src/sca.rs::parse_sca` / `parse_part` / `expand_rule`) and into Latte:
+:: turning a `.sca` source string into the list of *concrete* compiled rules the
+:: matching engine (`lib/sca.lat`) consumes.  With `lib/scatok.lat` (tokeniser)
+:: and `lib/scarun.lat` (word⇄segments + driver), the whole rewrite pipeline —
+:: parse, tokenise, apply, stringify — now runs in Latte.
+::
+:: Rule grammar (one rule per line; `::` starts a comment):
+::    class NAME = m1 m2 m3 …            a phoneme class (whitespace-separated)
+::    FROM > TO / PRE _ POST             a rule; `/`, the context, is optional,
+::                                       and `_` splits pre/post (post optional)
+:: Each part is whitespace-separated tokens; a token is `#` (boundary), `*`
+:: (wildcard), a declared class name (category), or a literal grapheme.  When a
+:: class appears in FROM *and* TO, the two correspond position-by-position
+:: (p→b, t→d, …); other classes expand over every member.  The cartesian product
+:: of all class choices yields the concrete rules.
+::
+:: Token shape matches the engine exactly:  [tag payload]  tag 0 literal (cord),
+:: 1 wildcard, 2 boundary, 3 category (payload = class-name cord; replaced by a
+:: literal during expansion).  A compiled rule is [from [to [pre-reversed post]]].
+:: ===========================================================================
+import std
+import scatok
+core scaparse
+  :: ---- string splitting (text tooling Latte was missing) ------------------
+  :: split a byte list on byte `d`, keeping empty fields -> list of byte lists
+  splitb = fn [d bs] ->
+    loop with [c = bs, cur = 0, out = 0] :
+      if (c == 0) then (reverse [ (reverse cur) out ])
+      else if ((head c) == d) then again((tail c), 0, [ (reverse cur) out ])
+      else again((tail c), [ (head c) cur ], out)
+    end
+  isws = fn [b] ->
+    if (b == 32) then 0 else if (b == 9) then 0 else if (b == 10) then 0 else if (b == 13) then 0 else 1
+  :: trim leading/trailing whitespace from a byte list
+  triml = fn [bs] -> loop with [c = bs] : if (c == 0) then 0 else if ((isws (head c)) == 0) then again((tail c)) else c end
+  trim  = fn [bs] -> (reverse (triml (reverse (triml bs))))
+  :: split on runs of whitespace, dropping empties -> list of cords
+  words = fn [bs] ->
+    (map (fn [w] -> (frombytes w))
+      (filter (fn [w] -> if (w == 0) then 1 else 0)
+        (loop with [c = bs, cur = 0, out = 0] :
+          if (c == 0) then (reverse [ (reverse cur) out ])
+          else if ((isws (head c)) == 0) then again((tail c), 0, [ (reverse cur) out ])
+          else again((tail c), [ (head c) cur ], out)
+        end)))
+  :: first field before byte `d` (used to strip `::` comments: split on ':')
+  before = fn [d bs] -> (head (splitb d bs))
+
+  :: ---- the class table (an assoc list [ [name members] … ]) ---------------
+  clookup = fn [name classes] ->
+    loop with [c = classes] :
+      if (c == 0) then 0
+      else if ((head (head c)) == name) then (tail (head c))
+      else again((tail c))
+    end
+  hasclass = fn [name classes] -> if ((clookup name classes) == 0) then 1 else 0
+
+  :: ---- parse one part (list of token cords) into engine tokens ------------
+  parsepart = fn [toks classes] ->
+    (map (fn [t] ->
+       if (t == "#") then [ 2 0 ]
+       else if (t == "*") then [ 1 0 ]
+       else if ((hasclass t classes) == 0) then [ 3 t ]
+       else [ 0 t ]) toks)
+
+  :: ---- expansion: categories + correspondence -> concrete token lists -----
+  :: indices of category (tag 3) tokens in a part
+  catsin = fn [part] ->
+    loop with [c = part, i = 0, out = 0] :
+      if (c == 0) then (reverse out)
+      else if ((head (head c)) == 3) then again((tail c), (+(i)), [ i out ])
+      else again((tail c), (+(i)), out)
+    end
+  nameat = fn [part i] -> (tail (nth part i))
+  setat = fn [xs k v] ->
+    loop with [c = xs, i = k, out = 0] :
+      if (c == 0) then (reverse out)
+      else if (i == 0) then (append (reverse out) [ v (tail c) ])
+      else again((tail c), (dec i), [ (head c) out ])
+    end
+  :: pair two member lists positionally -> list of [fk tk]
+  zip2 = fn [as bs] ->
+    loop with [x = as, y = bs, out = 0] :
+      if (x == 0) then (reverse out)
+      else if (y == 0) then (reverse out)
+      else again((tail x), (tail y), [ [ (head x) [ (head y) 0 ] ] out ])
+    end
+  :: a substitution is [target [pos [lit 0]]]; target 0 from,1 to,2 pre,3 post
+  subof = fn [tgt pos lit] -> [ tgt [ pos [ lit 0 ] ] ]
+  :: cartesian product of slots (each slot = list of options; option = list of subs)
+  product = fn [slots] ->
+    (foldl
+      (fn [combos slot] ->
+        (foldl (fn [acc combo] ->
+           (foldl (fn [a opt] -> [ (append combo opt) a ]) acc slot)) 0 combos))
+      [ 0 0 ] slots)
+  :: apply a combo's substitutions for one target part
+  applysubs = fn [part combo want] ->
+    (foldl (fn [p sub] ->
+       if ((nth sub 0) == want) then (setat p (nth sub 1) [ 0 (nth sub 2) ])
+       else p) part combo)
+
+  expandrule = fn [from to pre post classes] ->
+    let fcats = (catsin from) in
+    let tcats = (catsin to) in
+    let precats = (catsin pre) in
+    let postcats = (catsin post) in
+    let npair = (if (lt (len fcats) (len tcats)) then (len fcats) else (len tcats)) in
+    :: correspondence pair slots (first npair cats of from/to, matched)
+    let corr = (map (fn [i] ->
+        let fpos = (nth fcats i) in
+        let tpos = (nth tcats i) in
+        let fm = (clookup (nameat from fpos) classes) in
+        let tm = (clookup (nameat to tpos) classes) in
+        (map (fn [pr] -> [ (subof 0 fpos (nth pr 0)) [ (subof 1 tpos (nth pr 1)) 0 ] ])
+             (zip2 fm tm)))
+      (range npair)) in
+    :: independent input-class slots (from cats beyond the matched npair)
+    let indep = (map (fn [pos] ->
+        let m = (clookup (nameat from pos) classes) in
+        (map (fn [x] -> [ (subof 0 pos x) 0 ]) m))
+      (drop npair fcats)) in
+    let pres = (map (fn [pos] ->
+        let m = (clookup (nameat pre pos) classes) in
+        (map (fn [x] -> [ (subof 2 pos x) 0 ]) m)) precats) in
+    let posts = (map (fn [pos] ->
+        let m = (clookup (nameat post pos) classes) in
+        (map (fn [x] -> [ (subof 3 pos x) 0 ]) m)) postcats) in
+    let slots = (append corr (append indep (append pres posts))) in
+    (map (fn [combo] ->
+       let f2 = (applysubs from combo 0) in
+       let t2 = (applysubs to combo 1) in
+       let p2 = (applysubs pre combo 2) in
+       let q2 = (applysubs post combo 3) in
+       [ f2 [ t2 [ (reverse p2) q2 ] ] ])
+     (product slots))
+
+  :: ---- parse one rule line (already comment-stripped & trimmed) -----------
+  :: returns [ from to pre post ] as token-cord lists (pre-parse)
+  splitrule = fn [line] ->
+    let g = (splitb 62 line) in                 :: 62 = '>'
+    let froms = (head g) in
+    let rest  = (head (tail g)) in
+    let h = (splitb 47 rest) in                 :: 47 = '/'
+    let tos = (head h) in
+    let hasctx = (if ((tail h) == 0) then 1 else 0) in
+    let ctx = (if (hasctx == 0) then (head (tail h)) else 0) in
+    let k = (splitb 95 ctx) in                  :: 95 = '_'
+    let pres  = (head k) in
+    let posts = (if ((tail k) == 0) then 0 else (head (tail k))) in
+    [ (words froms) [ (words tos) [ (words pres) [ (words posts) 0 ] ] ] ]
+
+  :: ---- compile a whole source string -> [ rules graphemes ] ---------------
+  :: graphemes = the literal segments + all class members, for the tokeniser.
+  iscls = fn [line] ->                            :: does the line start "class "?
+    (if ((take 6 (bytes line)) == (bytes "class ")) then 0 else 1)
+  classline = fn [line classes graphemes] ->
+    let rest = (drop 6 (bytes line)) in           :: after "class "
+    let nv = (splitb 61 rest) in                  :: 61 = '='
+    let name = (frombytes (trim (head nv))) in
+    let mems = (words (head (tail nv))) in
+    [ [ [ name mems ] classes ] (append graphemes mems) ]
+  litsof = fn [part] ->                           :: literal cords in a token list
+    (map (fn [t] -> (tail t)) (filter (fn [t] -> if ((head t) == 0) then 0 else 1) part))
+
+  compile = fn [src] ->
+    loop with [ ls = (splitb 10 (bytes src)), classes = 0, rules = 0, gs = 0 ] :
+      if (ls == 0) then [ rules gs ]
+      else
+        let line = (trim (before 58 (head ls))) in    :: strip `::` comment, trim
+        if (line == 0) then again((tail ls), classes, rules, gs)
+        else if ((iscls (frombytes line)) == 0) then
+          let r = (classline (frombytes line) classes gs) in
+          again((tail ls), (head r), rules, (tail r))
+        else
+          let parts = (splitrule line) in
+          let from = (parsepart (nth parts 0) classes) in
+          let to   = (parsepart (nth parts 1) classes) in
+          let pre  = (parsepart (nth parts 2) classes) in
+          let post = (parsepart (nth parts 3) classes) in
+          let lits = (append (litsof from) (append (litsof to) (append (litsof pre) (litsof post)))) in
+          let conc = (expandrule from to pre post classes) in
+          again((tail ls), classes, (append rules conc), (append gs lits))
+    end
+
+  :: ---- word ⇄ segments (local copies of lib/scarun.lat's, to stay self-
+  :: contained: a word → boundary-padded 0-terminated segment list, and back to
+  :: a cord with the `#` padding dropped) -----------------------------------
+  wordsegs = fn [inv word] ->
+    (append [ [ 2 0 ] 0 ] (append (map (fn [g] -> [ 0 g ]) (tokenize inv word)) [ [ 2 0 ] 0 ]))
+  segstr = fn [segs] -> (catall (map (fn [seg] -> if ((head seg) == 2) then 0 else (tail seg)) segs))
+
+  :: ---- matching engine (a private copy of lib/sca.lat under sc_-prefixed
+  :: names, so this whole pipeline loads beside the built-ins without the
+  :: `apply`/`run` clashes that the generic engine names would cause). ---------
+  sc_eqtok = fn [tok seg] ->
+    let tk = (head tok) in
+    let sk = (head seg) in
+    if (tk == 1) then (if (sk == 2) then 1 else 0)
+    else if (tk == sk) then (if (tk == 2) then 0 else (if ((tail tok) == (tail seg)) then 0 else 1))
+    else 1
+  sc_matchseq = fn [tokens segs] ->
+    loop with [tks = tokens, ss = segs] :
+      if (tks == 0) then [ 0 ss ]
+      else if (ss == 0) then [ 1 0 ]
+      else if ((sc_eqtok (head tks) (head ss)) == 0) then again((tail tks), (tail ss))
+      else [ 1 0 ]
+    end
+  sc_pushall = fn [xs acc] -> loop with [c = xs, a = acc] : if (c == 0) then a else again((tail c), [ (head c) a ]) end
+  sc_applyrule = fn [word rule] ->
+    let from = (head rule) in
+    let to   = (head (tail rule)) in
+    let prer = (head (tail (tail rule))) in
+    let post = (tail (tail (tail rule))) in
+    loop with [acc = 0, cur = word] :
+      if (cur == 0) then (reverse acc)
+      else
+        let fm = (sc_matchseq from cur) in
+        if ((head fm) == 0) then
+          let rest = (tail fm) in
+          if ((head (sc_matchseq prer acc)) == 0) then
+            if ((head (sc_matchseq post rest)) == 0) then
+              if (from == 0)
+                then again([ (head cur) (sc_pushall to acc) ], (tail cur))
+                else again((sc_pushall to acc), rest)
+            else again([ (head cur) acc ], (tail cur))
+          else again([ (head cur) acc ], (tail cur))
+        else again([ (head cur) acc ], (tail cur))
+    end
+  sc_applyrules = fn [word rules] ->
+    loop with [rs = rules, w = word] :
+      if (rs == 0) then w else again((tail rs), (sc_applyrule w (head rs)))
+    end
+
+  :: ---- one-call convenience: compile a `.sca` source and run it on a word --
+  :: parse + tokenise + apply + stringify, entirely in Latte. Returns the
+  :: rewritten word cord.
+  apply_src = fn [src word] ->
+    let cg = (compile src) in
+    (segstr (sc_applyrules (wordsegs (tail cg) word) (head cg)))
+end

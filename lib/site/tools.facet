@@ -1,0 +1,346 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tools — the Orpheus environment</title>
+<style>
+  :root { --paper:#fbf8f3; --rule:#8e8a7a; --title:#cfcaba; --ink:#1a1320; --accent:#5a1530; --heart:#8a1538; }
+  body { font-family:'Ligos', Georgia, 'Times New Roman', serif; max-width:48rem; margin:3rem auto; padding:0 1rem; line-height:1.6; color:var(--ink); background:var(--paper); }
+  h1 { font-variant:small-caps; letter-spacing:.03em; color:var(--accent); font-size:2.4rem; margin-bottom:0; }
+  .sub { color:#8a6d3b; font-style:italic; margin:.2rem 0 1.6rem; }
+  .panel { background:var(--paper); border:1.5px solid var(--rule); border-radius:4px; margin:1.4rem 0; box-shadow:0 1px 4px #0001; }
+  .panel > .t { background:var(--title); border-bottom:1.5px solid var(--rule); padding:5px 11px; font-weight:700; font-variant:small-caps; letter-spacing:.04em; color:var(--accent); border-radius:4px 4px 0 0; }
+  .panel > .t .sig { float:right; font-weight:400; font-style:italic; color:#7a6d3b; font-size:.85rem; }
+  .panel > .b { padding:11px 13px; }
+  .lede { margin:.1rem 0 .8rem; color:#473b4a; }
+  table { border-collapse:collapse; width:100%; margin:.4rem 0; }
+  td, th { border-bottom:1px solid #e4dccc; padding:.32rem .6rem; text-align:left; vertical-align:top; }
+  th { color:var(--accent); font-variant:small-caps; letter-spacing:.03em; }
+  code { background:#efe9dd; padding:0 .3rem; border-radius:3px; font-family:'DejaVu Sans Mono', ui-monospace, monospace; font-size:.92em; }
+  .out { color:var(--heart); font-weight:700; }
+  .feat { color:#6b6256; font-style:italic; font-size:.9em; }
+  .tool { margin:.55rem 0; padding:.45rem .6rem; border:1px solid #ece2cc; border-radius:5px; background:#fffdf8; }
+  .tool .lbl { font-size:.9rem; color:#6b6256; margin-bottom:.32rem; }
+  .tool .lbl code { color:var(--accent); }
+  .live { display:inline-flex; gap:.4rem; align-items:baseline; flex-wrap:wrap; }
+  .live input.li, .live select.li { font-family:inherit; font-size:.95rem; padding:.2rem .45rem; border:1px solid var(--rule); border-radius:3px; background:#fff; color:var(--ink); }
+  .live input[type=range].li { padding:0; vertical-align:middle; accent-color:var(--accent); }
+  .live .liv { font-variant-numeric:tabular-nums; color:var(--accent); min-width:2.4em; display:inline-block; font-size:.9rem; }
+  .live .out svg { max-width:100%; height:auto; vertical-align:middle; margin-top:.3rem; border:1px solid #e4dccc; border-radius:3px; }
+  .tool .out svg { max-width:100%; height:auto; }
+  footer { margin-top:2.4rem; color:#998; font-size:.85rem; border-top:1px solid #e4dccc; padding-top:1rem; }
+</style>
+
+<h1>Environment Tools</h1>
+<p class="sub">Every module the environment exposes, each in its own frame — every tool a live, interactive interface.</p>
+
+<p class="lede">A <b>Facet</b> page is pure markup whose holes call environment tools with the Oberon
+convention <code>Module.procedure(args)</code>. Every tool below is a <b>live widget</b>: type in a
+field and the result updates as you go, re-evaluated on the server through <code>/api/eval</code>
+(debounced and cached on both sides). With JavaScript off, each widget still shows its
+server-rendered default — so the page reads correctly either way and stays byte-for-byte
+deterministic per request.</p>
+
+<!-- ===================== Meta ===================== -->
+<div class="panel">
+  <div class="t">Meta — the catalogue, live <span class="sig">modules · tools · count</span></div>
+  <div class="b">
+    <p class="lede">This page is self-describing: <code>Meta.count()</code> &rarr;
+    <span class="out">{{ Meta.count() }}</span>. The full module list,
+    <code>Meta.modules()</code> &rarr; <span class="out">{{ Meta.modules() }}</span>.</p>
+    <div class="tool">
+      <div class="lbl"><code>Meta.tools(module)</code> — pick a module to list everything it exposes</div>
+      {{ Live.box("Meta.tools(module)", [["module", "Mkt", "SCArs", "Phono", "Txt", "Latte", "Viz", "Mkt", "Date", "Sent", "Hash", "Live", "Meta"]]) }}
+    </div>
+    <p class="feat">These read the same registries that drive every frame below, so the catalogue
+    can't drift from what's actually callable — the tools-page test enforces exactly that.</p>
+  </div>
+</div>
+
+<!-- ===================== SCArs ===================== -->
+<div class="panel">
+  <div class="t">SCArs — the sound-change applier <span class="sig">pie · evolve · apply · trace</span></div>
+  <div class="b">
+    <p class="lede">The historical pipeline runs <b>PIE</b> &rarr;<code>pie</code>&rarr; <b>Solar
+    Speech</b> &rarr;<code>evolve</code>&rarr; <b>Heart Speech</b>. Run either leg live, then apply
+    or trace your own ordered rule sets.</p>
+
+    <div class="tool">
+      <div class="lbl"><code>SCArs.pie(word)</code> — Proto-Indo-European &rarr; Solar Speech</div>
+      {{ Live.box("SCArs.pie(word)", ["word", "nokʷt"]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>SCArs.evolve(word)</code> — Solar Speech &rarr; modern Heart Speech</div>
+      {{ Live.box("SCArs.evolve(word)", ["word", "ligā"]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>SCArs.apply(word, rule…)</code> — apply your own rules (separate with <code>;</code>)</div>
+      {{ Live.box("SCArs.apply(word, Txt.split(rules, \";\"))", ["word", "kasa", "rules", "k>g; a>o"]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>SCArs.trace(word, rule…)</code> — show the derivation after each rule</div>
+      {{ Live.box("SCArs.trace(word, Txt.split(rules, \";\"))", ["word", "kasa", "rules", "k>g; a>o"]) }}
+    </div>
+
+    <p class="feat" style="margin-top:.7rem">Rule grammar for <code>apply</code> and <code>trace</code>:
+    substitution <code>k&gt;g</code>, environment <code>s&gt;z/a_a</code>, deletion
+    <code>h&gt;</code>, clusters <code>ps&gt;f</code>, word boundaries <code>#</code>, and
+    metathesis. Chain as many as you like, applied in order.</p>
+  </div>
+</div>
+
+<!-- ===================== Phono ===================== -->
+<div class="panel">
+  <div class="t">Phono — phonology <span class="sig">presets · inventory · words · report · coin</span></div>
+  <div class="b">
+    <p class="lede">Generate plausible vocabulary from a sound system. Pick a built-in preset or
+    define your own inventory; words are coined deterministically from a seed, so the same choices
+    always give the same list. Built-in presets: <code>Phono.presets()</code> &rarr;
+    <span class="out">{{ Phono.presets() }}</span></p>
+
+    <div class="tool">
+      <div class="lbl"><code>Phono.inventory(preset)</code> — the chosen preset's sounds and syllable shapes</div>
+      {{ Live.box("Phono.inventory(preset)", [["preset", "polynesian", "polynesian", "pie", "semitic", "sinitic"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Phono.words(preset, n, seed)</code> — coin words from a preset (change the seed for a new batch)</div>
+      {{ Live.box("Phono.words(preset, n, seed)", [["preset", "polynesian", "polynesian", "pie", "semitic", "sinitic"], ["n", "10", "~", "1", "40", "1"], ["seed", "7"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Phono.report(preset)</code> — a typological sanity check against cross-linguistic norms</div>
+      {{ Live.box("Phono.report(preset)", [["preset", "semitic", "polynesian", "pie", "semitic", "sinitic"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Phono.coin(consonants, vowels, patterns, n, seed)</code> — coin from your <em>own</em> inventory
+      (space-separated; patterns use <code>C</code> and <code>V</code>)</div>
+      {{ Live.box("Phono.coin(consonants, vowels, patterns, n, seed)", [["consonants", "p t k m n l s w"], ["vowels", "a e i o u"], ["patterns", "CV CVC CCV"], ["n", "10"], ["seed", "3"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Txt ===================== -->
+<div class="panel">
+  <div class="t">Txt — composable text helpers <span class="sig">11 string operations</span></div>
+  <div class="b">
+    <p class="lede">A complete little text toolkit; every operation is live. List results render as
+    <code>[a b c]</code>.</p>
+
+    <div class="tool"><div class="lbl"><code>Txt.upper(s)</code> — upper-case</div>
+      {{ Live.box("Txt.upper(s)", ["s", "heart speech"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.lower(s)</code> — lower-case</div>
+      {{ Live.box("Txt.lower(s)", ["s", "HEART SPEECH"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.cap(s)</code> — capitalize the first character</div>
+      {{ Live.box("Txt.cap(s)", ["s", "heardō"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.rev(s)</code> — reverse the characters</div>
+      {{ Live.box("Txt.rev(s)", ["s", "solar"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.trim(s)</code> — strip surrounding whitespace</div>
+      {{ Live.box("Txt.trim(s)", ["s", "  spaced  "]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.len(s)</code> — character count</div>
+      {{ Live.box("Txt.len(s)", ["s", "heardō"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.words(s)</code> — split into a list of words</div>
+      {{ Live.box("Txt.words(s)", ["s", "heart of speech"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.replace(s, from, to)</code> — replace every occurrence</div>
+      {{ Live.box("Txt.replace(s, from, to)", ["s", "banana", "from", "a", "to", "o"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.split(s, sep)</code> — split into a list on a separator</div>
+      {{ Live.box("Txt.split(s, sep)", ["s", "k>g; a>o", "sep", ";"]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.join(list, sep)</code> — join a list; pick the separator</div>
+      {{ Live.box("Txt.join(Txt.split(items, \",\"), sep)", [["items", "sol, luna, stella"], ["sep", " · ", " · ", ", ", " | ", " — ", ""]]) }}</div>
+    <div class="tool"><div class="lbl"><code>Txt.esc(s)</code> — HTML-escape user input</div>
+      {{ Live.box("Txt.esc(s)", ["s", "<tag> & co"]) }}</div>
+  </div>
+</div>
+
+<!-- ===================== Latte ===================== -->
+<div class="panel">
+  <div class="t">Latte — the language, evaluated live <span class="sig">eval(expr)</span></div>
+  <div class="b">
+    <p class="lede">Type any Latte expression — arithmetic, lists, higher-order functions,
+    recursion — and it runs on Loom (fuel-bounded, side-effect-free) as you type.</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Latte.eval(expr)</code> — evaluate a Latte expression and render the result</div>
+      {{ Live.box("Latte.eval(expr)", ["expr", "(map (fn [x] -> (mul x x)) (range 6))"]) }}
+    </div>
+
+    <div class="tool">
+      <div class="lbl"><code>Latte.eval(expr)</code> — or pick a worked example from the dropdown</div>
+      {{ Live.box("Latte.eval(expr)", [["expr", "(range 5)", "(range 5)", "(map (fn [x] -> (mul x x)) (range 6))", "(filter (fn [x] -> (gt x 2)) (range 6))", "(foldl (fn [a v] -> (add a v)) 0 (range 10))", "(reverse (range 5))"]]) }}
+    </div>
+
+    <p class="feat" style="margin-top:.6rem">Things to try by editing the field above:</p>
+    <table>
+      <tr><th>Expression</th><th>Feature</th></tr>
+      <tr><td><code>(foldl (fn [a v] -> (add a v)) 0 (range 10))</code></td><td class="feat">fold to a scalar</td></tr>
+      <tr><td><code>(filter (fn [x] -> (gt x 2)) (range 6))</code></td><td class="feat">higher-order filter</td></tr>
+      <tr><td><code>(reverse (range 5))</code></td><td class="feat">list reversal</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ===================== Viz ===================== -->
+<div class="panel">
+  <div class="t">Viz — charts <span class="sig">chart(kind, numbers)</span></div>
+  <div class="b">
+    <p class="lede">Turn a list of numbers into an SVG chart. Because a Facet hole emits markup
+    directly, the chart is drawn right into the page — and with <code>Live.view</code> it redraws as
+    you type. Enter numbers (space- or comma-separated) and choose a chart kind:</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Viz.chart(kind, numbers)</code> — bars, line, or scatter</div>
+      {{ Live.view("Viz.chart(kind, numbers)", [["kind", "bars", "bars", "line", "scatter"], ["numbers", "5 9 7 12 8 15 11 18 14 22 19 25"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Mkt ===================== -->
+<div class="panel">
+  <div class="t">Mkt — market-data lab <span class="sig">span · stat · series · chart · vol · advice</span></div>
+  <div class="b">
+    <p class="lede">A read-only, deterministic lab over the built-in BTC/USD daily close series — one
+    place to <b>query</b> the data, <b>chart</b> it, and run the <b>quantitative signals</b> the
+    trading advisor is built on. Coverage: <code>Mkt.span()</code> &rarr;
+    <span class="out">{{ Mkt.span() }}</span></p>
+
+    <p class="feat" style="margin-top:.5rem">Query &amp; aggregate (the database role):</p>
+    <div class="tool">
+      <div class="lbl"><code>Mkt.stat(op)</code> — aggregate the whole series</div>
+      {{ Live.box("Mkt.stat(op)", [["op", "last", "last", "first", "min", "max", "mean", "range", "count"]]) }}
+    </div>
+
+    <p class="feat" style="margin-top:.6rem">Visualize (the chart pipes <code>Mkt.series(n)</code> straight into <code>Viz.chart</code>):</p>
+    <div class="tool">
+      <div class="lbl"><code>Viz.chart(kind, Mkt.series(n))</code> — chart the last n closes, live</div>
+      {{ Live.view("Viz.chart(kind, Mkt.series(n))", [["kind", "line", "line", "bars", "scatter"], ["n", "90", "~", "2", "1318", "1"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Mkt.chart(kind, n)</code> — the same chart as a single tool call</div>
+      {{ Live.view("Mkt.chart(kind, n)", [["kind", "bars", "bars", "line", "scatter"], ["n", "60", "~", "2", "1318", "1"]]) }}
+    </div>
+
+    <p class="feat" style="margin-top:.6rem">Analyze (the trading advisor's fast signal layer) — drag the window:</p>
+    <div class="tool">
+      <div class="lbl"><code>Mkt.vol(window)</code> — realized volatility over the last <em>window</em> days</div>
+      {{ Live.box("Mkt.vol(window)", [["window", "30", "~", "2", "1318", "1"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Mkt.advice(window)</code> — momentum vs a moving average → a direction</div>
+      {{ Live.box("Mkt.advice(window)", [["window", "10", "~", "2", "1317", "1"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Mkt.series(n)</code> — the raw last-n closes (what the chart is drawn from)</div>
+      {{ Live.box("Mkt.series(n)", [["n", "12", "~", "2", "1318", "1"]]) }}
+    </div>
+    <p class="feat" style="margin-top:.5rem">The volatility model the advisor reports —
+    <code>Mkt.forecast()</code> &rarr; <span class="out">{{ Mkt.forecast() }}</span></p>
+
+    <p class="feat" style="margin-top:.6rem">The deep model — a logistic-regression volatility-regime
+    classifier trained in Latte — takes several seconds per run, so it stays a command-line tool
+    (<code>latte fin</code>) rather than a live widget; everything above responds instantly.</p>
+  </div>
+</div>
+
+<!-- ===================== Date ===================== -->
+<div class="panel">
+  <div class="t">Date — civil date arithmetic <span class="sig">add · between · weekday · ordinal · fromordinal</span></div>
+  <div class="b">
+    <p class="lede">Calendar math on <code>YYYY-MM-DD</code> dates, with no clock involved — purely a
+    function of the inputs, so it stays deterministic. Drag the day offset or edit the dates:</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Date.add(date, days)</code> — shift a date by whole days</div>
+      {{ Live.box("Date.add(date, days)", [["date", "2026-06-10"], ["days", "7", "~", "-3650", "3650", "1"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Date.between(a, b)</code> — days from one date to another</div>
+      {{ Live.box("Date.between(a, b)", [["a", "2022-11-01"], ["b", "2026-06-10"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Date.weekday(date)</code> — the day of the week</div>
+      {{ Live.box("Date.weekday(date)", [["date", "2026-06-10"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Date.ordinal(date)</code> — day number since 1970-01-01</div>
+      {{ Live.box("Date.ordinal(date)", [["date", "2026-06-10"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Date.fromordinal(n)</code> — the inverse: a day number back to a date</div>
+      {{ Live.box("Date.fromordinal(n)", [["n", "20614", "~", "-25000", "25000", "1"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Sent ===================== -->
+<div class="panel">
+  <div class="t">Sent — text sentiment <span class="sig">polarity · label · counts</span></div>
+  <div class="b">
+    <p class="lede">Score the sentiment of free text — a lexicon fused with a model, the same signal
+    the trading advisor folds in from news. Type and watch it update:</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Sent.label(text)</code> — positive, negative, or neutral, with the score</div>
+      {{ Live.box("Sent.label(text)", [["text", "a wonderful and great result"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Sent.polarity(text)</code> — the raw polarity in [-1, 1]</div>
+      {{ Live.box("Sent.polarity(text)", [["text", "a wonderful and great result"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Sent.counts(text)</code> — how many positive and negative words it found</div>
+      {{ Live.box("Sent.counts(text)", [["text", "good news but also some bad risk"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Hash ===================== -->
+<div class="panel">
+  <div class="t">Hash — digests <span class="sig">sha3 · short</span></div>
+  <div class="b">
+    <p class="lede">SHA3-256 over any text — deterministic, and the digest changes completely with
+    the smallest edit. Type to watch it churn:</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Hash.sha3(text)</code> — the full 64-hex digest</div>
+      {{ Live.box("Hash.sha3(text)", [["text", "Orpheus"]]) }}
+    </div>
+    <div class="tool">
+      <div class="lbl"><code>Hash.short(text, n)</code> — a short fingerprint of n hex characters</div>
+      {{ Live.box("Hash.short(text, n)", [["text", "Orpheus"], ["n", "12", "~", "1", "64", "1"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Live ===================== -->
+<div class="panel">
+  <div class="t">Live — client-updating widgets <span class="sig">box(expr, [name, default…])</span></div>
+  <div class="b">
+    <p class="lede">Every interface on this page is one call to
+    <code>Live.box(expr, [name, default, …])</code>: it renders an input per name (seeded with its
+    default) and a result span showing <code>expr</code> evaluated against them. The server renders
+    the initial value; a shared runtime then refreshes just that result on each keystroke. Its
+    sibling <code>Live.view(expr, fields)</code> is identical but renders the result as HTML/SVG —
+    that is what makes the charts above redraw live. Boxes
+    compose freely — here a Latte expression feeds straight into a Txt helper:</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Live.box</code> composing modules — wrap a Latte result in Txt</div>
+      {{ Live.box("Txt.cap(Txt.join(Txt.words(Latte.eval(expr)), \"-\"))", ["expr", "(range 5)"]) }}
+    </div>
+
+    <p class="lede" style="margin-top:.9rem">A field can also be a <b>dropdown</b> of curated
+    choices instead of free text. Write fields as lists — <code>[name, default]</code> for a text
+    box, or <code>[name, default, option, option, …]</code> for a select. Here the case and the
+    separator are both chosen, not typed:</p>
+
+    <div class="tool">
+      <div class="lbl"><code>Live.box</code> with dropdowns — choose a transform and a joiner</div>
+      {{ Live.box("Txt.join(Txt.words(case), sep)", [["case", "ONE TWO THREE", "ONE TWO THREE", "one two three"], ["sep", "-", "-", " · ", "_", ""]]) }}
+    </div>
+
+    <p class="feat">Performance: keystrokes are debounced and every distinct input-set is cached on
+    the client, so the server is asked at most once per value; the server memoizes results (keyed by
+    library generation) and reuses parsed expressions, so identical or re-typed values are free and
+    a fresh value pays only for evaluation. Stale responses are dropped if a newer change has landed.</p>
+  </div>
+</div>
+
+<footer>Hosted by Hymn, the Orpheus web server. Each frame is a deterministic function of its
+tool outputs — the same page, byte-for-byte, every request; the live widgets layer interactivity
+on top without disturbing that.</footer>

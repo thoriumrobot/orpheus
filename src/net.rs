@@ -71,6 +71,11 @@ pub struct Node {
     pub migrated: bool, // true if we discarded a snapshot from a different agent
     base_state: Option<N>,        // compaction baseline: folded state up to a watermark
     base_watermark: Option<EventKey>,
+    // Cached materialized state and the event count it reflects, so state() need not
+    // re-fold the whole log on every call (the chess node never compacts, and each fold
+    // now spawns a native poke). Maintained incrementally on in-order appends; invalidated
+    // (set None) on any out-of-order insert, and reset on compaction.
+    cur: std::cell::RefCell<Option<(usize, N)>>,
 }
 
 impl Node {
@@ -87,6 +92,7 @@ impl Node {
             migrated: false,
             base_state: None,
             base_watermark: None,
+            cur: std::cell::RefCell::new(None),
         }
     }
 
@@ -143,8 +149,27 @@ impl Node {
         if ev.lamport > self.lamport {
             self.lamport = ev.lamport;
         }
-        self.events.insert((ev.lamport, ev.node_id, h), k.clone());
+        let key = (ev.lamport, ev.node_id, h);
+        // Will this event sort last (an in-order append)? Decide before inserting it.
+        let appends_at_end = self.events.keys().next_back().map_or(true, |last| &key > last);
+        self.events.insert(key, k.clone());
         self.by_hash.insert(h, k.clone());
+        // Cache maintenance: extend the cached state by exactly this event when it appends
+        // at the end and the cache was current; otherwise drop the cache (state() re-folds).
+        let base = {
+            let c = self.cur.borrow();
+            match c.as_ref() {
+                Some((at, s)) if appends_at_end && *at + 1 == self.events.len() => Some(s.clone()),
+                _ => None,
+            }
+        };
+        match base {
+            Some(s) => match self.agent.step(&ev.action, &s) {
+                Ok(ns) => *self.cur.borrow_mut() = Some((self.events.len(), ns)),
+                Err(_) => *self.cur.borrow_mut() = None,
+            },
+            None => *self.cur.borrow_mut() = None,
+        }
         if persist {
             if let Some(s) = self.store.as_mut() {
                 let _ = s.append(&k);
@@ -175,9 +200,18 @@ impl Node {
         k
     }
 
-    /// Materialize current state by folding the agent over the ordered log.
+    /// Materialize current state by folding the agent over the ordered log. Served from a
+    /// cache when the log is unchanged since the last call; otherwise folded and cached.
     pub fn state(&self) -> Result<N, Crash> {
-        self.state_at(self.events.len())
+        let n = self.events.len();
+        if let Some((at, s)) = self.cur.borrow().as_ref() {
+            if *at == n {
+                return Ok(s.clone());
+            }
+        }
+        let s = self.state_at(n)?;
+        *self.cur.borrow_mut() = Some((n, s.clone()));
+        Ok(s)
     }
 
     /// Time-travel: state as of the first `k` events in total order. Event sourcing
@@ -227,6 +261,8 @@ impl Node {
         self.events.clear();
         self.by_hash.clear();
         self.since_snapshot = 0;
+        // after compaction state() == base_state over zero events
+        *self.cur.borrow_mut() = self.base_state.clone().map(|s| (0usize, s));
         Ok(())
     }
 
@@ -743,4 +779,34 @@ mod tests {
         assert_eq!(n2.state().unwrap(), crate::knot::num(102));
         std::fs::remove_dir_all(&dir).ok();
     }
+    #[test]
+    fn chess_node_materializes_state_via_native_fold() {
+        // End-to-end persistence: a chess node folds structured moves through the agent's
+        // native poke. The interpreter alone runs OUT OF FUEL on chess move-generation, so
+        // before native folding this state() could not be materialized — now the durable,
+        // gossiped state is produced by natively compiled code.
+        use crate::knot::cord;
+        let agent = Agent::from_source(crate::mocha::CHESSGAME_LAT, "chessgame").unwrap();
+        let mut node = Node::new(0xC4E55, agent);
+        let mv = |f: u128, t: u128| cell(cord("move"), cell(num(f), cell(num(t), num(0))));
+        for m in [mv(52, 36), mv(12, 28), mv(62, 45)] {
+            node.local_action(m); // e4, e5, Nf3
+        }
+        // materialize the durable state (cache-backed, native-folded)
+        let st = node.state().expect("chess state materializes via native fold");
+        // repeated reads are served from the cache and are identical
+        assert_eq!(node.state().unwrap(), st, "cached state is stable");
+        // after e4, e5, Nf3 it is Black to move: state = [board [side 0]]
+        let (_, rest) = st.as_cell().expect("state is [board [side 0]]");
+        let (side, _) = rest.as_cell().expect("[side 0]");
+        assert_eq!(side.as_atom().unwrap().to_u128(), Some(2), "Black to move after 3 plies");
+        // time-travel: the raw state before any move is the placeholder atom 0 (the app's
+        // `cur` lazily normalizes it to the opening board), and a 2-ply prefix is White to move.
+        assert_eq!(node.state_at(0).unwrap(), num(0), "raw initial state is the atom 0");
+        let st2 = node.state_at(2).unwrap(); // after e4, e5
+        let (_, r2) = st2.as_cell().unwrap();
+        let (s2, _) = r2.as_cell().unwrap();
+        assert_eq!(s2.as_atom().unwrap().to_u128(), Some(1), "White to move after 2 plies");
+    }
+
 }

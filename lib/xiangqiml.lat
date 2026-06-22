@@ -19,19 +19,59 @@ core xiangqiml
   xcnt = fn [board code] -> (foldl (fn [acc p] -> if (p == code) then +(acc) else acc) 0 board)
   xdif = fn [board wc bc] -> (nsub (xsi (xcnt board wc)) (xsi (xcnt board bc)))
 
-  :: feature vector [dSoldier dHorse dElephant dChariot dCannon dAdvisor]
-  xfeat = fn [board] ->
+  :: ---- features --------------------------------------------------------
+  :: 6 material differences + 2 learned POSITIONAL terms (all White-minus-Black):
+  ::   fadv  = soldier advancement (rewards pushing/ crossing the river)
+  ::   fcen  = strong pieces (horse/chariot/cannon) posted on the central files
+  xqmat = fn [board] ->
     [ (xdif board 1 8) [ (xdif board 2 9) [ (xdif board 3 10)
     [ (xdif board 4 11) [ (xdif board 5 12) [ (xdif board 6 13) 0 ] ] ] ] ] ]
 
-  :: teacher = the classical material score (×1000; cannon = 4.5 -> 4500)
+  :: a horse(2)/chariot(4)/cannon(5) standing on a central file (cols 3-5)?
+  :: loobean: 0 = yes
+  xqcentralstrong = fn [p c] ->
+    let t = (xqptype p) in
+    (and (or (t == 2) (or (t == 4) (t == 5)))
+         (and (gt c 2) (lt c 6)))
+
+  :: ONE pass over the 90 squares producing the 2 positional features as a
+  :: signed fixed-point vector [fadv fcen 0] (White's view). Both are kept to a
+  :: small magnitude (a count, not a sum) so their learned weights land in a
+  :: range the milli-resolution fixed-point trainer can actually represent.
+  ::   fadv = soldiers that have CROSSED THE RIVER (the decisive xiangqi motif)
+  ::   fcen = strong pieces (horse/chariot/cannon) posted on the central files
+  xqposvec = fn [board] ->
+    loop with [i = 0, adv = [0 0], cen = [0 0]] :
+      if (i == 90) then [ adv [ cen 0 ] ]
+      else
+        let p = (nth board i) in
+        let r = (xqrowof i) in
+        let c = (xqcolof i) in
+        let adv2 = (if (p == 1) then (if (lt r 5) then (nadd adv (xsi 1)) else adv)
+                    else if (p == 8) then (if (gt r 4) then (nsub adv (xsi 1)) else adv)
+                    else adv) in
+        let cen2 = (if (xqcentralstrong p c)
+                    then (if (lt p 8) then (nadd cen (xsi 1)) else (nsub cen (xsi 1)))
+                    else cen) in
+        again(+(i), adv2, cen2)
+    end
+
+  :: feature vector [dSoldier dHorse dElephant dChariot dCannon dAdvisor fadv fcen]
+  xfeat = fn [board] -> (append (xqmat board) (xqposvec board))
+
+  :: teacher = classical material (×1000) + positional bonuses, so gradient descent
+  :: learns positional weights subordinate to material: a crossed soldier ~0.3, a
+  :: centrally-posted strong piece ~0.3.
   xteacher = fn [board] ->
+    let pos = (xqposvec board) in
+    let adv = (nth pos 0) in let cen = (nth pos 1) in
     (nadd (nmul (xsi 1) (xdif board 1 8))
     (nadd (nmul (xsi 4) (xdif board 2 9))
     (nadd (nmul (xsi 2) (xdif board 3 10))
     (nadd (nmul (xsi 9) (xdif board 4 11))
     (nadd (nmul [0 4500] (xdif board 5 12))
-          (nmul (xsi 2) (xdif board 6 13)))))))
+    (nadd (nmul (xsi 2) (xdif board 6 13))
+    (nadd (nmul [0 300] adv) (nmul [0 300] cen))))))))
 
   xndotv = fn [w x] ->
     loop with [a = w, b = x, acc = [0 0]] :
@@ -59,11 +99,10 @@ core xiangqiml
   xlearnw = fn [w xs ys lr iters] ->
     loop with [cw = w, k = 0] : if (k == iters) then cw else again((xgradstepv cw xs ys lr), +(k)) end
 
-  :: training positions: the opening, then variants with one piece removed
-  :: (squares: 27 Black soldier, 54 White soldier, 1 Black horse, 88 White
-  :: horse, 0 Black chariot, 81 White chariot, 19 Black cannon, 64 White
-  :: cannon, 2 Black elephant, 3 Black advisor)
-  xtrainboards = fn [_] ->
+  :: training positions: the opening, then variants with one piece removed, then
+  :: a few POSITIONAL motifs (an advanced/river-crossing soldier; a chariot and a
+  :: horse posted on a central file) so the positional features get gradient signal.
+  xqtrainboards = fn [_] ->
     let b = (nth (xqinitial 0) 0) in
     [ b
     [ (xqsetnth b 27 0)
@@ -75,14 +114,21 @@ core xiangqiml
     [ (xqsetnth b 19 0)
     [ (xqsetnth b 64 0)
     [ (xqsetnth b 2 0)
-    [ (xqsetnth b 3 0) 0 ] ] ] ] ] ] ] ] ] ] ]
+    [ (xqsetnth b 3 0)
+    [ (xqsetnth (xqsetnth b 54 0) 36 1)
+    [ (xqsetnth (xqsetnth b 56 0) 38 1)
+    [ (xqsetnth (xqsetnth b 81 0) 75 4)
+    [ (xqsetnth (xqsetnth b 88 0) 39 2) 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
 
-  :: train the evaluator: returns the LEARNED piece values (the weight vector)
+  :: alias kept for any external callers
+  xtrainboards = fn [_] -> (xqtrainboards 0)
+
+  :: train the evaluator: returns the LEARNED weights (6 material + 2 positional)
   xtrained = fn [iters] ->
-    let bs = (xtrainboards 0) in
+    let bs = (xqtrainboards 0) in
     let xs = (map (fn [bd] -> (xfeat bd)) bs) in
     let ys = (map (fn [bd] -> (xteacher bd)) bs) in
-    (xlearnw [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] 0 ] ] ] ] ] ] xs ys [0 60] iters)
+    (xlearnw [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] [ [0 0] 0 ] ] ] ] ] ] ] ] xs ys [0 60] iters)
 
   :: leaf value from White's view. The search runs over PSEUDO-legal moves (the
   :: standard engine trick: filtering every node by full legality costs a whole

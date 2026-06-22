@@ -9,7 +9,7 @@ use crate::latte;
 fn run(expr: &str) -> Result<N, String> {
     let libs = latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-    latte::run_with_libs(expr, &refs)
+    crate::rustgen::run_adaptive(expr, &refs)
 }
 
 /// Render an atom: a multi-byte printable atom is a cord (shown %text); anything
@@ -2026,6 +2026,137 @@ mod tests {
         assert_eq!(run("(head (fd_spark (fd_sample 0) 12))").unwrap(), crate::knot::cord("svg"));
         // MVCC: correcting a stored bar keeps the previous reading in its version history
         assert_eq!(n("(len (fd_history (fd_correct (fd_sample 0) 0 (npos 101000) 0) 0))"), 2);
+    }
+
+    #[test]
+    fn finmoney_global_supply_db_and_bond_desk() {
+        // ---- GLOBAL MONEY SUPPLY: data STORED IN the composed database ----------
+        // all 23 central banks are persisted as records and read back
+        assert_eq!(n("(fm_count (fm_load 0))"), 23);
+        // a single bank by key: US M2 year-over-year growth is 4.26% (stored x100)
+        assert_eq!(n("(db_field (tail (fm_bank (fm_load 0) %us)) 2)"), 426);
+
+        // ---- the DATABASE does the analysis (ranking / aggregation / filtering) --
+        // fastest expander via db_max over the growth field = Turkey at 39.01%
+        assert_eq!(n("(db_max 2 (fm_all (fm_load 0)))"), 3901);
+        // tightest via db_min = Japan at 1.77%
+        assert_eq!(n("(db_min 2 (fm_all (fm_load 0)))"), 177);
+        // cross-bank average via db_avg = 8.54%
+        assert_eq!(n("(db_avg 2 (fm_all (fm_load 0)))"), 854);
+        // db_orderd ranks Turkey first, then Russia (the db sorts, not the view)
+        assert_eq!(run("(db_field (db_rec (head (fm_ranked (fm_load 0)))) 1)").unwrap(),
+                   crate::knot::cord("turkey"));
+        assert_eq!(run("(db_field (db_rec (head (tail (fm_top (fm_load 0) 3)))) 1)").unwrap(),
+                   crate::knot::cord("russia"));
+        // db_where filters the banks easing at/above the cross-bank average (>=8%) -> 11
+        assert_eq!(n("(db_count (fm_easing (fm_load 0) 800))"), 11);
+
+        // ---- the money-supply TEXT-FRAME dashboard is a valid [%html ...] noun ---
+        assert_eq!(run("(head (fm_dash0 0))").unwrap(), crate::knot::cord("html"));
+
+        // ---- the money-supply data FED THROUGH the db<->tensor bridge ------------
+        // the 23-bank growth column as a tensor (tensor.lat shape = [23 1])
+        assert_eq!(n("(head (tshape (fm_tensor (fm_load 0))))"), 23);
+        // standardized by the database's own column stats: Turkey is a large positive
+        // outlier (+4.2 sigma), Japan sits below the cross-bank mean (negative sign).
+        // fm_z returns a one-element row [ [sign mag] 0 ], so head it once to the cell.
+        assert_eq!(n("(head (head (fm_z (fm_load 0) %tr)))"), 0);   // sign 0 = positive
+        assert_eq!(n("(tail (head (fm_z (fm_load 0) %tr)))"), 4226); // +4.226 sigma
+        assert_eq!(n("(head (head (fm_z (fm_load 0) %jp)))"), 1);   // sign 1 = negative
+
+        // ---- BOND DESK: the yield curve is STORED IN the database too ------------
+        // db_orderd puts the 10y first; its yield mag (x1000) reads back as 4.300%
+        assert_eq!(run("(db_field (db_rec (head (bd_curve (bd_load 0)))) 1)").unwrap(),
+                   crate::knot::cord("tenyear"));
+        assert_eq!(n("(db_field (db_rec (head (bd_curve (bd_load 0)))) 2)"), 4300);
+        // the bond dashboard renders [%html ...]; the model fit is injected so the
+        // render stays cheap (here a representative report noun)
+        assert_eq!(run("(head (fb_dash [[0 966] [[0 683] [[0 633] 0]]]))").unwrap(),
+                   crate::knot::cord("html"));
+    }
+
+    #[test]
+    fn db_tensor_bridge_and_ml_training() {
+        let orders = "(db_scan (db_orders 0) %o0 %o9)"; // amounts 100,150,250,300 in field 2
+
+        // ---- the DATABASE computes column statistics (matches lib/stats.lat) ----
+        // mean amount = 200.000, population std = 79.056 (x1000 fixed-point)
+        assert_eq!(n(&format!("(tail (db_nmean 2 {}))", orders)), 200000);
+        assert_eq!(n(&format!("(tail (db_nstd 2 {}))", orders)), 79056);
+        // db_nstd agrees with stats.lat's st_std on the same projected column
+        assert_eq!(run(&format!("(db_nstd 2 {})", orders)).unwrap(),
+                   run(&format!("(st_std (db_npluck 2 {}))", orders)).unwrap());
+
+        // ---- DB -> TENSOR bridge: the tensor library operates on it directly ----
+        // shape is [rows cols] = [4 1]; tensor.lat's tsum over it = 800.000
+        assert_eq!(n(&format!("(head (tshape (db_tensor [2 0] {})))", orders)), 4);
+        assert_eq!(n(&format!("(tail (tsum (db_tensor [2 0] {})))", orders)), 800000);
+
+        // ---- db_zmatrix standardization: a zero-variance column passes through 0 ----
+        let cdb = "(db_put (db_put (db_open 1 0 8) %a [[1 0][[2 10][[3 100]0]]]) %b [[1 0][[2 30][[3 100]0]]])";
+        // field 3 is constant -> its standardized value is 0; field 2 z-scores to +/-1
+        assert_eq!(n(&format!("(tail (head (tail (head (let es=(db_scan {} %a %z) in (db_zmatrix [2 [3 0]] es (db_colstats [2 [3 0]] es)))))))", cdb)), 0);
+
+        // ---- END-TO-END: data in the DB -> bridge -> lr_train (lib/fin.lat) ------
+        // eight labeled records, feature 2 linearly separates the two classes; pull the
+        // standardized design matrix from the database and the logistic model fits 100%.
+        let sep = "(db_put (db_put (db_put (db_put (db_put (db_put (db_put (db_put (db_open 1 0 16) \
+            %a [[1 0][[2 10][[3 5]0]]]) %b [[1 0][[2 12][[3 6]0]]]) %c [[1 0][[2 14][[3 5]0]]]) \
+            %d [[1 0][[2 11][[3 7]0]]]) %e [[1 1][[2 30][[3 25]0]]]) %f [[1 1][[2 32][[3 26]0]]]) \
+            %g [[1 1][[2 34][[3 24]0]]]) %h [[1 1][[2 31][[3 27]0]]])";
+        let pipe = format!(
+            "(let es=(db_scan {} %a %z) in let st=(db_colstats [2 [3 0]] es) in \
+              let xs=(db_zmatrix [2 [3 0]] es st) in let ys=(db_pluck 1 es) in \
+              let wb=(lr_train xs ys [0 1500] 400) in (lr_acc (head wb) (tail wb) xs ys))", sep);
+        assert_eq!(n(&format!("(tail {})", pipe)), 1000); // 1.000 = 100% accuracy
+    }
+
+    #[test]
+    fn data_lab_combined_frame() {
+        // The lab workbench: one frame that manipulates stored data, visualizes it, and trains
+        // a model — all over lib/db.lat through the db->tensor bridge.
+        let r = "(lab_fit (lab_recs (lab_load 0)) (lab_feats 0) 1 11 600)";
+
+        // DATA: the sample dataset is stored in and read back from the database
+        assert_eq!(n("(db_count (lab_recs (lab_load 0)))"), 16);
+        assert_eq!(n("(lab_ones (lab_recs (lab_load 0)))"), 8); // balanced 8/8
+
+        // VISUALIZATION input: the class means on f0 separate (class 0 low, class 1 high)
+        assert!(
+            n("(tail (db_nmean 2 (lab_byclass (lab_recs (lab_load 0)) 0)))")
+                < n("(tail (db_nmean 2 (lab_byclass (lab_recs (lab_load 0)) 1)))"),
+            "class 1 should have a higher f0 mean than class 0"
+        );
+
+        // ML: trained through the bridge, the model beats the baseline out of sample
+        assert_eq!(n(&format!("(tail (lab_tracc {}))", r)), 1000); // train 100.0%
+        assert_eq!(n(&format!("(tail (lab_teacc {}))", r)), 800);  // test  80.0%
+        assert_eq!(n(&format!("(tail (lab_base {}))", r)), 600);   // baseline 60.0%
+        // and it learns the informative feature f1 far above the noise feature f2
+        assert!(
+            n(&format!("(tail (nth (lab_w {}) 1))", r)) > 5000      // |w(f1)| > 5.0
+                && n(&format!("(tail (nth (lab_w {}) 2))", r)) < 1000, // |w(f2)| < 1.0 (noise)
+            "the model should weight the informative feature over the noise feature"
+        );
+
+        // the combined interface renders as a single [%html ...] text frame
+        assert_eq!(run("(head (lab_dash 0))").unwrap(), crate::knot::cord("html"));
+    }
+
+    #[test]
+    fn bond_model_richer_features() {
+        // The bond model now carries EIGHT fixed-income factors (was five). The three additions
+        // bring information the level/slope/curvature factors cannot span: carry+roll-down (the
+        // income+roll return term), forward-rate momentum (Fama-Bliss 1987 / Cochrane-Piazzesi
+        // 2005 forward-rate predictors), and money-supply acceleration (a Ludvigson-Ng 2009-style
+        // macro factor). Full-scale training is native-only (the interpreter runs out of fuel on
+        // 4000 iterations); the out-of-sample edge is exercised via `latte trade --market bonds`.
+        assert_eq!(n("(len (head (head (build 0))))"), 8);
+        // the carry+roll-down feature (index 5) is a signed fixed-point cell; in a normal,
+        // upward-sloping-curve month its sign is non-negative (positive carry)
+        assert_eq!(n("(head (nth (head (head (build 0))) 5))"), 0); // sign 0 = non-negative
+        // the DB-backed feature schema tracks the model: eight feature fields are projected
+        assert_eq!(n("(len (bm_fields 0))"), 8);
     }
 
     #[test]

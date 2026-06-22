@@ -54,6 +54,44 @@ refreshes the module list, `System.Texts` lists the saved texts on disk, and
 `System.Docs` opens the documentation index. However a frame was opened, it then
 moves, resizes, marks, and Stores like any other.
 
+## Marking a frame (the star `*`)
+
+Oberon's central gesture is the **mark**: one frame is the *marked* frame, and
+commands that take a `*` argument act on it. This lets a command you run *here*
+operate on a frame *over there* — you mark the thing you want to change, then run
+the command from wherever is convenient (a tool sheet, the Log, another module).
+
+**To mark a frame, click its title bar** — anywhere on the bar except a command
+button. The marked frame's title bar lights up (a lavender tint) and shows a
+**✷ star** at its left. The mark is deliberate and *sticky*: it stays on that
+frame until you mark a different one (or close the marked frame, which clears
+it). Exactly one frame is marked at a time.
+
+Marking is a **title-bar** gesture only. None of these move the mark, by design:
+
+- **editing a frame's body** (clicking into the text to type);
+- **middle-clicking a command line** inside a frame to run it;
+- **clicking a command button inside a tool text** (it runs without stealing
+  the mark — so a tool sheet can act on the frame you marked).
+
+(Clicking a frame's *own* title-bar menu button does mark that frame, then runs
+its command on it — the menu commands belong to their frame.)
+
+**How `*` resolves** when a command names a target:
+
+| you write… | it targets… |
+|---|---|
+| `Edit.Format *` | the **marked** frame (falls back to the issuing frame if nothing is marked) |
+| `Edit.Format` (empty) | the **issuing** frame — the one you ran it from (falls back to the marked frame) |
+| `Edit.Format notes` | the frame **named** `notes` (then the mark, then the issuer) |
+
+So the everyday pattern is: **mark the target, then run `<Tool>.<Cmd> *`.** For
+example, open the **Format** tool sheet, click a source frame's title bar to mark
+it (✷ appears), then press the sheet's *“Format the marked frame”* button (it
+runs `Edit.Format *`) — the marked frame is reformatted, not the tool sheet.
+The same `*` works for `Compiler.Compile *`, `System.Grow *`, `System.Close *`,
+`System.Copy *`, and `System.Move *`.
+
 ## Texts with embedded objects
 
 Inside a **text frame** (System.Tool is one; the header's **✚ Text** link or
@@ -74,7 +112,13 @@ the chart command where you want the figure, and run it. The object remembers
 its command (shown in its corner); middle-click the object to re-run it in
 place (a `chart market live=1` refreshes to today's prices); select it and
 press Backspace to delete it. Object-producing commands: `chart`, `gfx`,
-`trace`, `ta`, `trade`, `fin`, `gpu`, `derive`, `plan`.
+`trace`, `ta`, `trade`, `fin`, `gpu`, `derive`, `plan`, `drawing`. A `drawing
+<name>` line embeds a vector drawing you Stored in the Draw editor (`/draw`)
+exactly the way `chart …` embeds a figure — same ` ```tool ` fence, same
+rehydrate-on-load. In the Draw editor, **Store** writes the picture to disk as
+`drawings/<name>.svg` (the server checks it is a valid SVG and refuses unsafe
+names) so `drawing <name>` can find it later; **Export SVG** downloads the
+current picture to your browser instead.
 
 Run the same commands from a non-text frame (the Log, a module) and each tool
 fills its own output viewer instead (`Chart.Out`, `Trade.Out`, …) — several at
@@ -237,6 +281,37 @@ Here, identically:
 - **Grow** — the menu's Grow cycles normal → column → whole display (siblings
   collapse to their title bars), the flex-layout equivalent of Oberon's
   overlay; a third Grow (or growing another viewer) restores.
+
+### Marking a frame, step by step
+
+Marking is how you point a command at a frame *other than the one you are typing
+in*. The canonical workflow:
+
+1. **Mark the target.** Click the **title bar** of the frame you want to act on
+   (anywhere except a menu button). A `✷` appears at the left of its menu and the
+   bar tints blue — that frame is now *the marked viewer*. Exactly one frame is
+   marked at a time; marking another moves the star.
+2. **Issue the command from anywhere**, using `*` to mean "the marked viewer".
+   For example, mark a `.Mod` source frame, then in the **Format** tool text run
+   `Edit.Format *`, or in the Log type `Compiler.Compile *` and middle-click it.
+   The command lands on the marked source, not on the Format tool or the Log.
+
+The argument after a viewer command resolves like this (verified in
+`targetViewer`):
+
+| argument            | acts on                                            |
+|---------------------|----------------------------------------------------|
+| `*`                 | the **marked** viewer (or, if none, the one you ran it from) |
+| *(empty)*           | the viewer you ran it **from** (or the marked one if run from the Log) |
+| a **name** (`btree`, `notes`) | that named viewer, matching `name`, `name.Mod`, or `name.Text` |
+
+What does **not** move the mark, by design, so the star stays put while you work:
+clicking into a body and typing, middle-clicking a command line to run it, and
+running an in-text tool button. What **does** move it: clicking a title bar, or
+clicking a frame's own menu button (which marks that frame, then runs on it, so
+a frame's Format/Compile/Store buttons always act on the frame they live on).
+Closing the marked frame clears the mark. The blue tint and `✷` always show you
+where `*` currently points.
 
 ## Tracks — changing the number of columns
 

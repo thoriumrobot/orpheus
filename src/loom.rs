@@ -44,8 +44,15 @@ pub type JetFn = fn(&N) -> Eval;
 
 static JETS: OnceLock<Mutex<HashMap<Vec<u8>, JetFn>>> = OnceLock::new();
 static JETS_ENABLED: AtomicBool = AtomicBool::new(true);
-static JET_AUDIT: AtomicBool = AtomicBool::new(false);
 static JIT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+thread_local! {
+    // Audit is opt-in PER THREAD: enabling it on one thread (to compare a jet against its
+    // pure reduction) must not force *other* threads' evaluations down the un-jetted path —
+    // that would, e.g., turn a `add` on large atoms into a successor loop and OutOfFuel.
+    // (Was a global AtomicBool, which raced across the parallel test suite.)
+    static JET_AUDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn jet_table() -> &'static Mutex<HashMap<Vec<u8>, JetFn>> {
     JETS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -60,13 +67,13 @@ pub fn set_jets_enabled(b: bool) {
     JETS_ENABLED.store(b, Ordering::SeqCst);
 }
 pub fn set_jet_audit(b: bool) {
-    JET_AUDIT.store(b, Ordering::SeqCst);
+    JET_AUDIT.with(|f| f.set(b));
 }
 fn jets_on() -> bool {
     JETS_ENABLED.load(Ordering::SeqCst)
 }
 fn audit_on() -> bool {
-    JET_AUDIT.load(Ordering::SeqCst) && !IN_AUDIT.with(|f| f.get())
+    JET_AUDIT.with(|f| f.get()) && !IN_AUDIT.with(|f| f.get())
 }
 
 // Audit is NON-REENTRANT per thread: while one jet's pure reduction runs for

@@ -1,7 +1,22 @@
 :: A Mocha to-do app: state is a list of task cords (0 = empty).
+:: -----------------------------------------------------------------------------
+:: This is the canonical shape of a MOCHA APP. A Mocha app is just a Latte `core`
+:: that exposes two arms, and the Mocha runtime owns the (durable, syncable) state:
+::   poke action state  -> (ok newstate)   a STATE TRANSITION (a write). The runtime
+::                                          persists whatever `ok` wraps; the app is
+::                                          pure — it never mutates, it returns the
+::                                          next state.
+::   peek query  state  -> value           a READ. Pure, returns a value derived
+::                                          from state; never changes it.
+:: `action` and `query` are cells: the HEAD is a tag atom (%add, %drop, %count …)
+:: and the TAIL is its argument. `case tag of %x -> e ; ... ; _ -> e end` dispatches
+:: on the tag (arms separated by `;`, `_` is the catch-all default). `ok x` is the
+:: runtime's "transition succeeded, new state is x" wrapper. The same poke/peek +
+:: tagged-action pattern recurs in lexicon.lat, editor.lat, and the chess apps.
 import std
 import mocha
 core todo
+  :: writes: add a task to the front, drop the task at an index, or clear everything.
   poke = fn [action state] ->
            let tag = head action in
            let arg = tail action in
@@ -11,6 +26,7 @@ core todo
              %clear -> (ok 0) ;
              _      -> (ok state)
            end
+  :: reads: how many tasks, the whole list, or whether a given task is present.
   peek = fn [query state] ->
            let tag = head query in
            let arg = tail query in

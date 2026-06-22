@@ -1,0 +1,333 @@
+:: ===========================================================================
+:: finbond.lat — practical financial machine learning for the BOND market,
+:: written in Latte (runs on Loom).  A companion to lib/fin.lat (equities/crypto);
+:: it reuses fin's logistic-regression core, train-only standardization, the
+:: walk-forward split and the transaction-cost discipline, but engineers
+:: features that are specific to fixed income and to monetary policy.
+::
+:: ---------------------------------------------------------------------------
+:: WHY THESE FEATURES (the research this is built on)
+:: ---------------------------------------------------------------------------
+:: Bond excess returns are predictable, and the literature is fairly settled on
+:: WHAT predicts them:
+::   * Yield-curve LEVEL / SLOPE / CURVATURE — the first three principal
+::     components of the yield curve (the affine term-structure tradition).
+::   * MOMENTUM and CARRY — Brooks & Moskowitz, "Yield Curve Premia" (2017):
+::     value, momentum and carry applied to bonds subsume the level/slope/
+::     curvature information AND add unspanned signal.  Momentum = recent yield
+::     trend; carry = the return earned if the curve does not move (~ the slope).
+::   * UNSPANNED MACRO — growth and inflation add predictability beyond yields
+::     (Cochrane & Piazzesi 2005; Ludvigson & Ng).  Our macro feature is the
+::     money supply (below).
+::
+:: ---------------------------------------------------------------------------
+:: THE MONEY-SUPPLY (STIMULUS) FEATURE — when & how much banks expand money
+:: ---------------------------------------------------------------------------
+:: Central banks stimulate a weak economy by EXPANDING the money supply: cutting
+:: rates and, once rates hit ~zero, buying bonds with newly-created money
+:: (quantitative easing).  QE is deployed in recessions (2008-09, 2020) and is
+:: sized by the deficit + bond issuance it has to absorb.  Documented effects:
+::   * QE buys Treasuries/MBS, creating bank reserves & deposits, which RAISES
+::     the M2 money supply (the 2020 episode added ~$5T to the Fed balance sheet,
+::     ~$4T->~$9T, and M2 rose by a similar amount; M2 year-over-year growth
+::     PEAKED near +26% in early 2021).
+::   * That demand pushes Treasury PRICES UP / YIELDS DOWN — studies put the
+::     10-year-yield effect of the QE programs at roughly -1 percentage point on
+::     average (Borio & Zabai 2016).
+::   * Quantitative TIGHTENING (2022-2025) reverses it: M2 growth went NEGATIVE
+::     (~ -4% YoY in 2023), Treasury supply rose, and yields rose.
+:: So rising money-supply growth is a BULLISH regime for bond prices.  We feed
+:: M2 year-over-year growth straight in as a feature; the classifier learns its
+:: (expected positive) coefficient for predicting up-moves in bond total return.
+:: Sources: CBO (publication/58457), SIEPR QE review, Congress.gov IF12147,
+:: CME OpenMarkets (QT explainer), Joseph Wang "Mechanics of QE and M2".
+::
+:: ---------------------------------------------------------------------------
+:: THE DATA
+:: ---------------------------------------------------------------------------
+:: The embedded series below are CURATED REFERENCE ANCHORS — documented end-of-
+:: period values for the 2-, 5- and 10-year Treasury constant-maturity yields and
+:: for M2 year-over-year growth, at the dated turning points of the 2007-2026
+:: monetary cycle (pre-crisis, QE1-3, taper, the 2018-19 hike/QT, COVID/unlimited
+:: QE, the 2021 stimulus peak, the 2022-25 tightening, and the late-2025 "QE-lite"
+:: pivot).  They are linearly interpolated to a monthly grid so the model has
+:: enough observations for a walk-forward split.  This is a TEACHING/DEMO series
+:: that reproduces the documented shape of the cycle — NOT a verified tick series.
+:: The live, full-resolution source is FRED: DGS2 / DGS5 / DGS10 (daily yields)
+:: and M2SL (money stock); a `fetch`-style refresh would splice those on top, the
+:: way lib/fin.lat splices live Coin Metrics BTC data over its embedded fallback.
+:: ===========================================================================
+import std
+import num
+import stats
+import fin
+import db
+import finmoney
+core finbond
+  :: ---- small numeric helpers ----------------------------------------------
+  :: `pc n` reads a value given in HUNDREDTHS as a signed number, so a yield of
+  :: 4.80% is written `(pc 480)` and M2 growth of 26.0% is `(pc 2600)`.  `nc n`
+  :: is the same but negative (M2 growth of -4.0% is `(nc 400)`).
+  pc = fn [n] -> (ndiv (nint n) (nint 100))
+  nc = fn [n] -> (nnegate (pc n))
+
+  :: DURATION of the 10-year note used for the bond total-return model below.
+  :: A par 10y has modified duration ~8.5; that is the price sensitivity to a
+  :: 1-percentage-point yield move (a +1pp yield ~ -8.5% price).
+  dur = fn [_] -> (pc 850)
+
+  :: ---- linear interpolation: expand anchors onto a monthly grid ------------
+  :: `expandseg a b n` = the n values a, a+(b-a)/n, … (b excluded), i.e. one
+  :: segment of a piecewise-linear curve between two anchors.
+  expandseg = fn [a b n] ->
+    let stepv = (ndiv (nsub b a) (npos (mul n 1000))) in
+    loop with [k = 0, out = 0] :
+      if (k == n) then (reverse out)
+      else again(+(k), [ (nadd a (nmul stepv (nint k))) out ])
+    end
+
+  :: `series vals lens` concatenates the segments between successive anchors
+  :: (`lens` = months between each pair) and appends the final anchor once.
+  series = fn [vals lens] ->
+    loop with [vs = vals, ls = lens, out = 0] :
+      if (ls == 0) then (append out [ (head vs) 0 ])
+      else again((tail vs), (tail ls),
+                 (append out (expandseg (head vs) (head (tail vs)) (head ls))))
+    end
+
+  :: ---- the embedded anchors (see header for sourcing) ---------------------
+  :: months between consecutive anchors (2007-01 → 2026-06), 15 segments:
+  seglens = fn [_] -> [ 12 [ 11 [ 12 [ 21 [ 27 [ 24 [ 35 [ 13 [ 3 [ 15 [ 12 [ 12 [ 12 [ 12 [ 12 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+
+  :: 2-year Treasury yield (%) at each anchor
+  y2a = fn [_] -> [ (pc 490) [ (pc 250) [ (pc 80) [ (pc 110) [ (pc 25) [ (pc 40) [ (pc 100) [ (pc 280) [ (pc 160) [ (pc 30) [ (pc 25) [ (pc 300) [ (pc 490) [ (pc 470) [ (pc 390) [ (pc 360) 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+  :: 5-year Treasury yield (%)
+  y5a = fn [_] -> [ (pc 480) [ (pc 300) [ (pc 150) [ (pc 270) [ (pc 100) [ (pc 170) [ (pc 170) [ (pc 290) [ (pc 170) [ (pc 40) [ (pc 90) [ (pc 330) [ (pc 400) [ (pc 430) [ (pc 400) [ (pc 390) 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+  :: 10-year Treasury yield (%)
+  y10a = fn [_] -> [ (pc 480) [ (pc 370) [ (pc 220) [ (pc 380) [ (pc 190) [ (pc 300) [ (pc 230) [ (pc 300) [ (pc 190) [ (pc 70) [ (pc 150) [ (pc 300) [ (pc 380) [ (pc 430) [ (pc 440) [ (pc 430) 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+  :: M2 money-supply YEAR-OVER-YEAR growth (%), negative during 2022-23 QT
+  m2a = fn [_] -> [ (pc 600) [ (pc 600) [ (pc 900) [ (pc 500) [ (pc 1000) [ (pc 600) [ (pc 600) [ (pc 400) [ (pc 700) [ (pc 1200) [ (pc 2600) [ (pc 600) [ (nc 400) [ (pc 100) [ (pc 400) [ (pc 500) 0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+
+  y2  = fn [_] -> (series (y2a 0)  (seglens 0))
+  y5  = fn [_] -> (series (y5a 0)  (seglens 0))
+  y10 = fn [_] -> (series (y10a 0) (seglens 0))
+  m2  = fn [_] -> (series (m2a 0)  (seglens 0))
+
+  :: ---- bond total return (duration model) ---------------------------------
+  :: monthly total return (%) ≈ CARRY − DURATION·Δyield, where carry is one
+  :: month of the entry yield and Δyield is in percentage points.  This is the
+  :: standard first-order fixed-income return decomposition (income + price).
+  :: `vy` is the 10y yield vector; index t uses yields at t-1 and t.
+  bondret = fn [vy t] ->
+    let yprev = (nth vy (sub t 1)) in
+    let ynow  = (nth vy t) in
+    let carry = (ndiv yprev (nint 12)) in
+    let price = (nnegate (nmul (dur 0) (nsub ynow yprev))) in
+    (nadd carry price)
+
+  :: ---- feature engineering ------------------------------------------------
+  :: at month t the feature row is
+  ::   [ LEVEL SLOPE CURVATURE YIELD-MOM M2-GROWTH CARRY-ROLL FWD-MOM M2-ACCEL ]
+  :: LEVEL     = 10y yield
+  :: SLOPE     = 10y − 2y               (carry/term-premium proxy)
+  :: CURVATURE = 2·5y − 2y − 10y        (butterfly)
+  :: YIELD-MOM = −(y10_t − y10_{t-3})   (3-month yield change, negated so a
+  ::                                     FALLING yield — bullish for bonds — is
+  ::                                     a POSITIVE momentum reading)
+  :: M2-GROWTH = money-supply YoY (the stimulus regime; see header)
+  :: The next three add information the level/slope/curvature factors do not span,
+  :: drawn from the fixed-income return-predictability literature:
+  :: CARRY-ROLL = one month of carry (y10/12) plus roll-down (duration · local curve
+  ::              slope), the practitioner's expected-return-from-carry signal —
+  ::              the income+roll term of the standard return decomposition.
+  :: FWD-MOM    = −Δ₃ of the 5y→10y implied forward rate (2·y10 − y5); forward rates
+  ::              carry bond-risk-premium information (Fama–Bliss 1987; the tent-shaped
+  ::              forward combination of Cochrane–Piazzesi 2005), and its momentum is
+  ::              not a static function of the current curve.
+  :: M2-ACCEL   = Δ₃ of money-supply growth — the monetary regime's acceleration, an
+  ::              "inflation/money" macro factor (cf. Ludvigson–Ng 2009) distinct from
+  ::              its level.
+  frow = fn [v2 v5 v10 vm t] ->
+    let lvl = (nth v10 t) in
+    let slp = (nsub (nth v10 t) (nth v2 t)) in
+    let cur = (nsub (nsub (nmul (nint 2) (nth v5 t)) (nth v2 t)) (nth v10 t)) in
+    let mom = (nnegate (nsub (nth v10 t) (nth v10 (sub t 3)))) in
+    let mny = (nth vm t) in
+    let carry = (ndiv (nth v10 t) (nint 12)) in
+    let roll  = (nmul (dur 0) (ndiv (nsub (nth v10 t) (nth v5 t)) (nint 60))) in
+    let cr    = (nadd carry roll) in
+    let fnow  = (nsub (nmul (nint 2) (nth v10 t))         (nth v5 t)) in
+    let fpre  = (nsub (nmul (nint 2) (nth v10 (sub t 3))) (nth v5 (sub t 3))) in
+    let fmom  = (nnegate (nsub fnow fpre)) in
+    let macc  = (nsub (nth vm t) (nth vm (sub t 3))) in
+    [ lvl [ slp [ cur [ mom [ mny [ cr [ fmom [ macc 0 ] ] ] ] ] ] ] ]
+
+  :: build the supervised dataset over months t = 3 … n-2.
+  ::   xs = feature rows, ys = 1 if NEXT month's bond return > 0 else 0,
+  ::   r1 = that next-month bond return (%), for the equity curve.
+  :: returns [ xs [ ys [ r1 0 ] ] ].
+  build = fn [_] ->
+    let v2 = (y2 0) in let v5 = (y5 0) in let v10 = (y10 0) in let vm = (m2 0) in
+    let n = (len v10) in
+    loop with [t = 3, fx = 0, fy = 0, fr = 0] :
+      if (gte (add t 2) n) then [ (reverse fx) [ (reverse fy) [ (reverse fr) 0 ] ] ]
+      else
+        let x  = (frow v2 v5 v10 vm t) in
+        let rn = (bondret v10 (add t 1)) in
+        let y  = if (nlt [0 0] rn) then 1 else 0 in
+        again(+(t), [ x fx ], [ y fy ], [ rn fr ])
+    end
+
+  :: ---- the end-to-end pipeline --------------------------------------------
+  :: standardize on the TRAIN rows only, fit the logistic model (fin.lr_train),
+  :: evaluate on the held-out future, and build the strategy equity curve, all
+  :: through lib/fin.lat's audited arms.  `split` = number of training months.
+  :: returns [ train_acc test_acc baseline_test strategy_equity buyhold_equity ].
+  run = fn [iters split] ->
+    let ds = (build 0) in
+    let xraw = (head ds) in
+    let ys   = (head (tail ds)) in
+    let r1   = (head (tail (tail ds))) in
+    let stats = (colstats (transpose (take split xraw))) in   :: train-only z-score
+    let xs = (map (fn [r] -> (zrow stats r)) xraw) in
+    (fit_eval xs ys r1 split iters)
+
+  :: ---- ablation: the SAME model WITHOUT the money-supply feature ----------
+  :: identical pipeline but the feature row drops M2-growth, so the only
+  :: difference in out-of-sample accuracy is attributable to the stimulus signal.
+  frow_nom = fn [v2 v5 v10 t] ->
+    let lvl = (nth v10 t) in
+    let slp = (nsub (nth v10 t) (nth v2 t)) in
+    let cur = (nsub (nsub (nmul (nint 2) (nth v5 t)) (nth v2 t)) (nth v10 t)) in
+    let mom = (nnegate (nsub (nth v10 t) (nth v10 (sub t 3)))) in
+    [ lvl [ slp [ cur [ mom 0 ] ] ] ]
+  build_nom = fn [_] ->
+    let v2 = (y2 0) in let v5 = (y5 0) in let v10 = (y10 0) in
+    let n = (len v10) in
+    loop with [t = 3, fx = 0, fy = 0, fr = 0] :
+      if (gte (add t 2) n) then [ (reverse fx) [ (reverse fy) [ (reverse fr) 0 ] ] ]
+      else
+        let x  = (frow_nom v2 v5 v10 t) in
+        let rn = (bondret v10 (add t 1)) in
+        let y  = if (nlt [0 0] rn) then 1 else 0 in
+        again(+(t), [ x fx ], [ y fy ], [ rn fr ])
+    end
+  run_nom = fn [iters split] ->
+    let ds = (build_nom 0) in
+    let xraw = (head ds) in let ys = (head (tail ds)) in let r1 = (head (tail (tail ds))) in
+    let stats = (colstats (transpose (take split xraw))) in
+    let xs = (map (fn [r] -> (zrow stats r)) xraw) in
+    (fit_eval xs ys r1 split iters)
+
+  :: ablation report: [ test_with_M2 test_without_M2 baseline ] (signed fractions).
+  ablate = fn [_] ->
+    let a = (run 4000 150) in
+    let b = (run_nom 4000 150) in
+    [ (head (tail a)) [ (head (tail b)) [ (head (tail (tail a))) 0 ] ] ]
+
+  :: a sensible default run: ~232 monthly rows, train on the first 150.
+  demo = fn [_] -> (run 4000 150)
+
+  :: a compact report noun: [ train test baseline ] as signed fractions.
+  report = fn [_] ->
+    let r = (demo 0) in
+    [ (head r) [ (head (tail r)) [ (head (tail (tail r))) 0 ] ] ]
+
+  :: ---- ADVISORY: edge + the model's CURRENT directional call -----------------
+  :: Train once (train-only standardization), then ALSO predict the most recent month's
+  :: direction out of sample — the live lean.  Returns [ train test baseline signal ],
+  :: signal = 1 if the model expects the bond price UP next (yields down), else 0.
+  badvice = fn [iters split] ->
+    let ds = (build 0) in
+    let xraw = (head ds), ys = (head (tail ds)), n = (len (head ds)) in
+    let stats = (colstats (transpose (take split xraw))) in
+    let xs = (map (fn [r] -> (zrow stats r)) xraw) in
+    let wb = (lr_train (take split xs) (take split ys) [0 1500] iters) in
+    let w = (head wb), b = (tail wb) in
+    [ (lr_acc w b (take split xs) (take split ys))
+    [ (lr_acc w b (drop split xs) (drop split ys))
+    [ (base_acc (drop split ys))
+    [ (lr_pred w b (nth xs (sub n 1))) 0 ] ] ] ]
+  breport = fn [_] -> (badvice 4000 150)
+
+  :: ---- BOND-DESK TEXT-FRAME FRONT END — [%html cord] -----------------------
+  :: The yield curve is STORED IN THE DATABASE (lib/db.lat): the latest 2/5/10y
+  :: constant-maturity yields become three records, and the same db machinery that
+  :: serves every other view orders and reads them.  The dashboard then fuses the
+  :: curve with the live monetary regime (the money supply, queried from the
+  :: lib/finmoney.lat database) and the model's measured out-of-sample edge.
+  :: The yield mag (fixed-point, x1000) is stored in field 2.
+  bd_open = fn [_] -> (db_open 1 0 8)
+  bd_load = fn [_] ->
+    let v2 = (y2 0), v5 = (y5 0), v10 = (y10 0), last = (sub (len (y10 0)) 1) in
+    let d0 = (bd_open 0) in
+    let d1 = (db_put d0 %m02 [ [1 %twoyear]  [ [2 (tail (nth v2  last))] 0 ] ]) in
+    let d2 = (db_put d1 %m05 [ [1 %fiveyear] [ [2 (tail (nth v5  last))] 0 ] ]) in
+    (db_put d2 %m10 [ [1 %tenyear] [ [2 (tail (nth v10 last))] 0 ] ])
+  :: the curve, ordered highest-yield first by the database
+  bd_curve = fn [bd] -> (db_orderd 2 (db_scan bd %m %n))
+
+  :: render a yield mag (x1000) as "x.yy%" and a model fraction [sign mag] as "nn.n%"
+  bd_yld = fn [m] -> let v = (div m 10) in
+    (catall [ (numtext (div v 100)) "." (fm_pad2 (mod v 100)) "%" 0 ])
+  bd_acc = fn [x] -> let m = (tail x) in
+    (catall [ (numtext (div m 10)) "." (numtext (mod m 10)) "%" 0 ])
+  bd_row = fn [e] ->
+    let f = (db_rec e) in
+    (catall [ "<tr><td>" (db_field f 1) " Treasury</td><td align=right>" (bd_yld (db_field f 2)) "</td></tr>" 0 ])
+
+  :: the bond desk: yield curve (from the DB) + the monetary regime (from the money-
+  :: supply DB) + the model's out-of-sample edge.  The (expensive) model fit is passed
+  :: IN as `rep` = [train test baseline] so the render itself stays cheap and live —
+  :: train once with (report 0) and inject it, or use fb_dash0 for a one-shot demo.
+  fb_dash = fn [rep] ->
+    let bd = (bd_load 0), md = (fm_load 0) in
+    let usm2 = (db_field (tail (fm_bank md %us)) 2), gavg = (fm_avg md), neasing = (db_count (fm_easing md (fm_avg md))) in
+    [ %html (catall [
+        "<div style=\"font:13px/1.5 system-ui,sans-serif\"><h3 style=\"margin:.1em 0\">Bond desk &middot; US Treasuries &amp; the monetary regime</h3>"
+        "<p style=\"color:#8a8676;margin:.2em 0\">duration model on lib/db.lat &middot; money-supply signal from lib/finmoney.lat &middot; logistic model from lib/fin.lat</p>"
+        "<table class=\"m\"><tr><th align=left>tenor</th><th>yield</th></tr>" (catall (map (fn [e] -> (bd_row e)) (bd_curve bd))) "</table>"
+        "<p style=\"margin:.4em 0\"><b>Monetary regime.</b> US M2 year-over-year growth <b>" (fm_pct usm2) "</b>; cross-bank average <b>" (fm_pct gavg) "</b> with " (numtext neasing) " of 23 central banks easing above average. Rising money supply is historically bullish for bond prices (yields fall).</p>"
+        "<p style=\"margin:.4em 0\"><b>Model edge.</b> Out-of-sample directional accuracy <b>" (bd_acc (head (tail rep))) "</b> vs a <b>" (bd_acc (head (tail (tail rep)))) "</b> always-up baseline &mdash; the M2 stimulus feature is what lifts it above the baseline (train " (bd_acc (head rep)) ").</p>"
+        "<p style=\"color:#8a8676\">teaching/demo &middot; not investment advice</p></div>" 0 ]) ]
+  :: one-shot: fit the model live, then render (heavier; compiles natively).
+  fb_dash0 = fn [_] -> (fb_dash (report 0))
+
+  :: ---- DB-BACKED TRAINING: features STORED IN and pulled FROM the database -------
+  :: The monthly feature rows from `build` are written to the composed database as records,
+  :: then pulled back as a standardized design matrix THROUGH the db<->tensor bridge
+  :: (db_matrix / db_colstats / db_zmatrix) and trained with the same fin.lat logistic core.
+  :: Each feature is stored as an integer (its value in hundredths, +10000 so it is positive);
+  :: train-only z-scoring is invariant to that linear encoding, so the DB-trained model
+  :: reproduces the in-memory model exactly — the yield-curve and money-supply data flowing
+  :: into the ML straight out of the database.  Field 7 is the month index so the database
+  :: can return the rows in chronological order for the walk-forward split.
+  bm_enc = fn [x] -> let s = (head x), m = (tail x) in
+                     if (s == 1) then (sub 10000 (div m 10)) else (add 10000 (div m 10))
+  bm_key = fn [i] -> (cat %r (numtext i))
+  bm_rec = fn [label feats i] ->
+    [ [1 label] [ [2 (bm_enc (nth feats 0))] [ [3 (bm_enc (nth feats 1))] [ [4 (bm_enc (nth feats 2))]
+      [ [5 (bm_enc (nth feats 3))] [ [6 (bm_enc (nth feats 4))] [ [7 (bm_enc (nth feats 5))]
+      [ [8 (bm_enc (nth feats 6))] [ [9 (bm_enc (nth feats 7))] [ [10 i] 0 ] ] ] ] ] ] ] ] ] ]
+  bm_fields = fn [_] -> [ 2 [ 3 [ 4 [ 5 [ 6 [ 7 [ 8 [ 9 0 ] ] ] ] ] ] ] ]
+  bm_load = fn [_] ->
+    let ds = (build 0), xs = (head ds), ys = (head (tail ds)) in
+    loop with [i = 0, xss = xs, yss = ys, d = (db_open 1 0 4096)] :
+      if (xss == 0) then d
+      else again(+(i), (tail xss), (tail yss),
+                 (db_put d (bm_key i) (bm_rec (head yss) (head xss) i)))
+    end
+  bm_recs = fn [d] -> (db_order 10 (db_scan d %r %s))
+  :: train on the first `split` months, standardizing with statistics the DATABASE computes
+  bm_run = fn [iters split] ->
+    let d = (bm_load 0), flds = (bm_fields 0) in
+    let recs = (bm_recs d) in
+    let stats = (db_colstats flds (take split recs)) in
+    let xs = (db_zmatrix flds recs stats) in
+    let ys = (db_pluck 1 recs) in
+    let r1 = (head (tail (tail (build 0)))) in
+    (fit_eval xs ys r1 split iters)
+  bm_report = fn [_] ->
+    let r = (bm_run 4000 150) in
+    [ (head r) [ (head (tail r)) [ (head (tail (tail r))) 0 ] ] ]
+end

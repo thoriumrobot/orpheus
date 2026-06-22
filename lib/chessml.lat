@@ -22,17 +22,79 @@ core chessml
   :: White-minus-Black count of a piece type, as a signed number
   dif = fn [board wc bc] -> (nsub (si (cnt board wc)) (si (cnt board bc)))
 
-  :: feature vector [dPawn dKnight dBishop dRook dQueen]
-  feat = fn [board] ->
-    [ (dif board 1 7) [ (dif board 2 8) [ (dif board 3 9) [ (dif board 4 10) [ (dif board 5 11) 0 ] ] ] ] ]
+  :: walk the 64-square board accumulating f(index, piece) — the scaffold for
+  :: positional features that read the whole board, not just material counts.
+  boardsum = fn [bd f] ->
+    loop with [i = 0, b = bd, acc = 0] :
+      if (b == 0) then acc else again(+(i), (tail b), (add acc (f i (head b))))
+    end
 
-  :: teacher label = classic material score (the supervision signal)
+  :: the four central squares d4 e4 d5 e5
+  centers = fn [_] -> [27 [28 [35 [36 0]]]]
+  :: a square inside the central 4x4 ring (rows 2..5, cols 2..5)
+  central = fn [i] -> (and (and (lte 2 (rowof i)) (lte (rowof i) 5)) (and (lte 2 (colof i)) (lte (colof i) 5)))
+
+  :: signed (White-minus-Black) positional features
+  :: f5 control of the four central squares by pawns/minors
+  fcenter = fn [bd] -> (nsub
+    (si (boardsum bd (fn [i p] -> if (member i (centers 0)) then (if (member p [1 [2 [3 0]]]) then 1 else 0) else 0)))
+    (si (boardsum bd (fn [i p] -> if (member i (centers 0)) then (if (member p [7 [8 [9 0]]]) then 1 else 0) else 0))))
+  :: f6 minor pieces (knights/bishops) developed into the central ring
+  fminor = fn [bd] -> (nsub
+    (si (boardsum bd (fn [i p] -> if (central i) then (if (member p [2 [3 0]]) then 1 else 0) else 0)))
+    (si (boardsum bd (fn [i p] -> if (central i) then (if (member p [8 [9 0]]) then 1 else 0) else 0))))
+  :: f7 pawn advancement (ranks each pawn has pushed from its home rank)
+  fadv = fn [bd] -> (nsub
+    (si (boardsum bd (fn [i p] -> if (p == 1) then (sub 6 (rowof i)) else 0)))
+    (si (boardsum bd (fn [i p] -> if (p == 7) then (sub (rowof i) 1) else 0))))
+
+  :: --- fast single-pass feature extraction (used in search) ----------------
+  :: Material as ONE board walk → the five signed (White-Black) piece-count diffs,
+  :: instead of ten separate `cnt` passes.
+  cm_matvec = fn [board] ->
+    loop with [b = board, pw=0,nw=0,bw=0,rw=0,qw=0, pb=0,nb=0,bb=0,rb=0,qb=0] :
+      if (b == 0)
+        then [ (nsub (si pw)(si pb)) [ (nsub (si nw)(si nb)) [ (nsub (si bw)(si bb))
+             [ (nsub (si rw)(si rb)) [ (nsub (si qw)(si qb)) 0 ] ] ] ] ]
+      else let x = (head b) in
+        again((tail b),
+          (if (x==1) then +(pw) else pw), (if (x==2) then +(nw) else nw),
+          (if (x==3) then +(bw) else bw), (if (x==4) then +(rw) else rw), (if (x==5) then +(qw) else qw),
+          (if (x==7) then +(pb) else pb), (if (x==8) then +(nb) else nb),
+          (if (x==9) then +(bb) else bb), (if (x==10) then +(rb) else rb), (if (x==11) then +(qb) else qb))
+    end
+  :: Positional as ONE indexed board walk → center control, minor development, pawn
+  :: advancement (the same quantities as fcenter/fminor/fadv, computed together).
+  cm_posvec = fn [board] ->
+    loop with [i=0, b=board, cw=0,cb=0, mw=0,mb=0, aw=0,ab=0] :
+      if (b == 0)
+        then [ (nsub (si cw)(si cb)) [ (nsub (si mw)(si mb)) [ (nsub (si aw)(si ab)) 0 ] ] ]
+      else let x = (head b) in let isc = (member i (centers 0)) in let ctl = (central i) in
+        again(+(i), (tail b),
+          (if (and isc (member x [1 [2 [3 0]]])) then +(cw) else cw),
+          (if (and isc (member x [7 [8 [9 0]]])) then +(cb) else cb),
+          (if (and ctl (member x [2 [3 0]])) then +(mw) else mw),
+          (if (and ctl (member x [8 [9 0]])) then +(mb) else mb),
+          (if (x==1) then (add aw (sub 6 (rowof i))) else aw),
+          (if (x==7) then (add ab (sub (rowof i) 1)) else ab))
+    end
+
+  :: feature vector: 5 material diffs + center control + minor development + pawn
+  :: advancement — two board passes total (was sixteen), identical values.
+  feat = fn [board] -> (append (cm_matvec board) (cm_posvec board))
+
+  :: teacher label = classic material PLUS small positional bonuses (the supervision
+  :: signal). Because the teacher rewards center control, minor development, and pawn
+  :: advancement, gradient descent *learns* positional weights, not just piece values.
   teacher = fn [board] ->
     (nadd (nmul (si 1) (dif board 1 7))
     (nadd (nmul (si 3) (dif board 2 8))
     (nadd (nmul (si 3) (dif board 3 9))
     (nadd (nmul (si 5) (dif board 4 10))
-          (nmul (si 9) (dif board 5 11))))))
+    (nadd (nmul (si 9) (dif board 5 11))
+    (nadd (nmul (npos 300) (fcenter board))
+    (nadd (nmul (npos 200) (fminor board))
+          (nmul (npos 50)  (fadv board)))))))))
 
   :: signed dot product of two equal-length vectors
   ndotv = fn [w x] ->
@@ -64,7 +126,9 @@ core chessml
   learnw = fn [w xs ys lr iters] ->
     loop with [cw = w, k = 0] : if (k == iters) then cw else again((gradstepv cw xs ys lr), +(k)) end
 
-  :: training positions: equal, then White up Q / down R / up N / up P / down B
+  :: training positions: material imbalances PLUS positional motifs (pawn pushes that
+  :: take/avoid the centre, minor development for both colours) so the regression sees
+  :: independent variation in every feature, not just the material ones.
   trainboards = fn [_] ->
     let b = (nth (initial 0) 0) in
     [ b
@@ -72,14 +136,19 @@ core chessml
     [ (setnth b 56 0)
     [ (setnth b 1 0)
     [ (setnth b 8 0)
-    [ (setnth b 58 0) 0 ] ] ] ] ] ]
+    [ (setnth b 58 0)
+    [ (setnth (setnth b 52 0) 36 1)
+    [ (setnth (setnth b 48 0) 32 1)
+    [ (setnth (setnth b 62 0) 45 2)
+    [ (setnth (setnth b 6 0) 21 8)
+    [ (setnth (setnth b 12 0) 28 7) 0 ] ] ] ] ] ] ] ] ] ] ]
 
   :: train the evaluator; returns the learned weight vector (the learned piece values)
   trained = fn [iters] ->
     let bs = (trainboards 0) in
     let xs = (map (fn [bd] -> (feat bd)) bs) in
     let ys = (map (fn [bd] -> (teacher bd)) bs) in
-    (learnw [ [0 0] [0 0] [0 0] [0 0] [0 0] 0 ] xs ys [0 60] iters)
+    (learnw [ [0 0] [0 0] [0 0] [0 0] [0 0] [0 0] [0 0] [0 0] 0 ] xs ys [0 60] iters)
 
   :: score a candidate move for `side` using the learned weights (with a mate override)
   mlscore = fn [board side w m] ->
@@ -115,8 +184,20 @@ core chessml
        else (if (member p [7 [8 [9 0]]]) then (nsub acc (npos 100)) else acc))
      [0 0] [27 [28 [35 [36 0]]]])
 
-  :: static evaluation of a board from White's view: learned material + position
-  evalpos = fn [board w] -> (nadd (evalv board w) (centerbonus board))
+  :: static evaluation is now FULLY LEARNED: center control, minor development and pawn
+  :: advancement are features the model fits, so positional knowledge lives in the trained
+  :: weights rather than a hand-set bonus. (centerbonus is kept only for reference.)
+  evalpos = fn [board w] -> (evalv board w)
+
+  :: order the legal moves best-first. The key is the value of the piece captured
+  :: (the victim on the destination square; 0 for a quiet move) — most-valuable-victim
+  :: ordering. It is a single board lookup per move (no apply/mate-test), so ordering
+  :: is nearly free, yet trying captures first makes alpha-beta prune most of the tree,
+  :: which is what lets the learned searcher reach a useful depth.
+  ordmoves = fn [state] ->
+    let board = (nth state 0) in
+    let keyed = (map (fn [m] -> [ (pval (ptype (nth board (nth m 1)))) m ]) (legal state)) in
+    (map (fn [p] -> (tail p)) (sortby (fn [a b] -> (lte (head b) (head a))) keyed))
 
   :: leaf value of a state (White's view): mate/stalemate aware, else static eval
   leafval = fn [state w] ->
@@ -128,7 +209,7 @@ core chessml
   minimax = fn [state depth w a b] ->
     if (depth == 0) then (leafval state w)
     else
-      let ms = (legal state) in
+      let ms = (ordmoves state) in
       if (ms == 0) then (leafval state w)
       else
         let board = (nth state 0) in let side = (nth state 1) in
@@ -153,7 +234,7 @@ core chessml
   :: choose the move whose `depth`-ply minimax value is best for the side to move
   choose_ab = fn [state w depth] ->
     let board = (nth state 0) in let side = (nth state 1) in
-    let ms = (legal state) in
+    let ms = (ordmoves state) in
     if (ms == 0) then 0
     else
       let lo = (nnegate (si 100000)) in let hi = (si 100000) in

@@ -4,21 +4,42 @@
 :: plus `dec` (Nock-style predecessor). Linked with `import std`.
 :: ===========================================================================
 core std
-  :: --- arithmetic on naturals ---
+  :: --- arithmetic on naturals -------------------------------------------------
+  :: CONVENTIONS used everywhere below (and across every other lib):
+  ::   * Naturals are built Peano-style from one Loom primitive: `+(x)` is the
+  ::     SUCCESSOR (x+1). `dec x` is the predecessor (x-1), Nock-style. Everything
+  ::     numeric — add, sub, mul, div — is ultimately repeated succ/pred.
+  ::   * `loop with [v = init, ...] : BODY end` is the only looping form; inside the
+  ::     body `again(newv, ...)` re-enters the loop with updated bindings (a tail
+  ::     call). There is no mutation — each pass just rebinds the loop variables.
+  ::   * `fast %name ...` is a JET HINT: the interpreter MAY swap in a fast native
+  ::     implementation registered under %name, but this Latte body is the source of
+  ::     truth and the fallback, so the meaning is exactly what is written here.
+  ::   * LOOBEANS (Nock-style booleans): 0 means TRUE, 1 means FALSE. So a predicate
+  ::     like `lt` returns 0 when the relation holds. `if (c == 0) then ... ` reads as
+  ::     "if c is true". `not/and/or` below all respect this 0=true convention.
+  :: dec: count i up from 0 until its successor equals n — i is then n-1. (dec 0) = 0.
   dec = fn [n] -> fast %dec loop with [i = 0] : if (+(i) == n) then i else again(+(i)) end
+  :: add: start at a and apply successor b times (peel b down to 0 with dec).
   add = fn [a b] -> fast %add loop with [x = a, i = b] : if (i == 0) then x else again(+(x), (dec i)) end
+  :: sub: truncated subtraction — step both a and b down together; stops at 0 (no negatives).
   sub = fn [a b] -> fast %sub loop with [x = a, i = b] : if (i == 0) then x else again((dec x), (dec i)) end
+  :: mul: add a to an accumulator b times.
   mul = fn [a b] -> fast %mul loop with [acc = 0, i = b] : if (i == 0) then acc else again((add acc a), (dec i)) end
+  :: lt: peel both down in lockstep; whoever hits 0 first is smaller. Returns loobean 0 (true) when a<b.
   lt  = fn [a b] -> fast %lt loop with [x = a, y = b] : if (y == 0) then 1 else if (x == 0) then 0 else again((dec x), (dec y)) end
-  gt  = fn [a b] -> (lt b a)
-  not = fn [b] -> if (b == 0) then 1 else 0
-  lte = fn [a b] -> (not (gt a b))
-  gte = fn [a b] -> (not (lt a b))
-  and = fn [a b] -> if (a == 0) then b else 1
-  or  = fn [a b] -> if (a == 0) then 0 else b
+  :: the rest of the comparison/boolean vocabulary, all defined in terms of lt and the 0=true convention:
+  gt  = fn [a b] -> (lt b a)                  :: a>b  is  b<a
+  not = fn [b] -> if (b == 0) then 1 else 0   :: flip a loobean
+  lte = fn [a b] -> (not (gt a b))            :: a<=b is not(a>b)
+  gte = fn [a b] -> (not (lt a b))            :: a>=b is not(a<b)
+  and = fn [a b] -> if (a == 0) then b else 1 :: true only if a true AND b true
+  or  = fn [a b] -> if (a == 0) then 0 else b :: true if a true OR b true
   min = fn [a b] -> if (lt a b) then a else b
   max = fn [a b] -> if (lt a b) then b else a
+  :: mod: repeated truncated subtraction of b until what's left is < b (the remainder).
   mod = fn [a b] -> fast %mod loop with [x = a] : if (lt x b) then x else again((sub x b)) end
+  :: div: same peeling, counting how many times b fits (the quotient).
   div = fn [a b] -> fast %div loop with [q = 0, x = a] : if (lt x b) then q else again(+(q), (sub x b)) end
 
   :: --- cons lists (terminated by 0) ---
