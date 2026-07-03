@@ -18,7 +18,10 @@ core std
   ::   * LOOBEANS (Nock-style booleans): 0 means TRUE, 1 means FALSE. So a predicate
   ::     like `lt` returns 0 when the relation holds. `if (c == 0) then ... ` reads as
   ::     "if c is true". `not/and/or` below all respect this 0=true convention.
-  :: dec: count i up from 0 until its successor equals n — i is then n-1. (dec 0) = 0.
+  :: dec: count i up from 0 until its successor equals n — i is then n-1.
+  :: NOTE: (dec 0) CRASHES (Nock-style: 0 has no predecessor — the loop below never
+  :: terminates for n = 0 and the %dec jet raises a Bottom). Guard callers with a
+  :: zero test; do not rely on a dec-of-0 result.
   dec = fn [n] -> fast %dec loop with [i = 0] : if (+(i) == n) then i else again(+(i)) end
   :: add: start at a and apply successor b times (peel b down to 0 with dec).
   add = fn [a b] -> fast %add loop with [x = a, i = b] : if (i == 0) then x else again(+(x), (dec i)) end

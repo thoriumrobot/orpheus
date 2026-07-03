@@ -34,6 +34,9 @@ struct Live {
     thresh: u128,
     keys: BTreeSet<String>, // keys with a present (non-tombstone) current version
     wal_len: usize,         // number of applied operations
+    gen: u64,               // monotonic version: bumped by every write/replay/checkpoint;
+                            // read results cached under (name, gen, query) stay valid for
+                            // exactly as long as the data they were computed from
 }
 
 pub struct DbService {
@@ -41,6 +44,13 @@ pub struct DbService {
     axes: Vec<(String, u128)>,
     dir: PathBuf,
     dbs: HashMap<String, Live>,
+    // THE READ CACHE: rendered results of pure reads (get / query / history /
+    // agg / select / dash), keyed by (db, generation, query). Reads against the
+    // GUI repeatedly re-render identical HTML from an unchanged database value —
+    // one Loom evaluation per distinct (state, query) now serves them all. Any
+    // write bumps the db's generation, so stale entries are simply never hit
+    // again; the map is cleared when it grows past a small cap.
+    rcache: HashMap<(String, u64, String), String>,
 }
 
 impl DbService {
@@ -49,7 +59,7 @@ impl DbService {
     pub fn new(dir: PathBuf) -> Result<DbService, String> {
         let (core, axes) = latte::compile_library_program(&["db", "findb"])?;
         let _ = fs::create_dir_all(&dir);
-        Ok(DbService { core, axes, dir, dbs: HashMap::new() })
+        Ok(DbService { core, axes, dir, dbs: HashMap::new(), rcache: HashMap::new() })
     }
 
     // Call a Latte arm on the live database noun. `call_arm` applies the arm to a
@@ -106,7 +116,7 @@ impl DbService {
             .open(self.wal_path(name))
             .map_err(|e| format!("open wal: {}", e))?;
         writeln!(f, "# {} {} {}", idxtag, rschema, thresh).map_err(|e| format!("{}", e))?;
-        self.dbs.insert(name.into(), Live { value, idxtag, rschema, thresh, keys: BTreeSet::new(), wal_len: 0 });
+        self.dbs.insert(name.into(), Live { value, idxtag, rschema, thresh, keys: BTreeSet::new(), wal_len: 0, gen: next_gen() });
         Ok(())
     }
 
@@ -181,7 +191,7 @@ impl DbService {
                 _ => {}
             }
         }
-        self.dbs.insert(name.into(), Live { value, idxtag, rschema, thresh, keys, wal_len });
+        self.dbs.insert(name.into(), Live { value, idxtag, rschema, thresh, keys, wal_len, gen: next_gen() });
         Ok(())
     }
 
@@ -207,6 +217,7 @@ impl DbService {
         live.value = newval;
         live.keys.insert(key.into());
         live.wal_len += 1;
+        live.gen = next_gen();
         Ok(())
     }
 
@@ -220,7 +231,31 @@ impl DbService {
         live.value = newval;
         live.keys.remove(key);
         live.wal_len += 1;
+        live.gen = next_gen();
         Ok(())
+    }
+
+    /// Run a pure read through the generation-stamped cache: on a hit the stored
+    /// rendering is returned without touching Loom; on a miss the computation runs
+    /// once and its result is stored under the database's CURRENT generation.
+    fn cached_read(
+        &mut self,
+        name: &str,
+        query: String,
+        compute: impl FnOnce(&mut Self) -> Result<String, String>,
+    ) -> Result<String, String> {
+        self.open(name, 2, 0, 256)?;
+        let gen = self.dbs.get(name).map(|l| l.gen).unwrap_or(0);
+        let key = (name.to_string(), gen, query);
+        if let Some(hit) = self.rcache.get(&key) {
+            return Ok(hit.clone());
+        }
+        let out = compute(self)?;
+        if self.rcache.len() >= 512 {
+            self.rcache.clear(); // simple, rare, and correct — the next reads repopulate
+        }
+        self.rcache.insert(key, out.clone());
+        Ok(out)
     }
 
     fn value_of(&mut self, name: &str) -> Result<N, String> {
@@ -230,37 +265,47 @@ impl DbService {
 
     /// Read the visible record for `key`, rendered for display.
     pub fn get(&mut self, name: &str, key: &str) -> Result<String, String> {
-        let v = self.value_of(name)?;
-        let r = self.call("db_get", knot_tuple!(v, cord(key)))?;
-        Ok(crate::serve::render_noun(&r))
+        let k = key.to_string();
+        self.cached_read(name, format!("get\u{1}{}", key), move |me| {
+            let v = me.value_of(name)?;
+            let r = me.call("db_get", knot_tuple!(v, cord(&k)))?;
+            Ok(crate::serve::render_noun(&r))
+        })
     }
 
     /// All live rows whose indexed field equals `fv`, rendered as HTML.
     pub fn query_html(&mut self, name: &str, fv: &str) -> Result<String, String> {
-        let v = self.value_of(name)?;
-        let r = self.call("db_queryhtml", knot_tuple!(v, cord(fv)))?;
-        Ok(crate::serve::render_result(&r))
+        let f = fv.to_string();
+        self.cached_read(name, format!("query\u{1}{}", fv), move |me| {
+            let v = me.value_of(name)?;
+            let r = me.call("db_queryhtml", knot_tuple!(v, cord(&f)))?;
+            Ok(crate::serve::render_result(&r))
+        })
     }
 
     /// The version history of `key`, rendered as HTML (newest first).
     pub fn history_html(&mut self, name: &str, key: &str) -> Result<String, String> {
-        let v = self.value_of(name)?;
-        let r = self.call("db_historyhtml", knot_tuple!(v, cord(key)))?;
-        Ok(crate::serve::render_result(&r))
+        let k = key.to_string();
+        self.cached_read(name, format!("history\u{1}{}", key), move |me| {
+            let v = me.value_of(name)?;
+            let r = me.call("db_historyhtml", knot_tuple!(v, cord(&k)))?;
+            Ok(crate::serve::render_result(&r))
+        })
     }
 
     /// GROUP BY field `gtag`, SUM field `atag`, over the durable database's live keys —
     /// the query/analytics layer run against on-disk data. Returns one `group: total` line
     /// per group.
     pub fn agg(&mut self, name: &str, gtag: u128, atag: u128) -> Result<String, String> {
-        self.open(name, 2, 0, 256)?;
-        let live = self.dbs.get(name).unwrap();
-        let v = live.value.clone();
-        let keylist = keys_to_noun(&live.keys);
-        let r = self.call("db_aggtext", knot_tuple!(v, keylist, num(gtag), num(atag)))?;
-        Ok(r.as_atom()
-            .map(|a| String::from_utf8_lossy(&a.bytes_le()).into_owned())
-            .unwrap_or_else(|| crate::serve::render_noun(&r)))
+        self.cached_read(name, format!("agg\u{1}{}\u{1}{}", gtag, atag), move |me| {
+            let live = me.dbs.get(name).unwrap();
+            let v = live.value.clone();
+            let keylist = keys_to_noun(&live.keys);
+            let r = me.call("db_aggtext", knot_tuple!(v, keylist, num(gtag), num(atag)))?;
+            Ok(r.as_atom()
+                .map(|a| String::from_utf8_lossy(&a.bytes_le()).into_owned())
+                .unwrap_or_else(|| crate::serve::render_noun(&r)))
+        })
     }
 
     /// Compact the on-disk log: rewrite it as one `P` line per live key, each holding
@@ -373,6 +418,7 @@ impl DbService {
                 live.keys.insert(k.clone());
             }
             live.wal_len += writes.len();
+            live.gen = next_gen();
         }
         Ok(committed)
     }
@@ -434,27 +480,31 @@ impl DbService {
                 field, name, field
             ));
         }
-        let v = self.value_of(name)?;
-        let valnoun = match value.parse::<u128>() {
-            Ok(n) => num(n),
-            Err(_) => cord(value),
-        };
-        let entries = self.call("db_queryon", knot_tuple!(v, num(field), valnoun))?;
-        let txt = self.call("db_keytext", entries)?;
-        Ok(txt
-            .as_atom()
-            .map(|a| String::from_utf8_lossy(&a.bytes_le()).trim().to_string())
-            .unwrap_or_default())
+        let val = value.to_string();
+        self.cached_read(name, format!("select\u{1}{}\u{1}{}", field, value), move |me| {
+            let v = me.value_of(name)?;
+            let valnoun = match val.parse::<u128>() {
+                Ok(n) => num(n),
+                Err(_) => cord(&val),
+            };
+            let entries = me.call("db_queryon", knot_tuple!(v, num(field), valnoun))?;
+            let txt = me.call("db_keytext", entries)?;
+            Ok(txt
+                .as_atom()
+                .map(|a| String::from_utf8_lossy(&a.bytes_le()).trim().to_string())
+                .unwrap_or_default())
+        })
     }
 
     /// The whole live state as an HTML dashboard (over the keys we know are present).
     pub fn dash_html(&mut self, name: &str) -> Result<String, String> {
-        self.open(name, 2, 0, 256)?;
-        let live = self.dbs.get(name).unwrap();
-        let v = live.value.clone();
-        let keylist = keys_to_noun(&live.keys);
-        let r = self.call("db_dashkeys", knot_tuple!(v, keylist))?;
-        Ok(crate::serve::render_result(&r))
+        self.cached_read(name, "dash".to_string(), move |me| {
+            let live = me.dbs.get(name).unwrap();
+            let v = live.value.clone();
+            let keylist = keys_to_noun(&live.keys);
+            let r = me.call("db_dashkeys", knot_tuple!(v, keylist))?;
+            Ok(crate::serve::render_result(&r))
+        })
     }
 
     /// Names of all databases (open or on disk), with their live-key and log sizes.
@@ -514,6 +564,15 @@ fn keys_to_noun(keys: &BTreeSet<String>) -> N {
 
 static SVC: OnceLock<Mutex<DbService>> = OnceLock::new();
 
+/// Collision-free generation numbers for the read cache: every state change of any
+/// database takes the next value, so a (name, gen) pair can never be reused for a
+/// different value — not even across checkpoint's remove-and-replay cycle.
+fn next_gen() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static G: AtomicU64 = AtomicU64::new(1);
+    G.fetch_add(1, Ordering::Relaxed)
+}
+
 fn default_dir() -> PathBuf {
     std::env::var("ORPHEUS_DB_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("dbdata"))
 }
@@ -548,10 +607,6 @@ pub fn noun_to_latte(n: &N) -> Option<String> {
     }
 }
 
-/// Render a query/history/get noun that may be `%absent`, for the CLI.
-pub fn is_absent(n: &N) -> bool {
-    matches!(&**n, Knot::Atom(a) if a.as_cord().as_deref() == Some("absent"))
-}
 
 // ---- the CLI: `latte db …` -------------------------------------------------
 
@@ -672,6 +727,28 @@ mod tests {
     }
 
     #[test]
+    fn read_cache_hits_and_invalidates() {
+        let dir = tmpdir("rcache");
+        let mut s = DbService::new(dir).unwrap();
+        s.put("c", "k1", "[ [1 %alpha] [ [2 100] 0 ] ]").unwrap();
+        let a1 = s.get("c", "k1").unwrap();
+        // second identical read is served from the cache — and must be equal
+        let a2 = s.get("c", "k1").unwrap();
+        assert_eq!(a1, a2);
+        assert!(!s.rcache.is_empty(), "the read populated the cache");
+        // a write bumps the generation: the next read must see the NEW value,
+        // not the cached rendering of the old one
+        s.put("c", "k1", "[ [1 %beta] [ [2 200] 0 ] ]").unwrap();
+        let b = s.get("c", "k1").unwrap();
+        assert_ne!(a1, b, "write invalidated the cached read");
+        assert!(b.contains("beta"), "the new value is visible: {}", b);
+        // deletes invalidate too
+        s.delete("c", "k1").unwrap();
+        let gone = s.get("c", "k1").unwrap();
+        assert!(gone.contains("absent"), "tombstone visible after delete: {}", gone);
+    }
+
+    #[test]
     fn persists_across_reopen() {
         let dir = tmpdir("persist");
         // session 1: write three rows, then drop the whole service
@@ -690,8 +767,7 @@ mod tests {
             assert!(s.get("users", "u2").unwrap().contains("bob"));
             assert!(s.get("users", "u3").unwrap().contains("carol"));
             // a key never written is absent (Bloom short-circuit still holds)
-            assert!(super::is_absent(&latte::run_with_libs("%absent", &["std"]).unwrap())
-                || s.get("users", "u9").unwrap().contains("absent"));
+            assert!(s.get("users", "u9").unwrap().contains("absent"));
             // the secondary index survived too: two users in nyc
             let q = s.query_html("users", "nyc").unwrap();
             assert!(q.contains("alice") && q.contains("carol") && !q.contains("bob"));

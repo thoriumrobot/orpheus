@@ -236,7 +236,6 @@ pub fn market_chart_sym(market: &str, days: usize, live: bool) -> String {
 
 /// Decode `render`'s rows-of-packed-RGB noun into a flat u32 field.
 fn trace_field(n: &crate::knot::N) -> (Vec<u32>, usize, usize) {
-    use crate::knot::Knot;
     let mut field = Vec::new();
     let (mut w, mut h) = (0usize, 0usize);
     let mut rows = n.clone();
@@ -256,11 +255,6 @@ fn trace_field(n: &crate::knot::N) -> (Vec<u32>, usize, usize) {
     (field, w, h)
 }
 
-/// Run the Latte ray tracer (lib/trace.lat) at `w`x`h` and return (SVG, engine, ms).
-/// Tries the Anvil native compiler first; falls back to the (jet-accelerated) interpreter.
-pub fn ray_trace(w: usize, h: usize) -> (String, &'static str, u128) {
-    ray_trace_scene(None, w, h)
-}
 
 /// Render an ARBITRARY scene: `scene` is a Latte expression evaluating to a
 /// sphere list `[ [center [radius [color [reflectivity 0]]]] … 0 ]` (centers

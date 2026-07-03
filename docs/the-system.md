@@ -13,9 +13,29 @@ Middle-click any command line — in any text, any tool, the Log, even output a
 tool printed — and it runs. (No middle button: put the caret on the line and
 press Ctrl/⌘+Enter.) Lines starting with `#` or `::` are comments.
 
-Tools run **in parallel**: Hymn serves every request on its own thread, so you
-can middle-click `trace w=160 h=120`, then `trade live=1`, then keep editing a
-document while both fill in.
+Tools run **in parallel**: Hymn hands every request to a worker-pool thread, so
+you can middle-click `trace w=160 h=120`, then `trade live=1`, then keep editing
+a document while both fill in.
+
+### Defining functions from any text
+
+`def` turns a one-liner in any text into a function of the running session:
+
+```
+def sq [x] = (mul x x)          # shorthand
+def cube = fn [x] -> (mul x (sq x))   # explicit gate form; may call earlier defs
+eval (cube 7)                   # → 343, from anywhere
+def                             # list the session's functions
+undef sq                        # remove one (dependents are warned about)
+```
+
+Definitions accumulate in a synthetic `user` module compiled through the same
+validating path as `/api/compile` — a broken definition is rejected and the
+previous good set stays installed. Because the `user` module joins the standard
+scope, a defined function is immediately callable from `eval` in the console,
+Facet pages, the CLI (`latte cli` accepts the same `def`/`undef`), and the HTTP
+API. This is the Oberon habit — the text you are reading is also the program —
+without the old detour through `loop with [f = (fn …)] : … end`.
 
 ## Opening documents, modules, and pages
 

@@ -46,9 +46,14 @@ fn escape(s: &str) -> String {
 }
 
 /// Walk a scene noun (a list of `[tag payload]` shapes) and render it as a standalone SVG.
+/// The result is a complete, valid SVG document (`<svg …>…</svg>`) of the requested size —
+/// previously this returned a bare element fragment with no root, which browsers refuse to
+/// render when served as `image/svg+xml` or saved to a `.svg` file.
 pub fn render_scene(scene: &N, w: u128, h: u128) -> String {
     let body = render_scene_body(scene);
-    body
+    format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='{w}' height='{h}' viewBox='0 0 {w} {h}'>{body}</svg>"
+    )
 }
 
 /// Render the shapes of a scene to SVG elements (no outer <svg> wrapper).
@@ -181,6 +186,9 @@ mod tests {
     fn gfx_demo_scene_renders_all_primitives() {
         let scene = latte::run_with_libs("(demo 0)", &["std", "gfx"]).expect("demo scene");
         let svg = render_scene(&scene, 320, 260);
+        assert!(svg.starts_with("<svg"), "is a standalone SVG document, not a fragment");
+        assert!(svg.ends_with("</svg>"), "closes the SVG root");
+        assert!(svg.contains("width='320'") && svg.contains("height='260'"), "honours the requested size");
         assert!(svg.contains("<rect"), "has a rectangle");
         assert!(svg.contains("<circle"), "has a circle");
         assert!(svg.contains("<line"), "has a line");

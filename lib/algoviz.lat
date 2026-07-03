@@ -1,0 +1,271 @@
+:: algoviz — algorithm visualization for Latte.
+::
+:: Every algorithm here is INSTRUMENTED: it runs normally on Loom but records a
+:: FRAME after each elementary step (a comparison, a swap, a probe, a visit).
+:: A trace is an ordinary 0-terminated list of frames — plain data, so it can
+:: be inspected, counted, sliced, and rendered like anything else. Rendering
+:: reuses the gfx scene system (lib/gfx.lat): a frame becomes a scene of
+:: rectangles and text, and the HOST's one SVG serializer (src/gfx.rs) draws
+:: it — the same pipeline `latte gfx` and /api/gfx use, so nothing is
+:: duplicated. The Facet tool `AlgoViz.frame(algo, xs, k)` and the /learn page
+:: put a slider on k and the algorithm plays in the browser.
+::
+:: Algorithms: %bubble and %insert (sorting, bar frames), %binsearch (probe
+:: frames over the sorted list), %bfs (breadth-first flood over a small maze,
+:: grid frames). Traces:
+::   sort frame     = [ state [ a [ b [ swapped [ done 0 ] ] ] ] ]
+::     state   the whole array after this step
+::     a, b    the two indices just compared (bars drawn highlighted)
+::     b = a   means no comparison highlight (final frame)
+::     swapped 1 if this step swapped, else 0 (colors the highlight)
+::     done    indices >= done are in final position (drawn green)
+::   binsearch frame = [ lo [ mid [ hi [ found 0 ] ] ] ]   (found: 1 hit, 0 not)
+::   bfs frame       = the whole grid as a flat list of cell codes
+::                     (0 open, 1 wall, 2 start, 3 goal, 4 frontier, 5 visited, 6 path)
+import std
+import gfx
+core algoviz
+  :: ---- shared helpers -------------------------------------------------------
+  :: replace element i of xs with v (structural update by rebuild)
+  av_set = fn [xs i v] ->
+    loop with [c = xs, k = 0, acc = 0] :
+      if (c == 0) then (reverse acc)
+      else again((tail c), +(k), [ (if (k == i) then v else (head c)) acc ])
+    end
+  :: swap elements i and j of xs
+  av_swap = fn [xs i j] ->
+    let a = (nth xs i) in
+    let b = (nth xs j) in
+    (av_set (av_set xs i b) j a)
+
+  :: ---- BUBBLE SORT, instrumented -------------------------------------------
+  :: classic n-1 passes; each comparison of neighbours (j, j+1) appends one
+  :: frame. After pass p, index n-p onward is final (`done` in the frame).
+  av_bubtrace = fn [xs] ->
+    let n = (len xs) in
+    if (lt n 2) then [ [ xs [ 0 [ 0 [ 0 [ 0 0 ] ] ] ] ] 0 ]
+    else
+    loop with [endi = (sub n 1), st = xs, acc = 0] :
+      if (endi == 0)
+      then (reverse [ [ st [ 0 [ 0 [ 0 [ 0 0 ] ] ] ] ] acc ])   :: closing frame: all green
+      else
+        let pass = loop with [j = 0, s = st, a2 = acc] :
+                     if (gte j endi) then [ s a2 ]
+                     else
+                       let x = (nth s j) in
+                       let y = (nth s +(j)) in
+                       let sw = (gt x y) in
+                       let s2 = if (sw == 0) then (av_swap s j +(j)) else s in
+                       again(+(j), s2,
+                             [ [ s2 [ j [ +(j) [ (if (sw == 0) then 1 else 0) [ +(endi) 0 ] ] ] ] ] a2 ])
+                   end in
+        again((dec endi), (head pass), (tail pass))
+    end
+
+  :: ---- INSERTION SORT, instrumented ----------------------------------------
+  :: element i walks left through the sorted prefix; every comparison/shift is
+  :: a frame. `done` marks the sorted prefix 0..i (values may still move).
+  av_instrace = fn [xs] ->
+    let n = (len xs) in
+    if (lt n 2) then [ [ xs [ 0 [ 0 [ 0 [ 0 0 ] ] ] ] ] 0 ]
+    else
+    loop with [i = 1, st = xs, acc = 0] :
+      if (gte i n)
+      then (reverse [ [ st [ 0 [ 0 [ 0 [ 0 0 ] ] ] ] ] acc ])
+      else
+        let walk = loop with [j = i, s = st, a2 = acc] :
+                     if (j == 0) then [ s a2 ]
+                     else
+                       let x = (nth s (dec j)) in
+                       let y = (nth s j) in
+                       if (gt x y)
+                       then
+                         let s2 = (av_swap s (dec j) j) in
+                         again((dec j), s2, [ [ s2 [ (dec j) [ j [ 1 [ +(i) 0 ] ] ] ] ] a2 ])
+                       else [ s [ [ s [ (dec j) [ j [ 0 [ +(i) 0 ] ] ] ] ] a2 ] ]
+                   end in
+        again(+(i), (head walk), (tail walk))
+    end
+
+  :: ---- BINARY SEARCH, instrumented ------------------------------------------
+  :: probes the SORTED list for t; each frame is one probe [ lo mid hi found ].
+  av_bintrace = fn [xs t] ->
+    let s = (sort xs) in
+    let n = (len s) in
+    loop with [lo = 0, hi = (sub n 1), acc = 0] :
+      if (gt lo hi) then (reverse acc)
+      else
+        let mid = (div (add lo hi) 2) in
+        let v = (nth s mid) in
+        if (v == t) then (reverse [ [ lo [ mid [ hi [ 1 0 ] ] ] ] acc ])
+        else if (lt v t)
+        then again(+(mid), hi, [ [ lo [ mid [ hi [ 0 0 ] ] ] ] acc ])
+        else if (mid == 0) then (reverse [ [ lo [ mid [ hi [ 0 0 ] ] ] ] acc ])
+        else again(lo, (dec mid), [ [ lo [ mid [ hi [ 0 0 ] ] ] ] acc ])
+    end
+
+  :: ---- BFS over a maze, instrumented ----------------------------------------
+  :: the demo maze: 10 columns x 7 rows, start top-left, goal bottom-right.
+  :: 0 open · 1 wall · 2 start · 3 goal; the trace recolors cells as the wave
+  :: expands: 4 frontier · 5 visited · 6 the reconstructed shortest path.
+  av_cols = fn [_] -> 10
+  av_rows = fn [_] -> 7
+  av_maze = fn [_] ->
+    [ 2 [ 0 [ 0 [ 1 [ 0 [ 0 [ 0 [ 0 [ 0 [ 0
+    [ 0 [ 1 [ 0 [ 1 [ 0 [ 1 [ 1 [ 1 [ 1 [ 0
+    [ 0 [ 1 [ 0 [ 0 [ 0 [ 0 [ 0 [ 0 [ 1 [ 0
+    [ 0 [ 1 [ 1 [ 1 [ 1 [ 1 [ 1 [ 0 [ 1 [ 0
+    [ 0 [ 0 [ 0 [ 0 [ 0 [ 0 [ 1 [ 0 [ 1 [ 0
+    [ 1 [ 1 [ 1 [ 1 [ 1 [ 0 [ 1 [ 0 [ 0 [ 0
+    [ 0 [ 0 [ 0 [ 0 [ 0 [ 0 [ 1 [ 0 [ 0 [ 3
+      0 ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+      ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+      ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ]
+      ] ] ] ] ] ] ] ] ] ]
+  :: cell helpers over the flat grid
+  av_cell   = fn [g i] -> (nth g i)
+  av_walkq  = fn [g i] -> let c = (av_cell g i) in (or (c == 0) (c == 3))
+  :: neighbours of index i in a cols-wide grid (up, down, left, right; edges clipped)
+  av_nbrs = fn [i cols n] ->
+    let up    = if (lt i cols) then 0 else [ (sub i cols) 0 ] in
+    let down  = if (gte (add i cols) n) then 0 else [ (add i cols) 0 ] in
+    let left  = if ((mod i cols) == 0) then 0 else [ (dec i) 0 ] in
+    let right = if ((mod +(i) cols) == 0) then 0 else [ +(i) 0 ] in
+    (append up (append down (append left right)))
+  :: one BFS: returns the trace of grid frames. `par` records each cell's
+  :: parent+1 (0 = unreached) so the shortest path can be walked back at the end.
+  av_bfstrace = fn [_] ->
+    let g0 = (av_maze 0) in
+    let cols = (av_cols 0) in
+    let n = (len g0) in
+    let goal = (sub n 1) in
+    loop with [frontier = [ 0 0 ], g = g0, par = (map (fn [_] -> 0) (range n)), acc = [ g0 0 ]] :
+      if (frontier == 0) then (reverse acc)   :: no path (cannot happen in the demo maze)
+      else if ((member goal frontier) == 0)
+      then
+        :: goal reached: walk parents back, paint the path (code 6), emit the final frame
+        let path = loop with [i = goal, p = 0] :
+                     let pr = (nth par i) in
+                     if (pr == 0) then [ i p ]
+                     else again((dec pr), [ i p ])
+                   end in
+        let gfin = loop with [c = g, k = 0, a2 = 0] :
+                     if (c == 0) then (reverse a2)
+                     else again((tail c), +(k),
+                       [ (if ((member k path) == 0)
+                          then (if ((head c) == 1) then 1 else 6)
+                          else (head c)) a2 ])
+                   end in
+        (reverse [ gfin acc ])
+      else
+        :: expand the frontier one ring: mark frontier 4, then visited 5
+        let expand = loop with [f = frontier, g2 = g, p2 = par, nf = 0] :
+                       if (f == 0) then [ g2 [ p2 [ nf 0 ] ] ]
+                       else
+                         let i = (head f) in
+                         let step = loop with [ns = (av_nbrs i cols n), g3 = g2, p3 = p2, nf2 = nf] :
+                                      if (ns == 0) then [ g3 [ p3 [ nf2 0 ] ] ]
+                                      else
+                                        let j = (head ns) in
+                                        if (av_walkq g3 j)
+                                        then again((tail ns), (av_set g3 j 4), (av_set p3 j +(i)), [ j nf2 ])
+                                        else again((tail ns), g3, p3, nf2)
+                                    end in
+                         again((tail f), (av_set (head step) i 5), (head (tail step)), (head (tail (tail step))))
+                     end in
+        let g4 = (head expand) in
+        again((head (tail (tail expand))), g4, (head (tail expand)), [ g4 acc ])
+    end
+
+  :: ---- SCENES: frames drawn with the gfx constructors ----------------------
+  :: bars for a sort frame: compared pair yellow (red if it swapped), the final
+  :: region green, everything else blue; values printed under the bars.
+  av_barcol = fn [k a b sw done] ->
+    if (gte k done) then (green 0)
+    else if (or (k == a) (k == b)) then (if (sw == 1) then (red 0) else (yellow 0))
+    else (blue 0)
+  av_bars = fn [st a b sw done cap] ->
+    let n = (max 1 (len st)) in
+    let vmax = (foldl (fn [m v] -> (max m v)) 1 st) in
+    let bw = (div 300 n) in
+    let bars = loop with [c = st, k = 0, acc = 0] :
+                 if (c == 0) then (reverse acc)
+                 else
+                   let h = (max 4 (div (mul (head c) 190) vmax)) in
+                   let x = (add 12 (mul k bw)) in
+                   again((tail c), +(k),
+                     [ (text (add x (div bw 4)) 250 (numtext (head c)) (black 0))
+                     [ (rect x (sub 230 h) (sub bw 6) h (av_barcol k a b sw done)) acc ] ])
+               end in
+    [ (text 12 20 cap (black 0)) bars ]
+
+  :: the probe strip for binary search: boxes; lo..hi window blue, mid yellow
+  :: (green when it hits), discarded region grey; values inside the boxes.
+  av_probe = fn [s lo mid hi found t] ->
+    let n = (max 1 (len s)) in
+    let bw = (div 300 n) in
+    let boxes = loop with [c = s, k = 0, acc = 0] :
+                  if (c == 0) then (reverse acc)
+                  else
+                    let col = if (k == mid) then (if (found == 1) then (green 0) else (yellow 0))
+                              else if (and (gte k lo) (lte k hi)) then (blue 0)
+                              else (rgb 210 205 195) in
+                    let x = (add 12 (mul k bw)) in
+                    again((tail c), +(k),
+                      [ (text (add x (div bw 4)) 148 (numtext (head c)) (black 0))
+                      [ (rect x 120 (sub bw 6) 44 col) acc ] ])
+                end in
+    [ (text 12 20 (cat %seeking_ (numtext t)) (black 0))
+    [ (text 12 40 (catall [ %lo_ (numtext lo) %__mid_ (numtext mid) %__hi_ (numtext hi) 0 ]) (black 0))
+      boxes ] ]
+
+  :: the maze grid: one square per cell, colored by its code
+  av_gcol = fn [c] ->
+    if (c == 1) then (rgb 60 55 70)          :: wall
+    else if (c == 2) then (rgb 240 240 250)  :: start
+    else if (c == 3) then (red 0)            :: goal
+    else if (c == 4) then (yellow 0)         :: frontier
+    else if (c == 5) then (blue 0)           :: visited
+    else if (c == 6) then (green 0)          :: path
+    else (rgb 225 220 210)                   :: open
+  av_gridscene = fn [g cap] ->
+    let cols = (av_cols 0) in
+    let cells = loop with [c = g, k = 0, acc = 0] :
+                  if (c == 0) then (reverse acc)
+                  else again((tail c), +(k),
+                    [ (rect (add 12 (mul (mod k cols) 30)) (add 34 (mul (div k cols) 30)) 27 27 (av_gcol (head c))) acc ])
+                end in
+    [ (text 12 20 cap (black 0)) cells ]
+
+  :: ---- THE PUBLIC FACE: pick an algorithm, count steps, render frame k ------
+  :: the trace for %bubble / %insert / %binsearch / %bfs (t = binsearch target)
+  av_trace = fn [algo xs t] ->
+    case algo of
+      %bubble    -> (av_bubtrace xs) ;
+      %insert    -> (av_instrace xs) ;
+      %binsearch -> (av_bintrace xs t) ;
+      %bfs       -> (av_bfstrace 0) ;
+      _          -> 0
+    end
+  :: number of frames (the slider's range)
+  av_steps = fn [algo xs t] -> (len (av_trace algo xs t))
+  :: frame k as a gfx scene, clamped into range
+  av_frame = fn [algo xs t k] ->
+    let tr = (av_trace algo xs t) in
+    let n = (len tr) in
+    if (n == 0) then [ (text 12 20 %no_frames (black 0)) 0 ]
+    else
+      let kk = if (gte k n) then (dec n) else k in
+      let f = (nth tr kk) in
+      let cap = (catall [ %step_ (numtext +(kk)) %_of_ (numtext n) 0 ]) in
+      case algo of
+        %bubble    -> (av_bars (head f) (head (tail f)) (head (tail (tail f)))
+                               (head (tail (tail (tail f)))) (head (tail (tail (tail (tail f))))) cap) ;
+        %insert    -> (av_bars (head f) (head (tail f)) (head (tail (tail f)))
+                               (head (tail (tail (tail f)))) (head (tail (tail (tail (tail f))))) cap) ;
+        %binsearch -> (av_probe (sort xs) (head f) (head (tail f)) (head (tail (tail f)))
+                               (head (tail (tail (tail f)))) t) ;
+        %bfs       -> (av_gridscene f cap) ;
+        _          -> [ (text 12 20 %unknown_algorithm (black 0)) 0 ]
+      end
+end

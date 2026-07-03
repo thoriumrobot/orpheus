@@ -294,12 +294,33 @@ fn cmd_anvil(args: &[String]) {
     }
 }
 
+/// `latte profile "<expr>"` — the code profiler: measure the program on both engines,
+/// persist the timings, and report which engine the adaptive policy will now choose.
+/// Slow-when-interpreted programs are compiled automatically on their next run — the
+/// measurement, not a structural guess, is what decides (see rustgen::run_adaptive).
+fn cmd_profile(args: &[String]) {
+    let expr = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(e) => e.as_str(),
+        None => {
+            eprintln!("usage: latte profile \"<expr>\"   (measure both engines; the adaptive policy uses the result)");
+            return;
+        }
+    };
+    let libs_owned = latte::all_libs();
+    let libs: Vec<&str> = libs_owned.iter().map(|s| s.as_str()).collect();
+    match rustgen::profile_report(expr, &libs) {
+        Ok(r) => println!("{}", r),
+        Err(e) => eprintln!("profile error: {}", e),
+    }
+}
+
 fn cmd_cli() {
     use std::io::Write;
     let libs_owned = latte::all_libs();
     let libs: Vec<&str> = libs_owned.iter().map(|s| s.as_str()).collect();
     println!("Orpheus command line.  Type a Latte expression, or a meta-command:");
     println!("  :type EXPR   infer a type      :rust EXPR   compile to native Rust and run");
+    println!("  def NAME [args] = BODY   define a function for this session (def lists; undef NAME removes)");
     println!("  :libs        list libraries    :help        this help     :q   quit\n");
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
@@ -319,9 +340,17 @@ fn cmd_cli() {
         if t == ":q" || t == ":quit" || t == ":exit" {
             break;
         } else if t == ":help" {
-            println!(":type EXPR | :rust EXPR | :libs | :q | otherwise evaluate EXPR");
+            println!(":type EXPR | :rust EXPR | :libs | def NAME [args] = BODY | undef NAME | :q | otherwise evaluate EXPR");
+        } else if t == "def" || t.starts_with("def ") {
+            match latte::define_user_arm(t.strip_prefix("def").unwrap_or("")) {
+                Ok(m) | Err(m) => println!("{}", m),
+            }
+        } else if let Some(n) = t.strip_prefix("undef ") {
+            match latte::undefine_user_arm(n) {
+                Ok(m) | Err(m) => println!("{}", m),
+            }
         } else if t == ":libs" {
-            println!("{}", libs_owned.join(" "));
+            println!("{}", latte::all_libs().join(" "));
         } else if let Some(e) = t.strip_prefix(":type ") {
             match latte::parse(e).and_then(|a| check::check(&a).map_err(|e| e)) {
                 Ok(ty) => println!("{} : {}", e, ty.show()),
@@ -336,6 +365,9 @@ fn cmd_cli() {
                 Err(err) => println!("compile error: {}", err),
             }
         } else {
+            // refresh the scope each line: a `def` above registers the `user` module
+            let libs_now = latte::all_libs();
+            let libs: Vec<&str> = libs_now.iter().map(|s| s.as_str()).collect();
             if let Some(out) = eval_native(t, &libs, false) {
                 println!("{}", out);
             } else {
@@ -400,6 +432,7 @@ fn main() {
     match cmd {
         "cli" | "console" | "--cli" => cmd_cli(),
         "cache" => cmd_cache(&args[1..]),
+        "profile" => cmd_profile(&args[1..]),
         "anvil" => cmd_anvil(&args[1..]),
         "net" => cmd_net(&args[1..]),
         "node" => cmd_node(&args[1..]),
@@ -584,7 +617,7 @@ fn main() {
   latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
   latte plan [--iters N]             planning calc (Towards a New Socialism)
   latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\"           the code profiler: measure both engines, auto-compile what pays\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
             );
         }
     }
@@ -758,6 +791,13 @@ fn cmd_sca(args: &[String]) {
             Ok(s) => s,
             Err(e) => { eprintln!("sca: cannot read {}: {}", path, e); return; }
         };
+        // an assembled soundlib file records its ordered selection in a
+        // `:: changes: id id …` header — surface it, so the user sees WHICH
+        // named changes this file applies and in what order
+        let sel = crate::conlang::sca_selection(&src);
+        if !sel.is_empty() {
+            println!("applying {} change(s): {}", sel.len(), sel.join(" → "));
+        }
         for word in &args[2..] {
             match sca::run_sca_latte(word, &[src.clone()]) {
                 Ok(out) => println!("{}  -->  {}", word, out),

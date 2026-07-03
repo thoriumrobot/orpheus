@@ -609,7 +609,11 @@ Latte on the Loom.
 - **Adding your own library** is documented in `docs/adding-libraries.md` (with the worked
   `lib/vec.lat` example); data viz and ML modelling in `docs/visualization-and-ml.md`; building and running on Ubuntu and Windows in `docs/building-and-running.md`.
 - **Language references, readable in the GUI.** The languages are documented in full:
-  `docs/latte-language.md` (Latte — values, syntax, modules, semantics), `docs/facet-language.md`
+  `docs/latte-language.md` (Latte — values, syntax, modules, semantics),
+  `docs/latte-tutorial.md` (THE tutorial — open it in the GUI's Docs viewer and
+  middle-click the examples: the text runs), `docs/using-latte-from-the-gui.md` (the
+  workflow guide: eval, def, compiling modules into the running image, rendering
+  tools, live pages), `docs/facet-language.md`
   (Facet — the markup language with tool-call holes), `docs/scars-sound-changes.md` (the SCArs
   sound-change rule language, including stress- and cluster-conditioned changes), and
   `docs/interaction-nets.md` (the interaction-net engine and its compiled fragment). All of the

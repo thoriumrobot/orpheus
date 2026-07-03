@@ -654,7 +654,7 @@ function looksLikeCommand(t){
   // Every verb that produces an embeddable object (see the OUT map) or is a
   // System/tool command should style as a runnable command line. Keep this in
   // sync with OUT so a `drawing <name>` line looks like every other tool line.
-  return /^(chart|plot|gfx|draw|drawing|trace|render|ta|indicators|trade|advise|fin|gpu|derive|plan|net|sca|eval|ui|phono|soundlib|soundchanges|debug|xiangqi|sym|symbol|findb|fdb|data|pdb|acplan\.|db\.|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
+  return /^(chart|plot|gfx|draw|drawing|trace|render|ta|indicators|trade|advise|fin|gpu|derive|plan|net|sca|eval|def |def$|undef|type |ui|phono|soundlib|soundchanges|debug|xiangqi|sym|symbol|findb|fdb|data|pdb|acplan\.|db\.|System\.|Edit\.|Doc\.|Compiler\.|Tool\.|Forge\.|hello\.|libs)/.test(t.trim());
 }
 /* serialize ONE rendered line back to markdown */
 function lineToMarkdown(node){

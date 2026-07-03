@@ -1322,6 +1322,216 @@ fn metrics_path() -> std::path::PathBuf {
     cache_dir().join("metrics")
 }
 
+// ---------------------------------------------------------------------------
+// The PROFILER: measured engine selection.
+//
+// The adaptive policy's structural heuristic (`worth_compiling`) guesses from
+// the AST; the profiler REPLACES the guess with a measurement wherever one
+// exists. Every interpreter run of a program is timed and recorded (keyed by a
+// hash of the program text + its library scope, persisted in the cache dir so
+// measurements span one-shot CLI runs). A program whose measured interpreter
+// time crosses the threshold is compiled automatically before its next run —
+// through the resident daemon when one is up (no stall), else synchronously.
+// `latte profile "<expr>"` runs both engines, reports the measured speedup,
+// and states the decision the adaptive engine will now take.
+//
+// Threshold: ORPHEUS_PROFILE_NS (default 1.5ms). Below it, interpreting is so
+// cheap that a build could never pay for itself; above it, the native run's
+// severalfold speedup compounds across repeats. Entries are advisory — a stale
+// timing can only mis-schedule a build, never change a result.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Default)]
+pub struct Profile {
+    pub interp_ns: u64, // latest measured interpreter wall time
+    pub native_ns: u64, // latest measured native wall time (0 = never measured)
+    pub runs: u64,      // interpreter runs recorded
+}
+
+pub fn profile_threshold_ns() -> u64 {
+    std::env::var("ORPHEUS_PROFILE_NS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_500_000)
+}
+
+fn profile_path() -> std::path::PathBuf {
+    cache_dir().join("profile.tsv")
+}
+
+fn profile_key(expr: &str, libs: &[&str]) -> String {
+    let mut ls: Vec<&str> = libs.to_vec();
+    ls.sort_unstable();
+    let seed = format!("{}\u{1}{}", expr, ls.join(","));
+    crate::sha3::hex(&crate::sha3::sha3_256(seed.as_bytes()))[..32].to_string()
+}
+
+fn profile_load() -> std::collections::HashMap<String, Profile> {
+    let mut m = std::collections::HashMap::new();
+    if let Ok(s) = std::fs::read_to_string(profile_path()) {
+        for line in s.lines() {
+            let mut it = line.split('\t');
+            if let (Some(k), Some(i), Some(n), Some(r)) = (it.next(), it.next(), it.next(), it.next()) {
+                m.insert(
+                    k.to_string(),
+                    Profile {
+                        interp_ns: i.parse().unwrap_or(0),
+                        native_ns: n.parse().unwrap_or(0),
+                        runs: r.parse().unwrap_or(0),
+                    },
+                );
+            }
+        }
+    }
+    m
+}
+
+/// Keep the on-disk profile store bounded: it is rewritten whole on change, so
+/// letting one line per distinct expression accumulate forever would slowly
+/// turn every recorded measurement into an O(n) disk write. Past the cap,
+/// single-run entries far below the compile threshold go first (they encode no
+/// decision); if that is not enough, the coldest half is dropped wholesale.
+fn prune_profiles(m: &mut std::collections::HashMap<String, Profile>) {
+    const CAP: usize = 4096;
+    if m.len() <= CAP {
+        return;
+    }
+    let thresh = profile_threshold_ns();
+    m.retain(|_, p| p.runs > 1 || p.interp_ns * 4 >= thresh);
+    if m.len() > CAP {
+        let mut runs: Vec<u64> = m.values().map(|p| p.runs).collect();
+        runs.sort_unstable();
+        let median = runs[runs.len() / 2];
+        m.retain(|_, p| p.runs >= median);
+    }
+}
+
+fn profile_store(m: &std::collections::HashMap<String, Profile>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let _ = std::fs::create_dir_all(cache_dir());
+    let mut s = String::new();
+    for (k, p) in m {
+        s.push_str(&format!("{}\t{}\t{}\t{}\n", k, p.interp_ns, p.native_ns, p.runs));
+    }
+    let p = profile_path();
+    let tmp = p.with_file_name(format!("profile-{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    if std::fs::write(&tmp, s).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The stored measurement for a program, if any.
+pub fn profile_lookup(expr: &str, libs: &[&str]) -> Option<Profile> {
+    profile_load().get(&profile_key(expr, libs)).copied()
+}
+
+/// Record an interpreter timing (exponential smoothing so one outlier run
+/// does not swing the decision; the store stays one small line per program).
+pub fn profile_record_interp(expr: &str, libs: &[&str], ns: u64) {
+    let key = profile_key(expr, libs);
+    let mut m = profile_load();
+    let before = m.get(&key).map(|e| e.interp_ns);
+    let e = m.entry(key).or_default();
+    e.interp_ns = if e.runs == 0 { ns } else { (e.interp_ns * 3 + ns) / 4 };
+    e.runs += 1;
+    // Write back only when the smoothed value MOVED (>=5% or first sighting):
+    // the store is rewritten whole, and an interactive session measures many
+    // runs whose smoothing changes nothing decision-relevant.
+    let moved = match before {
+        None => true,
+        Some(b) => {
+            let d = if e.interp_ns > b { e.interp_ns - b } else { b - e.interp_ns };
+            d * 20 >= b.max(1)
+        }
+    };
+    if moved {
+        prune_profiles(&mut m);
+        profile_store(&m);
+    }
+}
+
+/// Record a native timing for the same program.
+pub fn profile_record_native(expr: &str, libs: &[&str], ns: u64) {
+    let key = profile_key(expr, libs);
+    let mut m = profile_load();
+    let e = m.entry(key).or_default();
+    e.native_ns = if e.native_ns == 0 { ns } else { (e.native_ns * 3 + ns) / 4 };
+    profile_store(&m);
+}
+
+/// `latte profile "<expr>"` — run the program on BOTH engines, measure, persist,
+/// and report the decision the adaptive engine will now take for it.
+pub fn profile_report(expr: &str, libs: &[&str]) -> Result<String, String> {
+    // Warm the library scope first: the first run_with_libs in a process pays one-time
+    // library gathering/compilation, which would otherwise be billed to the expression.
+    let _ = crate::latte::run_with_libs("0", libs);
+    // Measure the per-call scope baseline (linking the standard scope around a trivial
+    // body). Subtracting it prices the EXPRESSION, not the scope — otherwise, in a large
+    // scope, even `(add 2 3)` would look worth compiling.
+    let tb = std::time::Instant::now();
+    let _ = crate::latte::run_with_libs("0", libs);
+    let base_ns = tb.elapsed().as_nanos() as u64;
+    // best-of-three: on a virtualized core a single run carries milliseconds of
+    // scheduler noise; the minimum is the standard low-noise estimator
+    let mut interp_total = u64::MAX;
+    let mut iv = crate::latte::run_with_libs(expr, libs)?;
+    for _ in 0..3 {
+        let t0 = std::time::Instant::now();
+        iv = crate::latte::run_with_libs(expr, libs)?;
+        interp_total = interp_total.min(t0.elapsed().as_nanos() as u64);
+    }
+    let interp_ns = interp_total.saturating_sub(base_ns).max(1);
+    profile_record_interp(expr, libs, interp_ns);
+    let (native_line, native_ns) = {
+        let t1 = std::time::Instant::now();
+        match run_native_noun(expr, libs) {
+            Some(nv) => {
+                let ns = t1.elapsed().as_nanos() as u64;
+                profile_record_native(expr, libs, ns);
+                if nv != iv {
+                    return Err("engines DISAGREE — please report this program (latte anvil shrink)".into());
+                }
+                // warm run: the binary is now cached, so time a second, build-free run
+                let t2 = std::time::Instant::now();
+                let _ = run_native_cached(expr, libs);
+                let warm_ns = t2.elapsed().as_nanos() as u64;
+                profile_record_native(expr, libs, warm_ns);
+                (format!(
+                    "  native      {:>10.3} ms cold (build+run)   {:>10.3} ms warm (cached)",
+                    ns as f64 / 1e6,
+                    warm_ns as f64 / 1e6
+                ), warm_ns)
+            }
+            None => ("  native      — (outside the native subset; interpreter is the engine)".into(), 0),
+        }
+    };
+    let threshold = profile_threshold_ns();
+    let decision = if native_ns == 0 {
+        "interpret (no native path)".to_string()
+    } else if interp_ns >= threshold {
+        format!(
+            "compile — measured interpreter time {:.3} ms ≥ {:.1} ms threshold ({:.1}x faster warm)",
+            interp_ns as f64 / 1e6,
+            threshold as f64 / 1e6,
+            interp_ns as f64 / native_ns.max(1) as f64
+        )
+    } else {
+        format!(
+            "interpret — measured {:.3} ms < {:.1} ms threshold (a build would not pay)",
+            interp_ns as f64 / 1e6,
+            threshold as f64 / 1e6
+        )
+    };
+    Ok(format!(
+        "profile: {}\n  interpreter {:>10.3} ms (expression; scope baseline {:.3} ms subtracted)\n{}\n  adaptive decision: {}\n  (persisted — the adaptive engine uses this measurement from now on)",
+        expr,
+        interp_ns as f64 / 1e6,
+        base_ns as f64 / 1e6,
+        native_line,
+        decision
+    ))
+}
+
 /// The current counters (zeroes if none recorded yet).
 pub fn metrics_snapshot() -> Metrics {
     parse_metrics(&std::fs::read_to_string(metrics_path()).unwrap_or_default())
@@ -1561,20 +1771,22 @@ fn touch(path: &std::path::Path) {
 }
 
 pub fn run_native_noun_opts(expr: &str, libs: &[&str], force_rebuild: bool) -> Option<crate::knot::N> {
-    let src = compile_to_rust(expr, libs).ok()?;
     // Content-addressed: a stable sha3 of the emitted source is the cache key. Identical code →
     // identical key → the existing binary is reused (no recompile); any change to the expression
     // or to a library arm it actually reaches changes the emitted source → new key → a rebuild.
-    let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+    // The key comes from the memo (native_key) so a WARM run does no codegen at all; the source
+    // itself is generated only when a build is actually needed.
+    let key = native_key(expr, libs)?;
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);
     let bin = dir.join(format!("e{}{}", &key[..32], BIN_EXT));
     if force_rebuild || !bin.exists() {
+        let src = compile_to_rust(expr, libs).ok()?;
         if !build_native(&src, &bin, force_rebuild) {
             return None;
         }
     } else {
-        record_hit(); // existing binary reused, no build
+        record_hit(); // existing binary reused, no build — and no codegen either
     }
     touch(&bin); // mark recently used for LRU eviction
     let o = std::process::Command::new(&bin).output().ok()?;
@@ -1802,9 +2014,195 @@ fn native_input_memo(
 /// build. The daemon-aware fast path uses this: a cache hit runs in-process immediately, while
 /// a miss defers compilation to the resident server (`anvild`) rather than stalling the caller.
 /// (Re-deriving the source is cheap — it's code generation, not compilation.)
-pub fn run_native_cached(expr: &str, libs: &[&str]) -> Option<crate::knot::N> {
+/// (expr, libs, lib_generation) -> the binary-cache key. Computing the key
+/// requires generating the program's full Rust source (the key is its hash) —
+/// tens of milliseconds of codegen for a large scope, paid on EVERY warm-cache
+/// run just to find the binary. The memo makes the warm path a lookup + spawn.
+/// Keyed by lib_generation, so a `def` or library edit invalidates it wholesale.
+/// Best-effort, fire-and-forget `latte cache warm "<expr>"` in a child process,
+/// deduplicated per expression for this process's lifetime. Used by the adaptive
+/// engine when no compile daemon is running: the caller's answer comes from the
+/// interpreter NOW; the native binary arrives for later runs.
+fn spawn_detached_warm(expr: &str) {
+    use std::sync::{Mutex, OnceLock};
+    type HashSet<T> = std::collections::HashSet<T>;
+    // NEVER from a test build: under `cargo test`, current_exe() is the TEST
+    // HARNESS — re-executing it with CLI words as "arguments" runs the suite
+    // again, whose tests reach this function again: a fork bomb. (Learned the
+    // hard way: a facet-test run took the host to load average ~540.)
+    if cfg!(test) {
+        return;
+    }
+    // Defense in depth: a spawned child must never spawn grandchildren, no
+    // matter what code path it takes — the marker travels in its environment.
+    if std::env::var_os("ORPHEUS_NO_SPAWN").is_some() {
+        return;
+    }
+    static INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let inflight = INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+    if !inflight.lock().unwrap().insert(expr.to_string()) {
+        return; // already warming
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe)
+            .args(["cache", "warm", expr])
+            .env("ORPHEUS_NO_SPAWN", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+/// Sweep leftovers of INTERRUPTED builds from the cache dir, once per process.
+/// A build killed mid-rustc (a reaped daemon child, Ctrl-C, a crashed host)
+/// leaves `build-*.rs` sources and `*.rcgu.o` object shards behind — never a
+/// correctness issue (binaries are written atomically by rename), but debris
+/// that accumulates. Anything of those shapes older than an hour is dead.
+fn sweep_stale_intermediates() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = cache_dir();
+        let hour = std::time::Duration::from_secs(3600);
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                let stale_shape = (name.starts_with("build-") && (name.ends_with(".rs") || name.contains(".rcgu.")))
+                    || name.ends_with(".rcgu.o");
+                if !stale_shape {
+                    continue;
+                }
+                let old = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|age| age > hour)
+                    .unwrap_or(false);
+                if old {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    });
+}
+
+fn native_key_memo() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String, u64), String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String, u64), String>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// A fingerprint of THIS BUILD of the system: the sha3 of the running
+/// executable, computed once per process (~a few ms for a ~3 MB binary).
+/// Every library source is embedded in the executable, so editing any shipped
+/// .lat and rebuilding necessarily changes the fingerprint — which is what
+/// makes the on-disk key memo safe: the same (expression, scope) under
+/// different library code can never hash to the same memo line.
+fn build_fingerprint() -> &'static str {
+    static F: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        // (path, byte length, mtime in ns) of the running executable — one stat,
+        // no content read. Every rebuild rewrites the binary and therefore its
+        // mtime (nanosecond resolution) and usually its length, so two different
+        // builds cannot share a fingerprint in practice; a byte-identical restore
+        // with a fresh mtime merely misses the memo and regenerates, never lies.
+        let id = std::env::current_exe().ok().and_then(|p| {
+            let md = std::fs::metadata(&p).ok()?;
+            let mtime = md
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            Some(format!("{}\u{1}{}\u{1}{}", p.display(), md.len(), mtime))
+        });
+        match id {
+            Some(seed) => crate::sha3::hex(&crate::sha3::sha3_256(seed.as_bytes()))[..16].to_string(),
+            None => "no-exe".into(), // cannot fingerprint: the caller will skip persistence
+        }
+    })
+}
+
+/// The persisted half of the key memo (cache_dir/nkeys.tsv): only entries whose
+/// scope is entirely BUILT-IN libraries at generation 0 are stored, so a line can
+/// never describe a runtime-registered module whose content the fingerprint
+/// cannot see. This is exactly the one-shot CLI case, where it matters most —
+/// without it, every warm `latte eval` paid one full codegen just to find its
+/// cached binary.
+fn disk_key_path() -> std::path::PathBuf {
+    cache_dir().join("nkeys.tsv")
+}
+
+fn disk_key_memo() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+    M.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        if let Ok(s) = std::fs::read_to_string(disk_key_path()) {
+            for line in s.lines() {
+                if let Some((h, k)) = line.split_once('\t') {
+                    m.insert(h.to_string(), k.to_string());
+                }
+            }
+        }
+        // a rebuilt executable orphans every line (the fingerprint changed):
+        // when the file has clearly outgrown usefulness, start it over
+        if m.len() > 65_536 {
+            m.clear();
+            let _ = std::fs::remove_file(disk_key_path());
+        }
+        std::sync::Mutex::new(m)
+    })
+}
+
+fn native_key(expr: &str, libs: &[&str]) -> Option<String> {
+    let gen = crate::latte::lib_generation();
+    let mk = (expr.to_string(), libs.join(","), gen);
+    if let Some(k) = native_key_memo().lock().unwrap().get(&mk) {
+        return Some(k.clone());
+    }
+    // Persist only generation-0 scopes: with no runtime-registered modules, every
+    // library in the set is embedded in the executable, and the executable IS the
+    // fingerprint — so a memo line can never describe code the fingerprint missed.
+    let persistable = gen == 0 && build_fingerprint() != "no-exe";
+    let disk_hash = if persistable {
+        let seed = format!("{}\u{1}{}\u{1}{}", expr, libs.join(","), build_fingerprint());
+        Some(crate::sha3::hex(&crate::sha3::sha3_256(seed.as_bytes()))[..32].to_string())
+    } else {
+        None
+    };
+    if let Some(h) = &disk_hash {
+        if let Some(k) = disk_key_memo().lock().unwrap().get(h) {
+            native_key_memo().lock().unwrap().insert(mk, k.clone());
+            return Some(k.clone());
+        }
+    }
     let src = compile_to_rust(expr, libs).ok()?;
     let key = crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()));
+    {
+        let mut memo = native_key_memo().lock().unwrap();
+        if memo.len() >= 4096 {
+            memo.clear();
+        }
+        memo.insert(mk, key.clone());
+    }
+    if let Some(h) = disk_hash {
+        let mut d = disk_key_memo().lock().unwrap();
+        if d.len() < 65536 && d.insert(h.clone(), key.clone()).is_none() {
+            let _ = std::fs::create_dir_all(cache_dir());
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(disk_key_path()) {
+                use std::io::Write;
+                let _ = writeln!(f, "{}\t{}", h, key);
+            }
+        }
+    }
+    Some(key)
+}
+
+pub fn run_native_cached(expr: &str, libs: &[&str]) -> Option<crate::knot::N> {
+    sweep_stale_intermediates();
+    let key = native_key(expr, libs)?;
     let bin = cache_dir().join(format!("e{}{}", &key[..32], BIN_EXT));
     if !bin.exists() {
         return None;
@@ -1826,21 +2224,62 @@ pub fn run_native_cached(expr: &str, libs: &[&str]) -> Option<crate::knot::N> {
 /// This centralizes the native-first policy that `latte eval`, the SCA engine, and the GUI console
 /// each used to hand-roll.
 pub fn run_adaptive(expr: &str, libs: &[&str]) -> Result<crate::knot::N, String> {
+    let t_nat = std::time::Instant::now();
     if let Some(n) = run_native_cached(expr, libs) {
+        let ns = t_nat.elapsed().as_nanos() as u64;
+        if ns >= 200_000 {
+            profile_record_native(expr, libs, ns); // keep the measured pair fresh
+        }
         return Ok(n);
     }
-    if worth_compiling(expr) {
+    // Decide whether to compile: a MEASUREMENT from the profile store beats the structural
+    // heuristic — a program the profiler has SEEN interpret slowly is compiled regardless of
+    // what its AST looks like, and one measured to be trivial is not compiled even if it
+    // contains a loop. With no measurement yet, fall back to the structural guess.
+    let should_compile = match profile_lookup(expr, libs) {
+        Some(p) if p.interp_ns > 0 => p.interp_ns >= profile_threshold_ns(),
+        _ => worth_compiling(expr),
+    };
+    if should_compile {
         // Prefer a resident compile daemon: it builds in the background (so this call never stalls
         // on rustc) and dedups, and it now builds with *this* call's library scope so the binary it
         // produces is exactly the one a later call will find cached. Only with no daemon running do
         // we compile synchronously here (still better than interpreting heavy code repeatedly).
         if crate::anvild::warm_bg(expr, libs) {
             // building in the background — answer this one call on the interpreter
-        } else if let Some(n) = run_native_noun(expr, libs) {
-            return Ok(n);
+        } else if cfg!(test) {
+            // Under `cargo test` there is no daemon and no self to re-exec (the
+            // test harness is not the CLI), so keep the old synchronous build:
+            // heavy differential tests depend on getting a native run here.
+            if let Some(n) = run_native_noun(expr, libs) {
+                return Ok(n);
+            }
+        } else {
+            // No daemon: spawn a DETACHED self-warm instead of building here.
+            // A synchronous rustc build used to stall this very call for seconds —
+            // a virgin-cache /learn render paid ~10 builds back to back (~36 s).
+            // Now the interpreter answers immediately and the binary lands for the
+            // next run. Deduplicated per expression within this process.
+            spawn_detached_warm(expr);
         }
     }
-    crate::latte::run_with_libs(expr, libs)
+    // Interpreter fallback — and the PROFILING moment: measure this run and remember it.
+    // If the measurement crosses the threshold, the program has just proven that it is worth
+    // compiling, so trigger a background build now; the *next* run finds the binary warm.
+    // This closes the loop: slow-when-interpreted code is detected automatically and compiled
+    // automatically, with no annotation and no structural guesswork.
+    let t0 = std::time::Instant::now();
+    let out = crate::latte::run_with_libs(expr, libs);
+    let took = t0.elapsed().as_nanos() as u64;
+    // only pay the (small) profile write for runs slow enough to ever matter —
+    // sub-0.2ms programs could never cross the compile threshold
+    if out.is_ok() && took >= 200_000 {
+        profile_record_interp(expr, libs, took);
+        if !should_compile && took >= profile_threshold_ns() {
+            let _ = crate::anvild::warm_bg(expr, libs); // best-effort; daemon may be absent
+        }
+    }
+    out
 }
 
 /// Heuristic: is this program substantial enough that compiling it is likely to pay for the build?
@@ -2185,6 +2624,49 @@ pub fn warm_native(expr: &str, libs: &[&str]) -> Result<bool, String> {
 }
 
 #[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_key_distinguishes_program_and_scope() {
+        let k1 = profile_key("(add 1 2)", &["std"]);
+        let k2 = profile_key("(add 1 3)", &["std"]);
+        let k3 = profile_key("(add 1 2)", &["std", "num"]);
+        assert_ne!(k1, k2, "different programs, different keys");
+        assert_ne!(k1, k3, "different scopes, different keys");
+        // scope order must not matter
+        assert_eq!(profile_key("x", &["a", "b"]), profile_key("x", &["b", "a"]));
+    }
+
+    #[test]
+    fn profile_record_and_lookup_roundtrip_with_smoothing() {
+        // never evaluated — the store is text-keyed; a unique key per run keeps the
+        // test idempotent across invocations (the store persists in the cache dir)
+        let expr = format!(
+            "(profile-test-roundtrip-{}-{:?})",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
+        );
+        let expr = expr.as_str();
+        let libs = ["std"];
+        profile_record_interp(expr, &libs, 8_000_000);
+        let p = profile_lookup(expr, &libs).expect("recorded");
+        assert_eq!(p.interp_ns, 8_000_000);
+        assert_eq!(p.runs, 1);
+        // smoothing: (3*8ms + 4ms) / 4 = 7ms
+        profile_record_interp(expr, &libs, 4_000_000);
+        let p = profile_lookup(expr, &libs).expect("still there");
+        assert_eq!(p.interp_ns, 7_000_000);
+        assert_eq!(p.runs, 2);
+        profile_record_native(expr, &libs, 1_000_000);
+        let p = profile_lookup(expr, &libs).expect("native recorded");
+        assert_eq!(p.native_ns, 1_000_000);
+        // a measured slow program decides "compile" regardless of AST shape
+        assert!(p.interp_ns >= profile_threshold_ns());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::compile_to_rust;
     use super::worth_compiling;
@@ -2311,16 +2793,20 @@ mod tests {
 
     #[test]
     fn native_compiles_full_bond_model() {
-        // The fully-featured bond model — a ~230-month feature build over eight fixed-income
-        // factors, plus a 4000-iteration logistic fit and out-of-sample evaluation — exceeds the
+        // The fully-featured bond model — a ~230-month feature build over TEN fixed-income
+        // factors (now including the Cochrane-Piazzesi tent and the Cieslak-Povala cycle),
+        // plus a 4000-iteration logistic fit and out-of-sample evaluation — exceeds the
         // interpreter's default fuel budget, but compiles and runs natively (the adaptive
         // opt-level optimizes a program this large). It must lower to native code and produce the
-        // known report [ train test baseline ] = 98.6% / 70.8% / 63.3% (signed fractions x1000).
+        // known report [ train test baseline ] = 98.6% / 69.6% / 63.3% (signed fractions x1000);
+        // on the smoothed teaching series the two literature factors cost ~1pt out-of-sample
+        // versus the eight-factor row while keeping a +6.3pt edge over baseline — the factor
+        // set is chosen for research fidelity, and the advisor reports whatever the live edge is.
         let libs = latte::all_libs();
         let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
         assert!(super::compile_to_rust("(report 0)", &refs).is_ok(), "the bond model should lower natively");
         if let Some(n) = super::run_native_noun("(report 0)", &refs) {
-            assert_eq!(super::noun_to_canon(&n), "[[0 986] [[0 708] [[0 633] 0]]]");
+            assert_eq!(super::noun_to_canon(&n), "[[0 986] [[0 696] [[0 633] 0]]]");
         }
     }
 

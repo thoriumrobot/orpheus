@@ -939,7 +939,7 @@ impl Net {
                 // each branch closure gets one copy of the (packed) argument; in a
                 // zero-parameter context the closures are closed, so a dummy 0 is
                 // supplied and simply erased when the branch's def has no parameters.
-                let mut dummy = |net: &mut Net| {
+                let dummy = |net: &mut Net| {
                     let z = net.add(Sym::Zero);
                     (z, 0)
                 };
@@ -1002,7 +1002,7 @@ impl Net {
         const PRIVATE: usize = 6; // max fresh agents any parallel rule allocates
         const BATCH: usize = 8192;
         let mut claims: Vec<AtomicBool> = Vec::new();
-        let mut scanned_clean = false;
+
         loop {
             if self.steps - start > 8_000_000 {
                 break;
@@ -1010,7 +1010,7 @@ impl Net {
             // ---- gather candidates: worklist first, full scan only to certify ----
             let mut pairs: Vec<(usize, usize)> = Vec::new();
             let mut seq: Vec<(usize, usize)> = Vec::new();
-            let mut push_candidate = |net: &Net, a: usize, pairs: &mut Vec<(usize, usize)>, seq: &mut Vec<(usize, usize)>| {
+            let push_candidate = |net: &Net, a: usize, pairs: &mut Vec<(usize, usize)>, seq: &mut Vec<(usize, usize)>| {
                 if !net.alive[a] {
                     return;
                 }
@@ -1035,11 +1035,9 @@ impl Net {
                 }
             }
             if pairs.is_empty() && seq.is_empty() {
-                if scanned_clean {
-                    break;
-                }
-                // certify (or refill) with one linear scan
-                scanned_clean = true;
+                // the work queue ran dry: certify (or refill) with one linear scan;
+                // an empty scan proves the net is fully reduced. (A scan runs at
+                // most once per drained queue — progress in between refills it.)
                 for a in 0..self.sym.len() {
                     push_candidate(self, a, &mut pairs, &mut seq);
                 }
@@ -1047,7 +1045,6 @@ impl Net {
                     break;
                 }
             }
-            scanned_clean = false; // progress will be made: re-certify before stopping
             pairs.sort_unstable();
             pairs.dedup();
             // ---- sequential bucket: Refs and the Peano chains ----
@@ -2126,6 +2123,23 @@ fn glower(a: &crate::latte::Ast, env: &mut GEnv, scope: &mut GScope) -> Result<R
             ))
         }
         Ast::Inc(e) => Ok(R::Add(Box::new(glower(e, env, scope)?), Box::new(R::Num(1)))),
+        // γ-pair data on the net: brackets build Pair chains (autocons to the
+        // right, as in the language), and head/tail lower to the Fst/Snd
+        // projection agents the reducer already implements — so
+        // `latte net "head [7 9]"` runs entirely as interactions.
+        Ast::Tuple(xs) => {
+            if xs.is_empty() {
+                return Err("net: empty brackets have no value".into());
+            }
+            let mut it = xs.iter().rev();
+            let mut acc = glower(it.next().unwrap(), env, scope)?;
+            for x in it {
+                acc = R::Pair(Box::new(glower(x, env, scope)?), Box::new(acc));
+            }
+            Ok(acc)
+        }
+        Ast::Head(e) => Ok(R::Fst(Box::new(glower(e, env, scope)?))),
+        Ast::Tail(e) => Ok(R::Snd(Box::new(glower(e, env, scope)?))),
         Ast::Fast(_, b) => glower(b, env, scope),
         Ast::Eq(x, y) => Ok(R::Eq(Box::new(glower(x, env, scope)?), Box::new(glower(y, env, scope)?))),
         Ast::If(c, t, e) => {
@@ -2191,7 +2205,7 @@ fn glower(a: &crate::latte::Ast, env: &mut GEnv, scope: &mut GScope) -> Result<R
             Ok(R::Call(idx, Box::new(pack(inits))))
         }
         Ast::Call(name, args) => {
-            let mut bin = |env: &mut GEnv, scope: &mut GScope, f: fn(Box<R>, Box<R>) -> R| -> Result<R, String> {
+            let bin = |env: &mut GEnv, scope: &mut GScope, f: fn(Box<R>, Box<R>) -> R| -> Result<R, String> {
                 if args.len() != 2 {
                     return Err(format!("net: '{}' expects 2 arguments", name));
                 }

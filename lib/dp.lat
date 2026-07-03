@@ -84,7 +84,7 @@ core dp
       (foldl (fn [dp c] ->                   :: fold each coin into the table
                 loop with [a = c, d = dp] :  :: update reachable amounts a = c .. amount
                   if (gt a amount) then d
-                  else again((add a 1), (dp_setat d a (add (nth d a) (nth d (sub a c)))))
+                  else again((add a 1), (dp_setat d a (add (nth d a) (nth d (sub a c)))))  :: ways[a] += ways[a-c]: every way to make a-c extends by one coin c
                 end)
              (dp_initways amount)
              coins)

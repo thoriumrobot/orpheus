@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -96,27 +95,50 @@ pub trait Handler: Send + Sync {
 
 // ----- accept loop ----------------------------------------------------------
 
-/// Bind `listen` and serve forever, dispatching every request to `handler`. Concurrency is bounded
-/// by [`Handler::max_connections`]: excess connections receive `503` and are closed, so the server
-/// degrades gracefully under load rather than spawning threads without limit. Returns only on bind
-/// failure.
+/// Bind `listen` and serve forever on a FIXED WORKER POOL with a bounded backlog.
+///
+/// Previously every connection spawned a fresh thread up to [`Handler::max_connections`],
+/// with a hard `503` cliff beyond it. The pool changes both costs: threads are created
+/// once and reused (no per-connection spawn), and a short burst above capacity now WAITS
+/// in a bounded queue instead of being turned away — the queue is the load balancer,
+/// handing each connection to the next free worker. Only when the backlog itself is full
+/// (sustained overload, not a burst) does a connection get the polite `503`. Worker count
+/// is `min(max_connections, 4×CPUs + 4)` — enough to cover keep-alive connections that
+/// hold a worker between requests (the read timeout bounds how long an idle one can) —
+/// and the backlog holds `2×workers` more. Returns only on bind failure.
 pub fn serve<H: Handler + 'static>(listen: &str, handler: Arc<H>) -> std::io::Result<()> {
     let listener = TcpListener::bind(listen)?;
-    let active = Arc::new(AtomicUsize::new(0));
-    let max = handler.max_connections().max(1);
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let workers = (4 * cpus + 4).min(handler.max_connections().max(1));
+    let (tx, rx) = std::sync::mpsc::sync_channel::<TcpStream>(2 * workers);
+    let rx = Arc::new(std::sync::Mutex::new(rx));
+    for _ in 0..workers {
+        let h = handler.clone();
+        let rx = rx.clone();
+        std::thread::spawn(move || loop {
+            // hold the lock only to receive; handle the connection outside it
+            let stream = match rx.lock() {
+                Ok(guard) => guard.recv(),
+                Err(_) => return,
+            };
+            match stream {
+                Ok(s) => {
+                    let _ = handle_conn(s, h.clone());
+                }
+                Err(_) => return, // acceptor gone — shut the worker down
+            }
+        });
+    }
     for conn in listener.incoming() {
         if let Ok(stream) = conn {
-            if active.load(Ordering::Acquire) >= max {
-                reject_overloaded(stream);
-                continue;
+            match tx.try_send(stream) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(s)) => reject_overloaded(s),
+                Err(std::sync::mpsc::TrySendError::Disconnected(s)) => {
+                    reject_overloaded(s);
+                    break;
+                }
             }
-            active.fetch_add(1, Ordering::AcqRel);
-            let h = handler.clone();
-            let a = active.clone();
-            std::thread::spawn(move || {
-                let _ = handle_conn(stream, h);
-                a.fetch_sub(1, Ordering::AcqRel);
-            });
         }
     }
     Ok(())
@@ -275,7 +297,7 @@ fn write_response(w: &mut TcpStream, req: &Request, resp: &Response) -> std::io:
     head.push_str(if req.keep_alive { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" });
     head.push_str("\r\n");
     w.write_all(head.as_bytes())?;
-    let send_body = req.method != "HEAD" && !resp.is_body_suppressed;
+    let send_body = !req.is_head() && !resp.is_body_suppressed;
     if send_body {
         w.write_all(&resp.body)?;
     }

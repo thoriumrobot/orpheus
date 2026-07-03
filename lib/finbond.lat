@@ -127,7 +127,7 @@ core finbond
 
   :: ---- feature engineering ------------------------------------------------
   :: at month t the feature row is
-  ::   [ LEVEL SLOPE CURVATURE YIELD-MOM M2-GROWTH CARRY-ROLL FWD-MOM M2-ACCEL ]
+  ::   [ LEVEL SLOPE CURVATURE YIELD-MOM M2-GROWTH CARRY-ROLL FWD-MOM M2-ACCEL CP-TENT CYCLE ]
   :: LEVEL     = 10y yield
   :: SLOPE     = 10y − 2y               (carry/term-premium proxy)
   :: CURVATURE = 2·5y − 2y − 10y        (butterfly)
@@ -147,7 +147,40 @@ core finbond
   :: M2-ACCEL   = Δ₃ of money-supply growth — the monetary regime's acceleration, an
   ::              "inflation/money" macro factor (cf. Ludvigson–Ng 2009) distinct from
   ::              its level.
-  frow = fn [v2 v5 v10 vm t] ->
+  :: The last two are the settled return-forecasting factors of the literature:
+  :: CP-TENT    = the Cochrane–Piazzesi (2005) return-forecasting factor, in its
+  ::              three-point tent shape over this curve's implied forwards: with
+  ::              f25 = (5·y5 − 2·y2)/3 (the 2y→5y forward) and f510 = (10·y10 − 5·y5)/5
+  ::              (the 5y→10y forward), the tent is 2·f25 − y2 − f510 — middle forwards
+  ::              weighted up, the ends down. CP show one such combination forecasts
+  ::              excess returns across maturities (R² up to ~0.4 in annual data) and is
+  ::              NOT spanned by level/slope/curvature.
+  :: CYCLE      = the Cieslak–Povala (2015) risk-premium cycle: the 10y yield minus a
+  ::              slow discounted mean of itself (the trend-inflation proxy τ; here an
+  ::              exponential average with decay 0.94/month). Yields are near-unit-
+  ::              root because trend inflation is; the CYCLE is the stationary deviation,
+  ::              and it is that deviation — not the yield level — that forecasts returns.
+  :: the 2y→5y and 5y→10y implied forward rates from the constant-maturity curve
+  fwd25  = fn [v2 v5 t] -> (ndiv (nsub (nmul (nint 5) (nth v5 t)) (nmul (nint 2) (nth v2 t))) (nint 3))
+  fwd510 = fn [v5 v10 t] -> (ndiv (nsub (nmul (nint 10) (nth v10 t)) (nmul (nint 5) (nth v5 t))) (nint 5))
+  :: the three-point CP tent over [y2 f25 f510]: −1·short + 2·middle − 1·long
+  cptent = fn [v2 v5 v10 t] ->
+    (nsub (nsub (nmul (nint 2) (fwd25 v2 v5 t)) (nth v2 t)) (fwd510 v5 v10 t))
+  :: the slow trend of a yield series (τ, the trend-inflation proxy of
+  :: Cieslak–Povala): a discounted (exponential) moving average with decay
+  :: 0.94/month — computed ONCE for the whole series in O(n), incrementally:
+  :: τ_t = 0.94·τ_{t−1} + 0.06·y_t, seeded at τ_0 = y_0. (A per-row windowed
+  :: recomputation would be O(n·win) and needlessly blow the fuel budget.)
+  trend = fn [vy] ->
+    loop with [c = vy, prev = (head vy), acc = 0] :
+      if (c == 0) then (reverse acc)
+      else
+        let e = (ndiv (nadd (nmul prev (nint 94)) (nmul (head c) (nint 6))) (nint 100)) in
+        again((tail c), e, [ e acc ])
+    end
+  :: the Cieslak–Povala cycle: today's yield minus its slow trend (vtr = trend v10)
+  cycle = fn [vtr vy t] -> (nsub (nth vy t) (nth vtr t))
+  frow = fn [v2 v5 v10 vm vtr t] ->
     let lvl = (nth v10 t) in
     let slp = (nsub (nth v10 t) (nth v2 t)) in
     let cur = (nsub (nsub (nmul (nint 2) (nth v5 t)) (nth v2 t)) (nth v10 t)) in
@@ -160,7 +193,9 @@ core finbond
     let fpre  = (nsub (nmul (nint 2) (nth v10 (sub t 3))) (nth v5 (sub t 3))) in
     let fmom  = (nnegate (nsub fnow fpre)) in
     let macc  = (nsub (nth vm t) (nth vm (sub t 3))) in
-    [ lvl [ slp [ cur [ mom [ mny [ cr [ fmom [ macc 0 ] ] ] ] ] ] ] ]
+    let cp    = (cptent v2 v5 v10 t) in
+    let cyc   = (cycle vtr v10 t) in
+    [ lvl [ slp [ cur [ mom [ mny [ cr [ fmom [ macc [ cp [ cyc 0 ] ] ] ] ] ] ] ] ] ]
 
   :: build the supervised dataset over months t = 3 … n-2.
   ::   xs = feature rows, ys = 1 if NEXT month's bond return > 0 else 0,
@@ -168,11 +203,12 @@ core finbond
   :: returns [ xs [ ys [ r1 0 ] ] ].
   build = fn [_] ->
     let v2 = (y2 0) in let v5 = (y5 0) in let v10 = (y10 0) in let vm = (m2 0) in
+    let vtr = (trend v10) in
     let n = (len v10) in
     loop with [t = 3, fx = 0, fy = 0, fr = 0] :
       if (gte (add t 2) n) then [ (reverse fx) [ (reverse fy) [ (reverse fr) 0 ] ] ]
       else
-        let x  = (frow v2 v5 v10 vm t) in
+        let x  = (frow v2 v5 v10 vm vtr t) in
         let rn = (bondret v10 (add t 1)) in
         let y  = if (nlt [0 0] rn) then 1 else 0 in
         again(+(t), [ x fx ], [ y fy ], [ rn fr ])
@@ -192,22 +228,34 @@ core finbond
     let xs = (map (fn [r] -> (zrow stats r)) xraw) in
     (fit_eval xs ys r1 split iters)
 
-  :: ---- ablation: the SAME model WITHOUT the money-supply feature ----------
-  :: identical pipeline but the feature row drops M2-growth, so the only
-  :: difference in out-of-sample accuracy is attributable to the stimulus signal.
-  frow_nom = fn [v2 v5 v10 t] ->
+  :: ---- ablation: the SAME model WITHOUT the money-supply block ----------
+  :: identical pipeline but the feature row drops the two money features
+  :: (M2-growth and M2-acceleration) while KEEPING the full modern factor set
+  :: (level/slope/curvature, momentum, carry+roll, forward momentum, CP tent,
+  :: CP cycle) — so the out-of-sample difference is attributable to the
+  :: stimulus signal alone, not to a thinner model.
+  frow_nom = fn [v2 v5 v10 vtr t] ->
     let lvl = (nth v10 t) in
     let slp = (nsub (nth v10 t) (nth v2 t)) in
     let cur = (nsub (nsub (nmul (nint 2) (nth v5 t)) (nth v2 t)) (nth v10 t)) in
     let mom = (nnegate (nsub (nth v10 t) (nth v10 (sub t 3)))) in
-    [ lvl [ slp [ cur [ mom 0 ] ] ] ]
+    let carry = (ndiv (nth v10 t) (nint 12)) in
+    let roll  = (nmul (dur 0) (ndiv (nsub (nth v10 t) (nth v5 t)) (nint 60))) in
+    let cr    = (nadd carry roll) in
+    let fnow  = (nsub (nmul (nint 2) (nth v10 t))         (nth v5 t)) in
+    let fpre  = (nsub (nmul (nint 2) (nth v10 (sub t 3))) (nth v5 (sub t 3))) in
+    let fmom  = (nnegate (nsub fnow fpre)) in
+    let cp    = (cptent v2 v5 v10 t) in
+    let cyc   = (cycle vtr v10 t) in
+    [ lvl [ slp [ cur [ mom [ cr [ fmom [ cp [ cyc 0 ] ] ] ] ] ] ] ]
   build_nom = fn [_] ->
     let v2 = (y2 0) in let v5 = (y5 0) in let v10 = (y10 0) in
+    let vtr = (trend v10) in
     let n = (len v10) in
     loop with [t = 3, fx = 0, fy = 0, fr = 0] :
       if (gte (add t 2) n) then [ (reverse fx) [ (reverse fy) [ (reverse fr) 0 ] ] ]
       else
-        let x  = (frow_nom v2 v5 v10 t) in
+        let x  = (frow_nom v2 v5 v10 vtr t) in
         let rn = (bondret v10 (add t 1)) in
         let y  = if (nlt [0 0] rn) then 1 else 0 in
         again(+(t), [ x fx ], [ y fy ], [ rn fr ])
@@ -232,6 +280,14 @@ core finbond
   report = fn [_] ->
     let r = (demo 0) in
     [ (head r) [ (head (tail r)) [ (head (tail (tail r))) 0 ] ] ]
+
+  :: annualized volatility (%) of the model's monthly bond total returns —
+  :: sample std of the r1 series × √12 (3.4641 in fixed-point). The advisor
+  :: uses it for volatility-aware Kelly sizing, the same discipline the
+  :: crypto advisor gets from its HAR-RV model.
+  bvol = fn [_] ->
+    let r1 = (head (tail (tail (build 0)))) in
+    (ndiv (nmul (st_stds r1) (nint 34641)) (nint 10000))
 
   :: ---- ADVISORY: edge + the model's CURRENT directional call -----------------
   :: Train once (train-only standardization), then ALSO predict the most recent month's
@@ -308,8 +364,9 @@ core finbond
   bm_rec = fn [label feats i] ->
     [ [1 label] [ [2 (bm_enc (nth feats 0))] [ [3 (bm_enc (nth feats 1))] [ [4 (bm_enc (nth feats 2))]
       [ [5 (bm_enc (nth feats 3))] [ [6 (bm_enc (nth feats 4))] [ [7 (bm_enc (nth feats 5))]
-      [ [8 (bm_enc (nth feats 6))] [ [9 (bm_enc (nth feats 7))] [ [10 i] 0 ] ] ] ] ] ] ] ] ] ]
-  bm_fields = fn [_] -> [ 2 [ 3 [ 4 [ 5 [ 6 [ 7 [ 8 [ 9 0 ] ] ] ] ] ] ] ]
+      [ [8 (bm_enc (nth feats 6))] [ [9 (bm_enc (nth feats 7))] [ [10 (bm_enc (nth feats 8))]
+      [ [11 (bm_enc (nth feats 9))] [ [12 i] 0 ] ] ] ] ] ] ] ] ] ] ] ]
+  bm_fields = fn [_] -> [ 2 [ 3 [ 4 [ 5 [ 6 [ 7 [ 8 [ 9 [ 10 [ 11 0 ] ] ] ] ] ] ] ] ] ]
   bm_load = fn [_] ->
     let ds = (build 0), xs = (head ds), ys = (head (tail ds)) in
     loop with [i = 0, xss = xs, yss = ys, d = (db_open 1 0 4096)] :
@@ -317,7 +374,7 @@ core finbond
       else again(+(i), (tail xss), (tail yss),
                  (db_put d (bm_key i) (bm_rec (head yss) (head xss) i)))
     end
-  bm_recs = fn [d] -> (db_order 10 (db_scan d %r %s))
+  bm_recs = fn [d] -> (db_order 12 (db_scan d %r %s))
   :: train on the first `split` months, standardizing with statistics the DATABASE computes
   bm_run = fn [iters split] ->
     let d = (bm_load 0), flds = (bm_fields 0) in

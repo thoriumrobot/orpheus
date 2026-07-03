@@ -841,7 +841,9 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             // a friendly default order: language references first
             names.sort_by_key(|n| match n.as_str() {
                 "latte-language" => 0,
-                "facet-language" => 1,
+                "latte-tutorial" => 1,
+                "using-latte-from-the-gui" => 1,
+                "facet-language" => 2,
                 "scars-sound-changes" => 2,
                 "interaction-nets" => 3,
                 "adding-libraries" => 4,
@@ -1078,6 +1080,38 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             }
             if !news_buf.trim().is_empty() {
                 news_text = Some(news_buf);
+            }
+            // The bond market has no daily tape — route its aliases to the bond desk:
+            // the finbond model's HTML dashboard (fb_dash, trained through the db->tensor
+            // bridge) plus the bond-scored news lean, the same fusion the CLI advisor
+            // (`latte trade --market bonds`) sizes positions from.
+            if matches!(market.as_str(),
+                "bond" | "bonds" | "treasury" | "treasuries" | "ust" | "10y" | "tnote" | "tlt" | "rates" | "duration")
+            {
+                let libs: Vec<String> = crate::latte::all_libs();
+                let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+                // native first (the 4000-iteration training compiles), else the
+                // interpreter with a raised fuel budget — the same policy the CLI
+                // bond advisor uses (numerics::eval_native_or_interp)
+                let dash = crate::numerics::eval_native_or_interp("(fb_dash0 0)", &refs)
+                    .ok()
+                    .and_then(|n| extract_html(&n))
+                    .unwrap_or_else(|| "<p>bond model unavailable</p>".into());
+                let lean = news_text
+                    .as_deref()
+                    .map(|t| crate::sentiment::score_document_bond(t).0)
+                    .or_else(|| crate::numerics::docs_stream_bond().map(|(_, agg)| agg));
+                let news_html = match (sentiment, lean) {
+                    (Some(s), _) => format!("<p><b>News lean (overridden):</b> {:+.2}</p>", s),
+                    (None, Some(l)) => format!(
+                        "<p><b>News lean, scored for bonds</b> (hawk/dove axis; risk-off = Treasury bid): {:+.2}</p>", l),
+                    (None, None) => "<p>No news scored — drop reports in <code>news/</code> or paste headlines.</p>".into(),
+                };
+                let page = format!(
+                    "{}{}<p style='color:#8a8676'>For sized advice (fractional Kelly, volatility-targeted): <code>latte trade --market bonds</code></p>",
+                    dash, news_html
+                );
+                return simple(200, "text/html; charset=utf-8", page.into_bytes());
             }
             let html = match crate::numerics::trade_advice_market(&market, account, kelly, sentiment, live, news_text.as_deref()) {
                 Ok(a) => {
@@ -1317,9 +1351,11 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let lex = crate::sentiment::polarity(&text);
             let model = crate::sentiment::model_polarity(&text);
             let (doc, sents) = crate::sentiment::score_document(&text);
+            let (dove, hawk) = crate::sentiment::rate_counts(&text);
+            let bond = crate::sentiment::score_document_bond(&text).0;
             let mut json = format!(
-                "{{\"positive\":{},\"negative\":{},\"lexicon\":{:.3},\"model\":{:.3},\"polarity\":{:.3},\"sentences\":[",
-                pos, neg, lex, model, doc
+                "{{\"positive\":{},\"negative\":{},\"lexicon\":{:.3},\"model\":{:.3},\"polarity\":{:.3},\"dovish\":{},\"hawkish\":{},\"bond_polarity\":{:.3},\"sentences\":[",
+                pos, neg, lex, model, doc, dove, hawk, bond
             );
             for (i, (t, p)) in sents.iter().enumerate() {
                 if i > 0 { json.push(','); }
@@ -1419,7 +1455,7 @@ fn chess_json(ch: &Chess) -> String {
 /// `eval <expr>`, `type <expr>`, or `sca <words>`.
 fn run_tool(cmd: &str) -> String {
     if cmd.is_empty() {
-        return "commands:\n  eval <expr>   run a Latte expression (std · mold · num · tensor · plan · ml · tool)\n  type <expr>   infer an expression's type\n  sca  <words>  evolve Solar words into Heart Speech (SCArs)\n  icomb         reduce interaction combinators (Lafont γ/δ/ε)\n  net <expr>    run an expression on the interaction net (lazy if, net recursion)\n  libs          list the libraries (modules) loaded in the running system\n  Module.cmd a  run arm `cmd` of a loaded Latte module on the argument(s) `a`"
+        return "commands:\n  eval <expr>   run a Latte expression (std · mold · num · tensor · plan · ml · tool)\n  def NAME [args] = BODY   define a function for this session — then call it anywhere\n  undef NAME    remove a session-defined function (def alone lists them)\n  type <expr>   infer an expression's type\n  sca  <words>  evolve Solar words into Heart Speech (SCArs)\n  icomb         reduce interaction combinators (Lafont γ/δ/ε)\n  net <expr>    run an expression on the interaction net (lazy if, net recursion)\n  libs          list the libraries (modules) loaded in the running system\n  Module.cmd a  run arm `cmd` of a loaded Latte module on the argument(s) `a`"
             .into();
     }
     let (head, rest) = match cmd.split_once(char::is_whitespace) {
@@ -1428,10 +1464,22 @@ fn run_tool(cmd: &str) -> String {
     };
     match head {
         "eval" => eval_expr(rest),
+        // one-line function definition, usable from any text (see latte::define_user_arm):
+        //   def sq [x] = (mul x x)        then        eval (sq 7)
+        "def" => match crate::latte::define_user_arm(rest) {
+            Ok(m) | Err(m) => m,
+        },
+        "undef" => match crate::latte::undefine_user_arm(rest) {
+            Ok(m) | Err(m) => m,
+        },
         "type" => match latte::parse(rest) {
             Ok(ast) => match check::check(&ast) {
                 Ok(ty) => format!("{} : {}", rest, ty.show()),
-                Err(e) => format!("type error: {}", e),
+                // checker messages already carry their own "type error:" prefix
+                Err(e) => {
+                    let e = e.to_string();
+                    if e.starts_with("type error") { e } else { format!("type error: {}", e) }
+                }
             },
             Err(e) => format!("parse error: {}", e),
         },
@@ -1578,7 +1626,7 @@ fn forge_command(body: &str) -> String {
     let mut w = line.split_whitespace();
     let verb = w.next().unwrap_or("");
     let args: Vec<&str> = w.collect();
-    use crate::knot::{cell, cord, num, Knot};
+    use crate::knot::{cell, cord, num};
     let peek = |st: &ForgeState, tag: &str, arg: &str| -> Result<crate::knot::N, String> {
         let state = st.node.state().map_err(|e| format!("{:?}", e))?;
         let q_arg = if arg.is_empty() { num(0) } else { cord(arg) };
@@ -2118,7 +2166,6 @@ fn respond_for(req: &Request, res: Option<Resource>) -> Response {
 // ----- small helpers --------------------------------------------------------
 /// Decode a ui.lat panel noun to JSON for the GUI renderer.
 fn panel_json(n: &crate::knot::N) -> Option<String> {
-    use crate::knot::Knot;
     fn cord(n: &crate::knot::N) -> Option<String> {
         n.as_atom().and_then(|a| a.as_cord())
     }
@@ -2185,7 +2232,6 @@ fn panel_json(n: &crate::knot::N) -> Option<String> {
 /// Join a 0-terminated list of cords into a string, skipping the "_" marker
 /// (lib/lexis.lat uses %_ for an empty syllable coda).
 fn cord_list_to_string(n: &crate::knot::N) -> String {
-    use crate::knot::Knot;
     let mut out = String::new();
     let mut cur = n.clone();
     while let Knot::Cell(h, t) = &*cur.clone() {

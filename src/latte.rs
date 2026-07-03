@@ -818,6 +818,8 @@ pub const FINDB_LAT: &str = include_str!("../lib/findb.lat");
 pub const FINBOND_LAT: &str = include_str!("../lib/finbond.lat");
 /// Global money supply (M2 year-over-year growth) across the major central banks, stored in and ranked/aggregated/filtered by lib/db.lat, with a text-frame dashboard, via `import finmoney`.
 pub const FINMONEY_LAT: &str = include_str!("../lib/finmoney.lat");
+/// Algorithm visualization: instrumented sorting/search/BFS whose step traces render as gfx scenes — the /learn page puts a slider on the frames, via `import algoviz`.
+pub const ALGOVIZ_LAT: &str = include_str!("../lib/algoviz.lat");
 pub const LAB_LAT: &str = include_str!("../lib/lab.lat");
 /// SCArs grapheme tokeniser (longest-match over a phoneme inventory, codepoint-stepped), via `import scatok`.
 pub const SCATOK_LAT: &str = include_str!("../lib/scatok.lat");
@@ -906,6 +908,7 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "symbols" => Some(SYMBOLS_LAT),
         "findb" => Some(FINDB_LAT),
         "finbond" => Some(FINBOND_LAT),
+        "algoviz" => Some(ALGOVIZ_LAT),
         "finmoney" => Some(FINMONEY_LAT),
         "lab" => Some(LAB_LAT),
         "scatok" => Some(SCATOK_LAT),
@@ -1042,7 +1045,10 @@ pub fn runtime_lib_names() -> Vec<String> {
 /// scope without manual `import`s (later libraries shadow earlier ones on name clashes).
 pub fn all_libs() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
+        // Link order resolves name collisions later-wins. algoviz IMPORTS gfx, so it must
+        // sit before the fin* libraries: appended at the end it would re-merge gfx's arms
+        // last, and gfx's `demo` would shadow finbond's `demo` (breaking `report`).
+        "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "algoviz", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
         "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "finbond", "finmoney", "lab", "scatok", "scaparse", "scapros", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
@@ -1057,7 +1063,7 @@ pub fn all_libs() -> Vec<String> {
 /// built-ins, then the user's PACKAGE directory (pkg/<name>.lat). `lib/` holds
 /// the system's libraries; `pkg/` holds yours — a package is nothing but a
 /// Latte source whose `core NAME` names it, compiled into the running system.
-fn resolve_lib(name: &str) -> Option<String> {
+pub fn resolve_lib(name: &str) -> Option<String> {
     if let Some(s) = runtime_libs().lock().unwrap().get(name) {
         return Some(s.clone());
     }
@@ -1082,26 +1088,6 @@ pub fn format_source(src: &str) -> String {
     crate::fmt::format_checked(src)
 }
 
-fn leading(l: &str) -> usize {
-    l.len() - l.trim_start().len()
-}
-fn is_arm_head(t: &str) -> bool {
-    // NAME = …  (a top-level arm), but not `==` comparisons or comment lines
-    if t.starts_with("::") {
-        return false;
-    }
-    let mut it = t.splitn(2, '=');
-    match (it.next(), it.next()) {
-        (Some(h), Some(r)) => {
-            !r.starts_with('=')
-                && !h.trim_end().ends_with(['=', '<', '>', '!'])
-                && !h.trim().is_empty()
-                && h.trim().split_whitespace().count() == 1
-                && h.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        }
-        _ => false,
-    }
-}
 
 
 // ---- the package directory: user modules, persisted -------------------------
@@ -1159,7 +1145,7 @@ pub fn store_package(src: &str) -> Result<std::path::PathBuf, String> {
 pub fn builtin_lib_names() -> Vec<String> {
     let mut v: Vec<String> = [
         "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "plot", "vec", "chess", "chessml",
-        "xiangqi", "xiangqiml", "tool",
+        "xiangqi", "xiangqiml", "tool", "algoviz",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
         "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "finbond", "finmoney", "lab", "scatok", "scaparse", "scapros", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
     ]
@@ -1192,6 +1178,16 @@ fn gather(src: &str) -> Result<Vec<Arm>, String> {
 /// Compile a flat list of arms (possibly gathered from several linked modules)
 /// into one core value `[battery 0]` with a single shared namespace.
 fn compile_arms(arms: &[Arm]) -> Result<(N, Vec<(String, u128)>), String> {
+    let (core, axes, _funcs) = compile_arms_full(arms)?;
+    Ok((core, axes))
+}
+
+/// Like `compile_arms`, but also returns the name -> (axis, arity) table, so a
+/// caller can later compile a SINGLE additional arm against the same core
+/// layout (the basis of the scope-core cache below).
+fn compile_arms_full(
+    arms: &[Arm],
+) -> Result<(N, Vec<(String, u128)>, std::sync::Arc<Vec<(String, u128, usize)>>), String> {
     let n = arms.len();
     if n == 0 {
         return Err("module has no arms".into());
@@ -1228,7 +1224,7 @@ fn compile_arms(arms: &[Arm]) -> Result<(N, Vec<(String, u128)>), String> {
     let battery = build_battery(&arm_formulas);
     let core = cell(battery, num(0));
     let axes = funcs.iter().map(|(nm, a, _)| (nm.clone(), *a)).collect();
-    Ok((core, axes))
+    Ok((core, axes, funcs))
 }
 
 /// Merge arms from several sources into one namespace. Later definitions of a name
@@ -1294,7 +1290,6 @@ pub fn module_core_name(src: &str) -> Option<String> {
     find_core_name(src)
 }
 
-/// Evaluate a bare expression with the given built-in libraries linked in scope.
 // ---- THE DEBUGGER -----------------------------------------------------------
 thread_local! {
     static DEBUG_COMPILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1371,23 +1366,87 @@ pub fn debug_trace(
     Ok((result, roots, truncated))
 }
 
-pub fn run_with_libs(expr_src: &str, libs: &[&str]) -> Result<N, String> {
-    crate::jets::register_std_jets();
-    let ast = parse(expr_src)?;
+// ---------------------------------------------------------------------------
+// THE SCOPE-CORE CACHE: link the library scope once, evaluate many times.
+//
+// Profiling showed every evaluation paying ~33 ms to re-merge and re-compile
+// the full ~60-library scope before a single Loom step ran — the dominant cost
+// of `eval` in the GUI console, of every Live widget on a Facet page, and of
+// the adaptive engine's interpreter path. The remedy is the standard one for
+// Nock-family systems (compile once, reuse — cf. Vere's bytecode and memo
+// caches): compile the merged scope to its core ONCE with a placeholder
+// `__main` arm, cache it keyed by (library set, lib_generation, debug flag),
+// and per evaluation compile only the expression itself and EDIT its formula
+// into the cached core at `__main`'s leaf — an O(log n) path rebuild on a
+// shared-structure tree. A `def`, module compile, or library edit bumps
+// `lib_generation`, so a stale core is simply never hit again.
+// ---------------------------------------------------------------------------
+
+struct ScopeCore {
+    core: N,                                              // [battery 0] with a placeholder __main
+    main_axis: u128,                                      // __main's formula axis within the core
+    funcs: std::sync::Arc<Vec<(String, u128, usize)>>,    // name -> (axis, arity), __main included
+}
+
+fn scope_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(String, u64, bool), std::sync::Arc<ScopeCore>>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, u64, bool), std::sync::Arc<ScopeCore>>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn scope_core(libs: &[&str]) -> Result<std::sync::Arc<ScopeCore>, String> {
+    let key = (libs.join(","), lib_generation(), debug_compile_on());
+    if let Some(sc) = scope_cache().lock().unwrap().get(&key) {
+        return Ok(sc.clone());
+    }
     let mut lists: Vec<Vec<Arm>> = Vec::new();
     for lib in libs {
         lists.push(gather_lib(lib)?);
     }
-    lists.push(vec![("__main".to_string(), vec!["_".to_string()], ast)]);
+    // the placeholder body is never run: every evaluation replaces it first
+    lists.push(vec![("__main".to_string(), vec!["_".to_string()], Ast::Lit(0))]);
     let arms = merge_arms(lists);
-    let (core, axes) = compile_arms(&arms)?;
+    let (core, axes, funcs) = compile_arms_full(&arms)?;
     let main_axis = axes
         .iter()
         .find(|(n, _)| n == "__main")
         .map(|(_, a)| *a)
         .ok_or("missing __main")?;
+    let sc = std::sync::Arc::new(ScopeCore { core, main_axis, funcs });
+    let mut cache = scope_cache().lock().unwrap();
+    if cache.len() >= 16 {
+        cache.clear(); // distinct lib-sets are few; a rare full rebuild is fine
+    }
+    cache.insert(key, sc.clone());
+    Ok(sc)
+}
+
+/// Compile `expr_src` against a cached scope and return (ready core, __main axis):
+/// the shared per-evaluation front half of the interpreter entry points below.
+fn prepare_eval(expr_src: &str, libs: &[&str]) -> Result<(N, u128), String> {
+    let sc = scope_core(libs)?;
+    let ast = parse(expr_src)?;
+    let env = Env {
+        faces: vec![("_".to_string(), tuple_elem_axis(3, 0, 1))],
+        loops: None,
+        funcs: sc.funcs.clone(),
+        module_core: Some(1),
+    };
+    let mut f = gen(&ast, &env)?;
+    if debug_compile_on() {
+        f = crate::loom::f_jet("dbg:__main", f);
+    }
+    // splice the expression's formula over the placeholder, then zero the sample
+    let core = crate::loom::edit(&crate::atom::Atom::from_u128(sc.main_axis), &f, &sc.core)
+        .map_err(|e| format!("{:?}", e))?;
     let core2 = crate::loom::edit(&crate::atom::Atom::from_u128(3), &num(0), &core)
         .map_err(|e| format!("{:?}", e))?;
+    Ok((core2, sc.main_axis))
+}
+
+pub fn run_with_libs(expr_src: &str, libs: &[&str]) -> Result<N, String> {
+    crate::jets::register_std_jets();
+    let (core2, main_axis) = prepare_eval(expr_src, libs)?;
     let armf = crate::loom::slot(&crate::atom::Atom::from_u128(main_axis), &core2)
         .map_err(|e| format!("{:?}", e))?;
     crate::loom::tar(&core2, &armf).map_err(|e| format!("{:?}", e))
@@ -1404,34 +1463,12 @@ pub fn eval_with_std(expr_src: &str) -> Result<N, String> {
 /// is too low. The cost is bounded by the caller's budget, not unbounded.
 pub fn run_with_libs_fuel(expr_src: &str, libs: &[&str], fuel: u64) -> Result<N, String> {
     crate::jets::register_std_jets();
-    let ast = parse(expr_src)?;
-    let mut lists: Vec<Vec<Arm>> = Vec::new();
-    for lib in libs {
-        lists.push(gather_lib(lib)?);
-    }
-    lists.push(vec![("__main".to_string(), vec!["_".to_string()], ast)]);
-    let arms = merge_arms(lists);
-    let (core, axes) = compile_arms(&arms)?;
-    let main_axis = axes
-        .iter()
-        .find(|(n, _)| n == "__main")
-        .map(|(_, a)| *a)
-        .ok_or("missing __main")?;
-    let core2 = crate::loom::edit(&crate::atom::Atom::from_u128(3), &num(0), &core)
-        .map_err(|e| format!("{:?}", e))?;
+    let (core2, main_axis) = prepare_eval(expr_src, libs)?;
     let armf = crate::loom::slot(&crate::atom::Atom::from_u128(main_axis), &core2)
         .map_err(|e| format!("{:?}", e))?;
     crate::loom::tar_with_fuel(&core2, &armf, fuel).map_err(|e| format!("{:?}", e))
 }
 
-/// Gather an expression plus its library closure into the full merged arm list (the program),
-/// with the expression installed as the `__main` arm. Used by the Latte→Rust compiler.
-pub fn gather_program(
-    expr_src: &str,
-    libs: &[&str],
-) -> Result<Vec<(String, Vec<String>, Ast)>, String> {
-    gather_program_in(expr_src, libs, "_")
-}
 
 /// Like `gather_program`, but `__main` takes a named parameter so the expression can
 /// reference a value supplied at run time (rather than baking every input into the
@@ -1730,6 +1767,177 @@ fn gen_again(args: &[Ast], env: &Env) -> Result<N, String> {
     // produce the edited core, then invoke its battery (arm 2): [9 2 [7 EDIT [0 core_axis]]]
     let edited_core = cell(num(7), cell(base, f_axis(lc.core_axis)));
     Ok(cell(num(9), cell(num(2), edited_core)))
+}
+
+// ---------------------------------------------------------------------------
+// `def` — one-line function definition from any text (the Oberon habit).
+//
+// Session-defined arms accumulate in a synthetic `user` module that is
+// compiled and registered like any other library, so a defined function is
+// immediately callable from `eval`, the GUI console, Facet pages, the CLI,
+// and the HTTP API — one definition path, visible everywhere. Two spellings:
+//
+//     def sq = fn [x] -> (mul x x)      (explicit gate)
+//     def sq [x] = (mul x x)            (shorthand; desugars to the gate form)
+//
+// `def` alone lists the session's arms; `undef NAME` removes one. Redefining
+// a name replaces it. Every (re)definition re-compiles the whole `user`
+// module through the same validating path as /api/compile, so a broken
+// definition is rejected and the previous good set stays installed.
+// ---------------------------------------------------------------------------
+
+fn user_arms() -> &'static std::sync::Mutex<Vec<(String, String)>> {
+    static A: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> = std::sync::OnceLock::new();
+    A.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The source of the session's `user` module (imports the whole standard scope
+/// implicitly via linking; `import std` keeps it valid stand-alone too).
+fn user_module_src(arms: &[(String, String)]) -> String {
+    let mut s = String::from("import std\ncore user\n");
+    for (_, def) in arms {
+        s.push_str("  ");
+        s.push_str(def);
+        s.push('\n');
+    }
+    s.push_str("end\n");
+    s
+}
+
+/// Names of the arms defined in this session, in definition order.
+pub fn user_arm_names() -> Vec<String> {
+    user_arms().lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+}
+
+/// Handle a `def` line (everything after the `def` keyword). Returns the
+/// message to show. Accepts `name = fn [..] -> body` and the shorthand
+/// `name [params] = body`; validates by compiling before installing.
+pub fn define_user_arm(rest: &str) -> Result<String, String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        let names = user_arm_names();
+        return Ok(if names.is_empty() {
+            "no session functions defined — try:  def sq [x] = (mul x x)   then:  eval (sq 7)".into()
+        } else {
+            format!("session functions (module 'user'): {}", names.join(", "))
+        });
+    }
+    // split at the FIRST `=` that is not part of `==`
+    let eq = {
+        let b = rest.as_bytes();
+        let mut i = 0;
+        let mut found = None;
+        while i < b.len() {
+            if b[i] == b'=' {
+                if i + 1 < b.len() && b[i + 1] == b'=' { i += 2; continue; }
+                found = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        found.ok_or("usage: def NAME = fn [args] -> body   or   def NAME [args] = body")?
+    };
+    let (lhs, body) = (rest[..eq].trim(), rest[eq + 1..].trim());
+    if body.is_empty() {
+        return Err("def: missing body after `=`".into());
+    }
+    // lhs is `name` (gate form) or `name [params]` (shorthand)
+    let (name, params) = match lhs.split_once('[') {
+        Some((n, ps)) => {
+            let ps = ps.trim_end();
+            if !ps.ends_with(']') {
+                return Err("def: unclosed parameter list — write  def name [a b] = body".into());
+            }
+            (n.trim(), Some(ps[..ps.len() - 1].trim().to_string()))
+        }
+        None => (lhs, None),
+    };
+    if name.is_empty()
+        || !name.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        || !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("def: '{}' is not a valid arm name", name));
+    }
+    let def = match params {
+        Some(ps) => format!("{} = fn [{}] -> {}", name, ps, body),
+        None => format!("{} = {}", name, body),
+    };
+    // candidate arm set: replace an existing definition of the same name, else append
+    let prev = user_arms().lock().unwrap().clone();
+    let mut next = prev.clone();
+    match next.iter_mut().find(|(n, _)| n == name) {
+        Some(slot) => slot.1 = def,
+        None => next.push((name.to_string(), def)),
+    }
+    // compile-validate the whole module; only install on success
+    let src = user_module_src(&next);
+    let arms = gather(&src)?;
+    let _ = compile_arms(&arms)?;
+    *user_arms().lock().unwrap() = next;
+    register_runtime_lib("user", &src);
+    Ok(format!("defined {} — call it anywhere:  eval ({} …)", name, name))
+}
+
+/// Remove a session-defined arm by name.
+pub fn undefine_user_arm(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    let mut arms = user_arms().lock().unwrap();
+    let before = arms.len();
+    arms.retain(|(n, _)| n != name);
+    if arms.len() == before {
+        return Err(format!("undef: no session function named '{}'", name));
+    }
+    // warn about arms that still mention the removed name — they will error at call time
+    let dangling: Vec<String> = arms
+        .iter()
+        .filter(|(_, d)| d.contains(&format!("({} ", name)) || d.contains(&format!("({})", name)))
+        .map(|(n, _)| n.clone())
+        .collect();
+    let src = user_module_src(&arms);
+    drop(arms);
+    register_runtime_lib("user", &src);
+    Ok(if dangling.is_empty() {
+        format!("removed {}", name)
+    } else {
+        format!("removed {} — note: {} still reference(s) it and will error until redefined", name, dangling.join(", "))
+    })
+}
+
+#[cfg(test)]
+mod def_tests {
+    use super::*;
+
+    #[test]
+    fn def_shorthand_gate_form_redefine_and_undef() {
+        // shorthand form defines an arm callable through the standard scope
+        define_user_arm("t_sq [x] = (mul x x)").expect("shorthand def");
+        let libs: Vec<String> = all_libs();
+        let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+        let v = run_with_libs("(t_sq 12)", &refs).expect("call defined arm");
+        assert_eq!(v, crate::knot::num(144));
+        // gate form composes with an earlier session arm
+        define_user_arm("t_cube = fn [x] -> (mul x (t_sq x))").expect("gate def");
+        let v = run_with_libs("(t_cube 4)", &refs).expect("composed call");
+        assert_eq!(v, crate::knot::num(64));
+        // redefinition replaces
+        define_user_arm("t_sq [x] = (add x x)").expect("redef");
+        let v = run_with_libs("(t_sq 12)", &refs).expect("call redefined");
+        assert_eq!(v, crate::knot::num(24));
+        // a broken definition is rejected and the good set survives
+        assert!(define_user_arm("t_bad [x] = (mul x").is_err());
+        assert!(run_with_libs("(t_sq 3)", &refs).is_ok());
+        // undef removes and warns about dependents
+        let msg = undefine_user_arm("t_sq").expect("undef");
+        assert!(msg.contains("t_cube"), "warns about the dangling dependent: {}", msg);
+        undefine_user_arm("t_cube").expect("undef cube");
+    }
+
+    #[test]
+    fn def_rejects_bad_names_and_missing_eq() {
+        assert!(define_user_arm("9lives [x] = x").is_err());
+        assert!(define_user_arm("noeq").is_err());
+        assert!(define_user_arm("empty [x] =").is_err());
+    }
 }
 
 #[cfg(test)]

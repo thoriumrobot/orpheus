@@ -174,8 +174,6 @@ pub const MARKET_NEWS: &[(&str, &str, &str)] = &[
 // system falls back to the embedded series above, so it always works.
 // ============================================================================
 
-const LIVE_URL: &str = "https://raw.githubusercontent.com/coinmetrics/data/master/csv/btc.csv";
-
 /// The MARKETS the tools know how to fetch: Coin Metrics community assets that
 /// are liquid, long-history, and plausible financial-ML targets. Any other
 /// Coin Metrics asset symbol also works (`latte fetch --market <sym>`); these
@@ -217,9 +215,6 @@ fn cache_dir() -> std::path::PathBuf {
     }
 }
 
-fn cache_file() -> std::path::PathBuf {
-    cache_dir().join("btc-priceusd.csv")
-}
 
 /// Parse the Coin Metrics CSV (header has `time` and `PriceUSD` columns) into
 /// (date, close x100) rows, skipping days with no price.

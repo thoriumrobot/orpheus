@@ -692,6 +692,13 @@ fn tool_date_weekday(args: &[Val]) -> Result<Val, String> {
 fn tool_sent_polarity(args: &[Val]) -> Result<Val, String> {
     Ok(Val::Text(format!("{:.3}", crate::sentiment::polarity_fused(&arg_text(args, 0)?))))
 }
+fn tool_sent_bond(args: &[Val]) -> Result<Val, String> {
+    let t = arg_text(args, 0)?;
+    let p = crate::sentiment::bond_polarity(&t);
+    let (dove, hawk) = crate::sentiment::rate_counts(&t);
+    let label = if p > 0.15 { "bullish for bonds" } else if p < -0.15 { "bearish for bonds" } else { "neutral for bonds" };
+    Ok(Val::Text(format!("{:+.3} — {} ({} dovish / {} hawkish)", p, label, dove, hawk)))
+}
 fn tool_sent_label(args: &[Val]) -> Result<Val, String> {
     let p = crate::sentiment::polarity_fused(&arg_text(args, 0)?);
     let label = if p > 0.05 {
@@ -990,7 +997,13 @@ fn render_noun(n: &crate::knot::N) -> String {
 
 fn tool_latte_eval(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
-    let n = crate::latte::run_with_libs(&expr, &["std"]).map_err(|e| format!("Latte.eval: {}", e))?;
+    // The FULL scope, not just std: a `def` made in the System console, a module
+    // compiled into the running image, and every shipped library are all visible
+    // to a page widget — one scope, everywhere. (This used to be pinned to std
+    // for speed; the scope-core cache made the full scope effectively free.)
+    let libs = crate::latte::all_libs();
+    let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
+    let n = crate::latte::run_with_libs(&expr, &refs).map_err(|e| format!("Latte.eval: {}", e))?;
     Ok(Val::Text(render_noun(&n)))
 }
 
@@ -1130,6 +1143,20 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_viz_chart,
         },
         ToolSpec {
+            module: "AlgoViz",
+            proc: "frame",
+            sig: "AlgoViz.frame(algo, xs, k, t)",
+            summary: "step k of an instrumented algorithm (bubble, insert, binsearch, bfs) over the list xs, drawn as SVG; t is the binsearch target",
+            handler: tool_algoviz_frame,
+        },
+        ToolSpec {
+            module: "AlgoViz",
+            proc: "steps",
+            sig: "AlgoViz.steps(algo, xs, t)",
+            summary: "how many frames the algorithm's trace has — the slider range for AlgoViz.frame",
+            handler: tool_algoviz_steps,
+        },
+        ToolSpec {
             module: "Mkt",
             proc: "span",
             sig: "Mkt.span()",
@@ -1235,6 +1262,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_sent_counts,
         },
         ToolSpec {
+            module: "Sent",
+            proc: "bond",
+            sig: "Sent.bond(text)",
+            summary: "sentiment for BOND PRICES: the hawkish/dovish policy axis, with risk-off scored as a Treasury bid",
+            handler: tool_sent_bond,
+        },
+        ToolSpec {
             module: "Hash",
             proc: "sha3",
             sig: "Hash.sha3(text)",
@@ -1321,6 +1355,7 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Latte", summary: "the Latte language, evaluated live" },
         ModuleSpec { name: "Live", summary: "live, client-updating widgets" },
         ModuleSpec { name: "Viz", summary: "render data as SVG charts" },
+        ModuleSpec { name: "AlgoViz", summary: "instrumented algorithms drawn a step at a time" },
         ModuleSpec { name: "Mkt", summary: "a market-data lab: query, chart, and analyze a price series" },
         ModuleSpec { name: "Date", summary: "civil date arithmetic" },
         ModuleSpec { name: "Sent", summary: "text sentiment scoring" },
@@ -1335,6 +1370,61 @@ fn dispatch_tool(module: &str, proc: &str, args: &[Val]) -> Result<Val, String> 
         Some(s) => (s.handler)(args),
         None => Err(format!("no such tool: {}.{}", module, proc)),
     }
+}
+
+// ------------------------------- AlgoViz: algorithms, played ---------------
+// The instrumented algorithms of lib/algoviz.lat, rendered a frame at a time.
+// The heavy lifting is all in Latte (the traces) and the one host SVG
+// serializer (src/gfx.rs — the same one `latte gfx` uses); these tools just
+// build the call, evaluate it through the adaptive engine, and hand the SVG
+// to the page. A Live.view with a slider on `k` plays the algorithm.
+
+/// Parse a number list from a page field ("5 2 8 1" or "5,2,8,1") into a
+/// Latte proper-list literal ("[5 2 8 1 0]"); empty input gets a default.
+fn algoviz_list(v: &Val) -> String {
+    let ns = nums_from(v);
+    if ns.is_empty() {
+        "[5 2 8 1 9 3 0]".to_string()
+    } else {
+        let mut s = String::from("[");
+        for n in ns.iter().take(16) {
+            s.push_str(&n.to_string());
+            s.push(' ');
+        }
+        s.push_str("0]");
+        s
+    }
+}
+
+fn algoviz_eval(expr: &str) -> Result<crate::knot::N, String> {
+    crate::rustgen::run_adaptive(expr, &["std", "gfx", "algoviz"])
+}
+
+/// AlgoViz.frame(algo, xs, k, t) -> the k-th frame as inline SVG.
+fn tool_algoviz_frame(args: &[Val]) -> Result<Val, String> {
+    let algo = arg_text(args, 0)?.trim().trim_start_matches('%').to_string();
+    if !matches!(algo.as_str(), "bubble" | "insert" | "binsearch" | "bfs") {
+        return Err("algo must be bubble, insert, binsearch, or bfs".into());
+    }
+    let blank = Val::Text(String::new());
+    let xs = algoviz_list(args.get(1).unwrap_or(&blank));
+    let k = arg_num_or(args, 2, 0);
+    let t = arg_num_or(args, 3, 8);
+    let scene = algoviz_eval(&format!("(av_frame %{} {} {} {})", algo, xs, t, k))?;
+    Ok(Val::Text(crate::gfx::render_scene(&scene, 340, 270)))
+}
+
+/// AlgoViz.steps(algo, xs, t) -> how many frames the trace has (the slider range).
+fn tool_algoviz_steps(args: &[Val]) -> Result<Val, String> {
+    let algo = arg_text(args, 0)?.trim().trim_start_matches('%').to_string();
+    if !matches!(algo.as_str(), "bubble" | "insert" | "binsearch" | "bfs") {
+        return Err("algo must be bubble, insert, binsearch, or bfs".into());
+    }
+    let blank = Val::Text(String::new());
+    let xs = algoviz_list(args.get(1).unwrap_or(&blank));
+    let t = arg_num_or(args, 2, 8);
+    let n = algoviz_eval(&format!("(av_steps %{} {} {})", algo, xs, t))?;
+    Ok(Val::Num(n.as_atom().and_then(|a| a.to_u128()).unwrap_or(0)))
 }
 
 fn arg_text(args: &[Val], i: usize) -> Result<String, String> {
@@ -1420,9 +1510,20 @@ fn claim_live_runtime() -> &'static str {
 /// A process-wide memo for single-expression evaluation. Facet rendering is a pure, deterministic
 /// function of (expression, inputs), so identical calls always yield identical text — safe to cache.
 /// The cache is keyed within the current library generation and cleared if libraries change.
-fn eval_cache() -> &'static Mutex<(u64, HashMap<String, String>)> {
-    static C: OnceLock<Mutex<(u64, HashMap<String, String>)>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new((0, HashMap::new())))
+/// (generation, day) -> memoized results. The DAY joins the key for the same
+/// reason it keys the page memo: `Date.*` holes are deterministic within a day,
+/// and a long-running server must not serve yesterday's date after midnight.
+fn eval_cache() -> &'static Mutex<((u64, u64), HashMap<String, String>)> {
+    static C: OnceLock<Mutex<((u64, u64), HashMap<String, String>)>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(((u64::MAX, 0), HashMap::new())))
+}
+
+/// Days since the epoch — the second component of the memo keys.
+fn today_stamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0)
 }
 
 /// A cache of *parsed* single-expression snippets, keyed by the expression text. Parsing is purely
@@ -1460,7 +1561,7 @@ fn cached_segments(expr: &str) -> Result<Arc<Vec<Seg>>, String> {
 /// and shared defaults are free; and on a result miss, the *parsed* expression is reused from
 /// `parse_cache`, so a fresh input value pays only for evaluation, never for re-parsing.
 pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
-    let gen = crate::latte::lib_generation();
+    let gen = (crate::latte::lib_generation(), today_stamp());
     let mut key = String::with_capacity(expr.len() + inputs.len() * 8 + 1);
     key.push_str(expr);
     for (n, v) in inputs {
@@ -1512,6 +1613,33 @@ pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
 /// an interactive interface: an HTML form submits `?name=value`, the page re-renders, and the
 /// form's tools run against the user's input.
 pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, String> {
+    // THE PAGE MEMO. A Facet render is a pure, deterministic function of the page
+    // source, the parameters, and the tool registry (the module doc says exactly
+    // this), so a whole rendered page can be memoized outright. The key carries
+    // the library generation (a `def` or module compile invalidates every page)
+    // and the current DAY (so `Date.today`-style holes stay correct without any
+    // tool-level special-casing). Repeated visits to a widget-heavy page — the
+    // /tools shelf, the /learn tutorials — become a single map lookup.
+    let day = today_stamp();
+    let gen = crate::latte::lib_generation();
+    let mut pkey = String::with_capacity(src.len() / 8 + 64);
+    pkey.push_str(&crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()))[..32]);
+    for (k, v) in params {
+        pkey.push('\u{1}');
+        pkey.push_str(k);
+        pkey.push('\u{2}');
+        pkey.push_str(v);
+    }
+    {
+        let mut g = page_cache().lock().unwrap();
+        if g.0 != (gen, day) {
+            g.1.clear();
+            g.0 = (gen, day);
+        }
+        if let Some(hit) = g.1.get(&pkey) {
+            return Ok(hit.clone());
+        }
+    }
     let top = RENDER_DEPTH.with(|d| {
         let depth = d.get();
         d.set(depth + 1);
@@ -1526,7 +1654,21 @@ pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, Str
         render_segments(&segs, &env)
     })();
     RENDER_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    if let Ok(html) = &result {
+        let mut g = page_cache().lock().unwrap();
+        if g.1.len() >= 128 {
+            g.1.clear();
+        }
+        g.1.insert(pkey, html.clone());
+    }
     result
+}
+
+/// (generation, day) -> { page key -> rendered HTML }: see render_with.
+fn page_cache() -> &'static std::sync::Mutex<((u64, u64), std::collections::HashMap<String, String>)> {
+    static C: std::sync::OnceLock<std::sync::Mutex<((u64, u64), std::collections::HashMap<String, String>)>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(((u64::MAX, 0), std::collections::HashMap::new())))
 }
 
 #[cfg(test)]

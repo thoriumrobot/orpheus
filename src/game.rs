@@ -496,8 +496,9 @@ fn xq_rules() -> Option<&'static Machine> {
     R.get_or_init(|| Machine::new(&["std", "xiangqi"]).ok()).as_ref()
 }
 
+/// The trained xiangqi evaluation weights (xiangqiml.xtrained), computed once.
+/// Only the weights are retained — the training Machine is local to the init.
 struct XqAi {
-    ml: Machine,
     weights: N,
 }
 fn xq_ai() -> Option<&'static XqAi> {
@@ -505,7 +506,7 @@ fn xq_ai() -> Option<&'static XqAi> {
     A.get_or_init(|| {
         let ml = Machine::new(&["std", "xiangqi", "num", "xiangqiml"]).ok()?;
         let weights = ml.call("xtrained", num(250)).ok()?;
-        Some(XqAi { ml, weights })
+        Some(XqAi { weights })
     })
     .as_ref()
 }

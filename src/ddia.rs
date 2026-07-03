@@ -2145,18 +2145,24 @@ mod tests {
 
     #[test]
     fn bond_model_richer_features() {
-        // The bond model now carries EIGHT fixed-income factors (was five). The three additions
-        // bring information the level/slope/curvature factors cannot span: carry+roll-down (the
-        // income+roll return term), forward-rate momentum (Fama-Bliss 1987 / Cochrane-Piazzesi
-        // 2005 forward-rate predictors), and money-supply acceleration (a Ludvigson-Ng 2009-style
-        // macro factor). Full-scale training is native-only (the interpreter runs out of fuel on
-        // 4000 iterations); the out-of-sample edge is exercised via `latte trade --market bonds`.
-        assert_eq!(n("(len (head (head (build 0))))"), 8);
+        // The bond model now carries TEN fixed-income factors (was eight). Beyond the curve's
+        // level/slope/curvature, yield momentum, the M2 money block, carry+roll-down, and
+        // forward-rate momentum, the last two are the settled return-forecasting factors of the
+        // literature: the Cochrane-Piazzesi (2005) tent over the curve's implied forwards, and
+        // the Cieslak-Povala (2015) cycle (the yield's stationary deviation from a slow
+        // trend-inflation proxy, computed once as an O(n) exponential average). Full-scale
+        // training is native-only (the interpreter runs out of fuel on 4000 iterations); the
+        // out-of-sample edge is exercised via `latte trade --market bonds`.
+        assert_eq!(n("(len (head (head (build 0))))"), 10);
         // the carry+roll-down feature (index 5) is a signed fixed-point cell; in a normal,
         // upward-sloping-curve month its sign is non-negative (positive carry)
         assert_eq!(n("(head (nth (head (head (build 0))) 5))"), 0); // sign 0 = non-negative
-        // the DB-backed feature schema tracks the model: eight feature fields are projected
-        assert_eq!(n("(len (bm_fields 0))"), 8);
+        // the trend series has one τ per month, and the cycle is yield − trend
+        assert_eq!(n("((len (trend (y10 0))) == (len (y10 0)))"), 0);
+        // the DB-backed feature schema tracks the model: ten feature fields are projected
+        assert_eq!(n("(len (bm_fields 0))"), 10);
+        // the ablation row drops exactly the two money features (10 - 2 = 8)
+        assert_eq!(n("(len (frow_nom (y2 0) (y5 0) (y10 0) (trend (y10 0)) 3))"), 8);
     }
 
     #[test]

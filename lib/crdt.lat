@@ -24,9 +24,13 @@ core crdt
     end
   gc_inc   = fn [g node d] ->
     [ [node (add (gc_get g node) d)] (filter (fn [e] -> (not ((head e) == node))) g) ]
+  :: the union of the node ids appearing in either counter (a's order, then b's novelties)
   gc_nodes = fn [a b] ->
     let na = (map (fn [e] -> (head e)) a) in
     (append na (filter (fn [nd] -> (not (member nd na))) (map (fn [e] -> (head e)) b)))
+  :: JOIN = per-node MAX. Each node only ever increments its OWN slot, so the
+  :: larger of two observations is always the newer one — max is commutative,
+  :: associative, and idempotent, which is exactly what makes merge conflict-free.
   gc_merge = fn [a b] ->
     (map (fn [nd] -> [ nd (max (gc_get a nd) (gc_get b nd)) ]) (gc_nodes a b))
   gc_value = fn [g] -> (foldl (fn [s e] -> (add s (tail e))) 0 g)

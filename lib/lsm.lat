@@ -79,12 +79,12 @@ core lsm
   :: merge two sorted segments; on equal key the FIRST (newer) wins
   lsm_merge = fn [a b] ->
     loop with [xs = a, ys = b, acc = 0] :
-      if (xs == 0) then (append (reverse acc) ys)
-      else if (ys == 0) then (append (reverse acc) xs)
+      if (xs == 0) then (append (reverse acc) ys)          :: a exhausted: rest of b is already sorted
+      else if (ys == 0) then (append (reverse acc) xs)     :: b exhausted: likewise
       else let kx = (head (head xs)) in let ky = (head (head ys)) in
-        if (kx == ky) then again((tail xs), (tail ys), [ (head xs) acc ])
-        else if ((dh_klt kx ky) == 0) then again((tail xs), ys, [ (head xs) acc ])
-        else again(xs, (tail ys), [ (head ys) acc ])
+        if (kx == ky) then again((tail xs), (tail ys), [ (head xs) acc ])       :: same key: keep a's (newer), DROP b's
+        else if ((dh_klt kx ky) == 0) then again((tail xs), ys, [ (head xs) acc ])  :: a's key smaller: emit it
+        else again(xs, (tail ys), [ (head ys) acc ])                            :: b's key smaller: emit it
     end
 
   :: compaction: k-way merge of all segments (newest-first) into one, dropping

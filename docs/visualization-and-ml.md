@@ -117,6 +117,24 @@ Feed `3 5 7 9` to `latte chart line` (or `/api/plot`) to see the fitted line.
 
 ---
 
+## 3½. Algorithm visualization (`lib/algoviz.lat`)
+
+Algorithms can be *watched*. The `algoviz` library instruments bubble sort, insertion sort,
+binary search, and a breadth-first maze flood: each elementary step (a comparison, a swap, a
+probe, a visit) appends a **frame** to a trace, and a frame renders to a `gfx` scene — the same
+scene system `latte gfx` draws, serialized by the one host SVG renderer. Traces are ordinary
+0-terminated lists, so they count, slice, and inspect like any value:
+
+```
+latte eval "(av_steps %bubble [5 2 8 1 9 3 0] 0)"       # frames in the trace
+latte eval "(av_frame %bfs 0 0 9)"                       # frame 9 of the maze flood, as a scene
+```
+
+The **/learn** page of the hosted site puts a slider on the frame index — the Facet tools
+`AlgoViz.frame(algo, xs, k, t)` and `AlgoViz.steps(algo, xs, t)` render server-side, and a
+`Live.view` refreshes the SVG as the slider moves. Every figure is computed by the running
+system, from the axioms up.
+
 ## 4. Anatomy of a model (`lib/ml.lat`)
 
 The worked model is **linear regression**: `y = w·x + b`. Three pieces define it.
@@ -390,14 +408,21 @@ standardization, walk-forward split and transaction-cost discipline, and adds:
 - **A bond total-return model.** A bond's monthly total return is approximated as
   `carry − duration·Δyield` (income earned, minus the price move a yield change
   implies). `bondret` uses the 10-year note's modified duration (~8.5).
-- **Yield-curve features.** `frow` builds `[ level, slope, curvature, yield-
-  momentum, M2-growth ]`: the **level** (10y), **slope** (10y−2y), and
-  **curvature** (2·5y−2y−10y) are the first three principal components of the
-  curve; **momentum** is the recent yield trend (negated, so a falling yield —
-  bullish for bonds — reads positive). Level/slope/curvature plus momentum and
-  carry are the predictors Brooks & Moskowitz ("Yield Curve Premia", 2017) show
-  describe bond return premia, subsuming the curve's PCs and adding unspanned
-  signal.
+- **Yield-curve features.** `frow` builds a ten-factor row: **level** (10y),
+  **slope** (10y−2y), and **curvature** (2·5y−2y−10y) — the first three
+  principal components of the curve — plus **yield momentum** (the recent trend,
+  negated so a falling yield — bullish for bonds — reads positive),
+  **carry+roll-down** (the income+roll term of the return decomposition),
+  **forward-rate momentum**, and the two settled return-forecasting factors of
+  the literature: the **Cochrane–Piazzesi tent** (2·f₂₅ − y₂ − f₅₁₀ over the
+  curve's implied forwards — CP 2005 show one such tent-shaped forward
+  combination forecasts excess returns across maturities and is not spanned by
+  level/slope/curvature) and the **Cieslak–Povala cycle** (the 10y yield minus a
+  slow discounted mean of itself — the stationary deviation from the
+  trend-inflation proxy τ, which is what forecasts returns, not the yield's
+  near-unit-root level; computed once as an O(n) exponential average).
+  Level/slope/curvature plus momentum and carry are the predictors Brooks &
+  Moskowitz ("Yield Curve Premia", 2017) show describe bond return premia.
 - **A money-supply (stimulus) feature.** Central banks fight weak economies by
   expanding the money supply — cutting rates and, once rates hit zero, buying
   bonds with newly-created money (quantitative easing, deployed in 2008–09 and
@@ -413,11 +438,25 @@ Run it from the GUI's **eval** line or the CLI:
 ```
 latte eval "(report 0)"     # -> [ train  test  baseline ]  as signed fractions
 latte eval "(ablate 0)"     # -> [ test_with_M2  test_without_M2  baseline ]
+latte trade --market bonds  # the advisor: model edge + regime + news + sizing
 ```
 
-On the embedded series this reports **train 96.6%, out-of-sample 68.3%, baseline
-63.3%**, and the ablation shows the money-supply feature is pulling real weight:
-**68.3% with M2 vs 65.8% without** (both above baseline). Two honest caveats, in
+The **bond advisor** fuses the trained model (60%) with **bond-scored news**
+(40%): the same sentiment engine and the same `news/` document stream the crypto
+advisor reads, through `bond_polarity` — a hawkish/dovish policy lexicon fused
+with the general financial score entering *negated*, because risk-off news is a
+Treasury bid and "stocks rally on strong growth" is bearish for bond prices.
+`--news FILE` scores a fresh report directly; `--sentiment S` overrides the
+aggregate. Sizing is fractional Kelly on the measured edge, **volatility-
+targeted** against the model's own return series (`bvol`), the same discipline
+the crypto advisor gets from HAR-RV. `latte sentiment "<text>"` prints both
+readings side by side; in Facet, `Sent.bond(text)` is the same scorer.
+
+The ablation (`run_nom`) keeps the full modern factor set and drops only the two
+money features, so the out-of-sample difference isolates the stimulus signal
+against a strong baseline rather than a thin one. (Accuracies shift with the
+feature set and training length — read the numbers off `latte trade --market
+bonds`, which trains the current model and reports its live edge.) Two honest caveats, in
 the spirit of the gold demo above:
 
 1. **The data is a curated demonstration series, not a tick feed.** The 2-, 5- and

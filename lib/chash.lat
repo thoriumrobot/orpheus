@@ -34,10 +34,10 @@ core chash
 
   :: which node owns `key`: first ring point with pos >= hash(key), else wrap
   ch_lookup = fn [ring key ringsz] ->
-    let p = (dh_idx (dh_h1 key) ringsz) in
+    let p = (dh_idx (dh_h1 key) ringsz) in                 :: the key's own position on the ring
     loop with [c = ring] :
-      if (c == 0) then (tail (head ring))
-      else if ((gte (head (head c)) p) == 0) then (tail (head c))
+      if (c == 0) then (tail (head ring))                  :: walked past 12 o'clock: WRAP to the first point
+      else if ((gte (head (head c)) p) == 0) then (tail (head c))   :: first point clockwise of p owns the key
       else again((tail c))
     end
 
@@ -47,10 +47,13 @@ core chash
 
   :: how many keys change owner between two assignments (the rebalance cost)
   ch_moved = fn [asgnA asgnB] ->
+    :: parallel walk over the two [key node] lists (same keys, same order):
+    :: count positions whose owner differs — with consistent hashing this stays
+    :: near K/N on a node change, versus ~all keys under `hash(key) mod N`
     loop with [xs = asgnA, ys = asgnB, n = 0] :
       if (xs == 0) then n
-      else if ((tail (head xs)) == (tail (head ys))) then again((tail xs), (tail ys), n)
-      else again((tail xs), (tail ys), +(n))
+      else if ((tail (head xs)) == (tail (head ys))) then again((tail xs), (tail ys), n)   :: same owner: free
+      else again((tail xs), (tail ys), +(n))                                               :: owner changed: one move
     end
 
   :: REPLICA PREFERENCE LIST (Dynamo): the next `n` DISTINCT physical nodes
@@ -58,6 +61,8 @@ core chash
   :: ring points) is what stops two replicas landing on the same machine's vnodes.
   ch_replicas = fn [ring key n ringsz] ->
     let start = (dh_idx (dh_h1 key) ringsz) in
+    :: rotate the ring so the walk begins at the key's position: points clockwise
+    :: of start first, then the wrapped-around prefix
     let rot = (append (filter (fn [pt] -> (gte (head pt) start)) ring)
                       (filter (fn [pt] -> (lt (head pt) start)) ring)) in
     loop with [c = rot, acc = 0, cnt = 0] :

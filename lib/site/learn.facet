@@ -1,0 +1,173 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Learn — the Orpheus interactive tutorials</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; max-width: 46rem; margin: 2.5rem auto; padding: 0 1rem; line-height: 1.6; color: #1a1320; background: #fbf8f3; }
+  h1, h2 { font-variant: small-caps; letter-spacing: .03em; color: #5a1530; }
+  h1 { font-size: 2.2rem; margin-bottom: 0; }
+  .sub { color: #8a6d3b; font-style: italic; margin-top: .2rem; }
+  code { background: #efe9dd; padding: 0 .3rem; border-radius: 3px; font-size: .92em; }
+  .panel { border: 1px solid #e4dccc; border-radius: 8px; margin: 1.2rem 0; background: #fffdf8; }
+  .t { padding: .5rem .8rem; border-bottom: 1px solid #e4dccc; font-weight: bold; color: #5a1530; }
+  .b { padding: .7rem .9rem; }
+  .lede { color: #444; margin: .3rem 0 .7rem; }
+  .try { border-left: 3px solid #8a1538; padding: .4rem .7rem; margin: .7rem 0; background: #f7f2e9; }
+  .try .cap { font-size: .85rem; color: #8a6d3b; margin-bottom: .3rem; }
+  a { color: #8a1538; }
+  footer { margin-top: 3rem; color: #998; font-size: .85rem; border-top: 1px solid #e4dccc; padding-top: 1rem; }
+</style>
+
+<h1>Learn</h1>
+<p class="sub">interactive tutorials — every figure below is computed live by the running system</p>
+
+<p>Each panel teaches one part of Orpheus by letting you drive it. The widgets are Facet
+<code>Live</code> holes: the server renders the first value, and edits re-evaluate just that
+result. Nothing here is a recording — drag a slider and the algorithm genuinely runs, on
+<b>Loom</b>, from the axioms up.</p>
+
+<!-- ===================== Algorithms, played ===================== -->
+<div class="panel">
+  <div class="t">Algorithms, played — <code>import algoviz</code></div>
+  <div class="b">
+    <p class="lede">The <code>algoviz</code> library instruments classic algorithms: they run
+    normally, but every elementary step — a comparison, a swap, a probe, a visit — appends a
+    <em>frame</em> to a trace. A trace is ordinary data (a 0-terminated list), and a frame renders
+    to a <code>gfx</code> scene, so the same SVG pipeline that draws <code>latte gfx</code> draws
+    each step. Drag <code>k</code> to step; edit <code>xs</code> and the trace recomputes.</p>
+
+    <div class="try">
+      <div class="cap"><b>Bubble sort.</b> Adjacent bars are compared (yellow) and swapped when out
+      of order (red); after each pass the largest unsorted value has bubbled into its final place
+      (green). Watch the green region grow from the right.</div>
+      {{ Live.view("AlgoViz.frame(\"bubble\", xs, k, 0)", [["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "40", "1"]]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>Insertion sort.</b> Each element walks left through the already-sorted
+      prefix until it fits — the way a hand of cards is sorted. Compare how its step count differs
+      from bubble sort on the same input: <code>AlgoViz.steps</code> is the trace length.</div>
+      {{ Live.view("AlgoViz.frame(\"insert\", xs, k, 0)", [["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "40", "1"]]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>Binary search.</b> The list is sorted first; each probe (yellow) halves
+      the live window (blue) until the target is found (green) or the window closes. Change
+      <code>t</code> and watch the probes route differently — at most ⌈log₂ n⌉ + 1 of them.</div>
+      {{ Live.view("AlgoViz.frame(\"binsearch\", xs, k, t)", [["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "8", "1"], ["t", "8", "~", "0", "12", "1"]]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>Breadth-first search.</b> A wave (yellow frontier, blue visited) floods a
+      maze one ring per step; when it reaches the goal (red), parents are walked back and the
+      shortest path is painted green. BFS visits in distance order — that is <em>why</em> the first
+      arrival is the shortest route.</div>
+      {{ Live.view("AlgoViz.frame(\"bfs\", \"\", k, 0)", [["k", "0", "~", "0", "16", "1"]]) }}
+    </div>
+
+    <p class="lede">Step counts for the current input:
+    bubble {{ AlgoViz.steps("bubble", "5 2 8 1 9 3", 0) }},
+    insertion {{ AlgoViz.steps("insert", "5 2 8 1 9 3", 0) }},
+    binary search {{ AlgoViz.steps("binsearch", "5 2 8 1 9 3", 8) }},
+    BFS {{ AlgoViz.steps("bfs", "", 0) }}.
+    The traces are plain Latte values — open <a href="/api/source?name=algoviz">the library's
+    source</a> to see how little instrumentation costs.</p>
+  </div>
+</div>
+
+<!-- ===================== The Latte language ===================== -->
+<div class="panel">
+  <div class="t">The Latte language — a four-step tutorial</div>
+  <div class="b">
+    <p class="lede">Latte is the system's functional language, bootstrapped from one primitive
+    (successor). Four ideas carry most of it; each box below is live — edit and see.</p>
+
+    <div class="try">
+      <div class="cap"><b>1 · Everything is a Knot.</b> An atom is a natural number; a cell is a
+      pair. Lists are right-nested cells ending in <code>0</code> — so always write the trailing
+      zero: <code>[1 2 3 0]</code> is a list, <code>[1 2 3]</code> is nested pairs.</div>
+      {{ Live.box("Latte.eval(expr)", ["expr", "(len [1 2 3 0])"]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>2 · 0 means true.</b> Comparisons return the <em>loobean</em> 0 for yes —
+      try <code>(lt 2 3)</code>, <code>(5 == 6)</code>, or an <code>if</code> around either.</div>
+      {{ Live.box("Latte.eval(expr)", ["expr", "if (lt 2 3) then 100 else 200"]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>3 · Gates are values.</b> <code>fn [x] -&gt; body</code> is a closure you
+      can pass to <code>map</code>, <code>filter</code>, <code>foldl</code>.</div>
+      {{ Live.box("Latte.eval(expr)", ["expr", "(map (fn [x] -> (mul x x)) [1 2 3 4 0])"]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>4 · Iterate with loop/again.</b> The one looping construct: named
+      accumulators, re-entered in tail position. Here, Fibonacci.</div>
+      {{ Live.box("Latte.eval(expr)", ["expr", "loop with [a = 0, b = 1, i = 10] : if (i == 0) then a else again(b, (add a b), (dec i)) end"]) }}
+    </div>
+
+    <p class="lede">To keep a definition for your whole session, use the System console
+    (<code>latte gui</code> → System): <code>def sq [x] = (mul x x)</code>, then
+    <code>eval (sq 7)</code> — from any text, the Oberon way.</p>
+  </div>
+</div>
+
+<!-- ===================== The tools, as tutorials ===================== -->
+<div class="panel">
+  <div class="t">The system's tools — one live taste of each</div>
+  <div class="b">
+    <div class="try">
+      <div class="cap"><b>SCArs</b> — the sound-change engine. A Solar Speech word evolves through
+      the full rule cascade into Heart Speech. Try <code>serdā</code>, <code>nūn</code>,
+      <code>kósmā</code>.</div>
+      {{ Live.box("SCArs.evolve(word)", ["word", "serdā"]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>Sentiment</b> — one engine, two market-correct views. The general score
+      reads financial positivity; the bond score reads the hawk/dove policy axis and treats
+      risk-off as a Treasury bid. The same text can be bullish for stocks and bearish for bonds —
+      try "hot inflation forces aggressive hikes".</div>
+      {{ Live.box("Sent.label(text)", ["text", "markets rally on dovish pivot"]) }}
+      {{ Live.box("Sent.bond(text)", ["text", "markets rally on dovish pivot"]) }}
+    </div>
+
+    <div class="try">
+      <div class="cap"><b>The market lab</b> — the built-in BTC/USD series, charted live; the same
+      data the trading advisor trains on. Slide <code>n</code> for the window.</div>
+      {{ Live.view("Viz.chart(kind, Mkt.series(n))", [["kind", "line", "line", "bars"], ["n", "120", "~", "10", "1318", "1"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== Latte from the GUI ===================== -->
+<div class="panel">
+  <div class="t">Latte from the GUI — the full workflow</div>
+  <div class="b">
+    <p class="lede">The boxes above are one corner of it. In the GUI proper (the <b>System</b>
+    viewer), any command line in any text runs on middle-click; <code>def</code> turns a
+    one-liner into a session function; <code>System.New</code> opens a module frame whose
+    <b>Compile</b> loads your code into the running image and whose <b>Store</b> persists it as
+    a package; and an arm returning <code>[%html …]</code> or <code>[%svg …]</code> embeds as a
+    live object where the command ran. The complete walkthrough — from a first
+    <code>eval</code> to a compiled, persistent, rendering tool of your own — is
+    <a href="/docs#using-latte-from-the-gui"><b>Using Latte from the GUI</b></a> on the
+    documentation shelf. And the language tutorial itself is executable: open
+    <a href="/docs#latte-tutorial"><b>The Latte Tutorial</b></a> in the GUI's Docs viewer
+    and middle-click its examples — the text you are learning from runs.</p>
+    <div class="try">
+      <div class="cap">The same evaluator the console uses, as a page widget — try a
+      <code>def</code>'d name here after defining it in the System console, and it resolves:
+      one scope, everywhere.</div>
+      {{ Live.box("Latte.eval(expr)", ["expr", "(sum (range 101))"]) }}
+    </div>
+  </div>
+</div>
+
+<p>Deeper: <a href="/tools">every tool as a live widget</a> · <a href="/docs">the documentation
+shelf</a> · <a href="/docs#using-latte-from-the-gui">Using Latte from the GUI</a> — the
+tutorial for <code>eval</code>, <code>def</code>, and module compilation into the running
+image.</p>
+
+<footer>Rendered by Hymn from <code>learn.facet</code> — every widget calls the running system;
+nothing on this page is prerecorded.</footer>

@@ -99,6 +99,47 @@ fn signed_fixed_to_f64(n: &crate::knot::N) -> f64 {
 }
 
 #[cfg(test)]
+mod bond_tests {
+    use super::*;
+
+    #[test]
+    fn hawkish_news_is_bearish_for_bonds() {
+        let t = "Hot inflation forces aggressive hikes; Treasury supply surges amid deficits";
+        assert!(bond_polarity(t) < -0.5, "hawkish text must be strongly bearish for bonds");
+    }
+
+    #[test]
+    fn dovish_news_is_bullish_for_bonds() {
+        let t = "Fed signals rate cuts as inflation cools; markets rally on dovish pivot";
+        assert!(bond_polarity(t) > 0.1, "dovish text must be bullish for bonds");
+    }
+
+    #[test]
+    fn risk_off_without_policy_vocab_is_a_treasury_bid() {
+        let t = "Factory fire disrupts production; shares plunge on weak earnings fears";
+        let g = polarity_fused(t);
+        let b = bond_polarity(t);
+        assert!(g < -0.3, "clearly negative general sentiment");
+        assert!(b > 0.3, "flight to quality: bond polarity inverts the general score");
+        assert!((b + g).abs() < 1e-9, "no rates vocabulary: bond polarity is exactly the inversion");
+    }
+
+    #[test]
+    fn neutral_text_scores_near_zero_on_both_axes() {
+        let t = "The committee will publish the schedule for the next meeting";
+        assert_eq!(rate_counts(t), (0, 0));
+    }
+
+    #[test]
+    fn bond_document_scoring_mirrors_general_aggregation() {
+        let t = "Inflation runs hot and the bank hikes rates. Growth is slowing sharply and cuts are coming.";
+        let (doc, sents) = score_document_bond(t);
+        assert_eq!(sents.len(), 2);
+        assert!(doc.is_finite());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -393,6 +434,99 @@ pub fn model_polarity(text: &str) -> f64 {
 /// the Loughran-McDonald lexicon (computed on Loom) the rest.
 pub fn polarity_fused(text: &str) -> f64 {
     0.65 * model_polarity(text) + 0.35 * polarity(text)
+}
+
+// ---------------------------------------------------------------------------
+// The RATES (hawk/dove) axis — sentiment for the BOND market.
+//
+// General financial positivity is the wrong sign for Treasuries: "stocks rally
+// on strong growth" is BEARISH for bond prices (yields rise), and risk-off
+// news is BULLISH (flight to quality). What moves bonds first is the
+// monetary-policy direction, so the bond scorer reads a dedicated
+// hawkish/dovish lexicon (rate hikes, tightening, QT, hot inflation vs. cuts,
+// easing, QE, recession, disinflation) and FUSES it with the general
+// Loughran-McDonald polarity with a NEGATIVE weight — encoding exactly the
+// flight-to-quality inversion. One sentiment engine, two market-correct
+// views: `polarity_fused` for risk assets, `bond_polarity` for duration.
+// Both are available everywhere the engine is: `latte sentiment --bond`,
+// /api/sentiment, the Facet Sentiment tool, and the trade advisors.
+// ---------------------------------------------------------------------------
+
+/// Words signalling TIGHTER policy / higher yields — bearish for bond prices.
+const HAWKISH: &[&str] = &[
+    "hike", "hikes", "hiked", "hiking", "tighten", "tightens", "tightening", "hawkish",
+    "inflation", "inflationary", "overheating", "overheated", "taper", "tapering",
+    "restrictive", "qt", "issuance", "deficit", "deficits", "supply", "oversupply",
+    "hot", "sticky", "acceleration", "reflation", "unwind", "runoff",
+];
+
+/// Words signalling EASIER policy / lower yields — bullish for bond prices.
+const DOVISH: &[&str] = &[
+    "cut", "cuts", "cutting", "ease", "eases", "easing", "eased", "dovish", "stimulus",
+    "qe", "accommodative", "pause", "pauses", "paused", "recession", "recessionary",
+    "slowdown", "slowing", "slows", "cooling", "cooled", "cools", "cooler", "soften",
+    "softens", "softer", "softening", "moderating", "moderates", "pivot", "disinflation",
+    "deflation", "purchases", "buying", "safe-haven", "haven", "flight",
+];
+
+/// (dovish, hawkish) word counts over the same tokenizer as the LM counts.
+pub fn rate_counts(text: &str) -> (usize, usize) {
+    let mut dove = 0;
+    let mut hawk = 0;
+    for tok in tokenize(text) {
+        if DOVISH.contains(&tok.as_str()) {
+            dove += 1;
+        } else if HAWKISH.contains(&tok.as_str()) {
+            hawk += 1;
+        }
+    }
+    (dove, hawk)
+}
+
+/// The monetary-policy axis alone: (dovish − hawkish) / (dovish + hawkish) in [-1, 1];
+/// 0 when no rates vocabulary occurs. Positive = dovish = bullish for bond prices.
+pub fn rate_polarity(text: &str) -> f64 {
+    let (dove, hawk) = rate_counts(text);
+    if dove + hawk == 0 {
+        return 0.0;
+    }
+    (dove as f64 - hawk as f64) / (dove + hawk) as f64
+}
+
+/// Sentiment for BOND PRICES: the dovish/hawkish axis carries most of the weight;
+/// the general financial polarity enters NEGATED (risk-off is a Treasury bid).
+/// When the text has no rates vocabulary at all, the flight-to-quality reading
+/// (the negated general polarity) is all that remains.
+pub fn bond_polarity(text: &str) -> f64 {
+    let rp = rate_polarity(text);
+    let gp = polarity_fused(text);
+    if rate_counts(text) == (0, 0) {
+        -gp
+    } else {
+        // policy vocabulary present: the hawk/dove axis dominates and the general
+        // score enters as a mild risk-off correction only
+        0.75 * rp - 0.25 * gp
+    }
+}
+
+/// Score a whole document for the bond market: sentence-by-sentence bond
+/// polarities aggregated with confidence weights, mirroring `score_document`.
+pub fn score_document_bond(text: &str) -> (f64, Vec<(String, f64)>) {
+    let sents = sentences(text);
+    if sents.is_empty() {
+        return (bond_polarity(text), Vec::new());
+    }
+    let scored: Vec<(String, f64)> = sents.into_iter().map(|s| { let p = bond_polarity(&s); (s, p) }).collect();
+    // identical aggregation to score_document: confidence weights with a small floor,
+    // so boilerplate dilutes the score rather than dropping out entirely
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (_, p) in &scored {
+        let w = p.abs().max(0.05);
+        num += w * p;
+        den += w;
+    }
+    (if den > 0.0 { num / den } else { 0.0 }, scored)
 }
 
 /// Split a document into sentences (., !, ?, and blank-line boundaries).

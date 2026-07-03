@@ -20,6 +20,8 @@ core btree
   bt_isleaf = fn [nd] -> ((tail nd) == 0)                    :: loobean 0 = leaf
   bt_full   = fn [nd t] -> ((len (bt_keys nd)) == (sub (mul 2 t) 1))
 
+  :: functional update: xs with element i replaced by v — the prefix before i,
+  :: then v, then everything after i (immutable trees update by rebuilding a path)
   bt_setnth = fn [xs i v] -> (append (take i xs) [ v (drop +(i) xs) ])
 
   :: number of keys whose key-part is strictly less than k (the child to descend)
@@ -43,12 +45,16 @@ core btree
       else if ((head (head c)) == k) then [ %val (tail (head c)) ]
       else again((tail c))
     end
+  :: overwrite the value stored under an existing key, leaving order untouched
   bt_replace = fn [keys k v] -> (map (fn [e] -> if ((head e) == k) then [k v] else e) keys)
+  :: insert [k v] into a sorted key list, keeping it sorted:
+  :: walk with a reversed prefix accumulator until the first key GREATER than k,
+  :: then stitch prefix ++ [k v] ++ rest (or append at the end if none is greater)
   bt_sortins = fn [keys k v] ->
     loop with [c = keys, acc = 0] :
-      if (c == 0) then (append (reverse acc) [ [k v] 0 ])
-      else if ((dh_klt k (head (head c))) == 0) then (append (reverse acc) [ [k v] c ])
-      else again((tail c), [ (head c) acc ])
+      if (c == 0) then (append (reverse acc) [ [k v] 0 ])                 :: ran off the end: k is largest
+      else if ((dh_klt k (head (head c))) == 0) then (append (reverse acc) [ [k v] c ])  :: first bigger key: splice here
+      else again((tail c), [ (head c) acc ])                              :: still smaller: keep walking
     end
 
   :: search the whole tree: 0 = absent, else [%val v]
@@ -65,31 +71,38 @@ core btree
   bt_splitchild = fn [parent i t] ->
     let pk = (bt_keys parent) in
     let pkids = (bt_kids parent) in
-    let ch = (nth pkids i) in
+    let ch = (nth pkids i) in                    :: the full child (2t-1 keys) being split
     let ck = (bt_keys ch) in
-    let med = (nth ck (sub t 1)) in
+    let med = (nth ck (sub t 1)) in              :: its median key — this one moves UP
     let leaf = (bt_isleaf ch) in
+    :: halves: keys 0..t-2 with the first t kids, and keys t..2t-2 with the rest
+    :: (a leaf's halves keep kids = 0; the median belongs to NEITHER half)
     let left = [ (take (sub t 1) ck) (if (leaf == 0) then 0 else (take t (bt_kids ch))) ] in
     let right = [ (drop t ck) (if (leaf == 0) then 0 else (drop t (bt_kids ch))) ] in
+    :: rebuild the parent: median spliced into its keys at position i, and the
+    :: single child i replaced by the two halves (fanout grows by one)
     [ (append (take i pk) [ med (drop i pk) ])
       (append (take i pkids) [ left [ right (drop +(i) pkids) ] ]) ]
 
   :: insert into a node known not to be full (proactive split of full children)
   bt_insnonfull = fn [nd k v t] ->
     let keys = (bt_keys nd) in
-    if ((bt_haskey keys k) == 0) then [ (bt_replace keys k v) (bt_kids nd) ]
-    else if ((bt_isleaf nd) == 0) then [ (bt_sortins keys k v) 0 ]
+    if ((bt_haskey keys k) == 0) then [ (bt_replace keys k v) (bt_kids nd) ]  :: k already here: overwrite in place
+    else if ((bt_isleaf nd) == 0) then [ (bt_sortins keys k v) 0 ]            :: leaf: splice into the sorted keys
     else
-      let i = (bt_findpos keys k) in
+      let i = (bt_findpos keys k) in            :: which child k belongs under
       let child = (nth (bt_kids nd) i) in
       if ((bt_full child t) == 0) then
+        :: the child is full: split it NOW (the proactive step), which lifts its
+        :: median into THIS node — then re-decide where k goes
         let nd2 = (bt_splitchild nd i t) in
         let med = (head (nth (bt_keys nd2) i)) in
-        if (med == k) then [ (bt_replace (bt_keys nd2) k v) (bt_kids nd2) ]
+        if (med == k) then [ (bt_replace (bt_keys nd2) k v) (bt_kids nd2) ]   :: k IS the lifted median: overwrite here
         else
+          :: k > med goes into the right half (index i+1), else the left (i)
           let j = if ((dh_klt med k) == 0) then +(i) else i in
           [ (bt_keys nd2) (bt_setnth (bt_kids nd2) j (bt_insnonfull (nth (bt_kids nd2) j) k v t)) ]
-      else [ keys (bt_setnth (bt_kids nd) i (bt_insnonfull child k v t)) ]
+      else [ keys (bt_setnth (bt_kids nd) i (bt_insnonfull child k v t)) ]    :: room below: descend directly
 
   :: top-level insert: if the root is full, grow a new root first (the only way a
   :: B-tree's height increases)
@@ -124,13 +137,17 @@ core btree
   bt_borrowleft = fn [nd i] ->
     let keys = (bt_keys nd) in let kids = (bt_kids nd) in
     let child = (nth kids i) in let left = (nth kids (sub i 1)) in
-    let lk = (bt_keys left) in let sep = (nth keys (sub i 1)) in
-    let lastk = (last lk) in
+    let lk = (bt_keys left) in let sep = (nth keys (sub i 1)) in  :: separator between left and child
+    let lastk = (last lk) in                                      :: the donor: left's LARGEST key
+    :: the separator drops DOWN to become child's new smallest key; the donor's
+    :: rightmost subtree (if any) comes with it, prepended to child's kids
     let child2 = [ [ sep (bt_keys child) ]
                    (if ((bt_isleaf left) == 0) then 0
                     else [ (last (bt_kids left)) (bt_kids child) ]) ] in
+    :: the left sibling shrinks by its last key (and, internally, its last kid)
     let left2 = [ (take (sub (len lk) 1) lk)
                   (if ((bt_isleaf left) == 0) then 0 else (take (sub (len (bt_kids left)) 1) (bt_kids left))) ] in
+    :: the donor key rises into the parent as the new separator
     [ (bt_setnth keys (sub i 1) lastk)
       (bt_setnth (bt_setnth kids i child2) (sub i 1) left2) ]
 
@@ -138,8 +155,10 @@ core btree
   bt_borrowright = fn [nd i] ->
     let keys = (bt_keys nd) in let kids = (bt_kids nd) in
     let child = (nth kids i) in let right = (nth kids +(i)) in
-    let rk = (bt_keys right) in let sep = (nth keys i) in
-    let firstk = (head rk) in
+    let rk = (bt_keys right) in let sep = (nth keys i) in  :: separator between child and right
+    let firstk = (head rk) in                              :: the donor: right's SMALLEST key
+    :: mirror image of borrowleft: the separator drops down as child's new
+    :: largest key, and the donor's leftmost subtree is appended to child's kids
     let child2 = [ (append (bt_keys child) [ sep 0 ])
                    (if ((bt_isleaf right) == 0) then 0
                     else (append (bt_kids child) [ (head (bt_kids right)) 0 ])) ] in

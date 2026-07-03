@@ -150,6 +150,58 @@ reaches).
   `latte cache clear` empties it.
 - **Force a rebuild**: `latte eval --rebuild "<expr>"` ignores the cache for that run.
 
+## The profiler: measured engine selection
+
+The adaptive policy decides per program whether to interpret or compile. A structural guess
+(does the AST loop, close over an environment, call a library arm?) covers cold programs; a
+**measurement replaces the guess** as soon as one exists. Every interpreter run above ~0.2 ms is
+timed and recorded in `profile.tsv` beside the cache, keyed by the program text and its library
+scope. A program whose measured interpreter time crosses the threshold (default 1.5 ms; tune
+with `ORPHEUS_PROFILE_NS`) is **compiled automatically before its next run** — through the
+resident `latte anvil serve` daemon when one is up, so the current call never stalls on `rustc`.
+
+Profile a program by hand — both engines run, timings persist, and the report states the
+decision the adaptive engine will now take:
+
+```
+latte profile "(sum (map (fn [x] -> (mul x x)) (range 400)))"
+```
+
+The interpreter measurement subtracts a scope baseline (the cost of linking the standard
+library around a trivial body), so what is priced is the expression, not the scope.
+
+## The scope-core cache
+
+Evaluating an expression means running it inside the full library scope — and re-linking
+~60 libraries used to cost ~33 ms per evaluation before a single Loom step ran, the
+dominant price of `eval` in the GUI console and of every live widget on a Facet page. The
+scope is now compiled ONCE per (library set, generation) to a core with a placeholder
+`__main` arm; each evaluation compiles only its own expression and splices the formula
+into the cached core at `__main`'s leaf (an O(log n) rebuild of a shared-structure tree).
+Measured effect: the per-evaluation linking overhead fell from ~33 ms to ~0.01 ms, the
+`/learn` page renders in ~0.1 s cold instead of ~3 s, and a fresh `Latte.eval` widget
+expression answers in under a millisecond. Any `def`, runtime module compile, or library
+edit bumps the generation and the next evaluation rebuilds the scope once.
+
+The warm NATIVE path got the matching treatment: finding a cached binary requires the
+program's content hash, which used to be computed by regenerating its full Rust source on
+every run (twice, in fact). The (expression, scope, generation) → key mapping is now
+memoized, so a warm native run is a lookup and a process spawn — no codegen at all.
+For one-shot CLI runs the memo also PERSISTS (`nkeys.tsv` beside the cache), keyed by a
+fingerprint of the running executable, so `latte eval` of a warm expression is a stat, a
+lookup, and a spawn (~4 ms end to end).
+
+Two page-level pieces complete the story. The **whole-page render memo**: a Facet render
+is a pure function of (source, parameters, tool registry), so rendered pages are memoized
+outright, keyed by the library generation and the current day (`Date.*` holes stay
+correct); a warm `/learn` or `/tools` render is a map lookup (~1–6 ms). And **detached
+warming**: when the adaptive engine wants a program compiled and no anvil daemon is
+running, it no longer builds synchronously in the serving thread — it spawns a detached
+`latte cache warm` child (guarded against recursion, and disabled entirely under `cargo
+test`, where the "executable" is the test harness) and answers the current call on the
+interpreter. A virgin-cache page render went from ~36 s of back-to-back rustc stalls to
+~2 s. Interrupted builds' intermediates are swept from the cache dir automatically.
+
 ---
 
 ## Testing

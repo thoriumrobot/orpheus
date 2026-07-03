@@ -305,12 +305,6 @@ pub struct MarketResult {
     pub d1: String,
 }
 
-/// Run the gold volatility-regime pipeline: build features in the host (data prep),
-/// train + evaluate the logistic-regression *model* in Latte. No console output.
-pub fn market_eval(iters: u64) -> Result<MarketResult, String> {
-    // Best honest edge: next-day volatility-regime prediction on Bitcoin.
-    market_eval_cfg(iters, 1, true)
-}
 
 /// Configurable evaluation. `horizon` = forward days for the direction label;
 /// `vol_task` = predict next-day volatility regime instead of direction.
@@ -699,7 +693,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn fin_logistic_learns_mean_reversion() {
         // alternating prices make the last return perfectly predictive of the next
         // direction; logistic regression must beat the 50% majority baseline.
@@ -896,7 +889,6 @@ pub struct TradeAdvice {
 
 /// Decode a num.lat signed fixed-point cell to f64.
 fn sf_to_f64(n: &crate::knot::N) -> f64 {
-    use crate::knot::Knot;
     if let Knot::Cell(h, t) = &**n {
         let sign = h.as_atom().and_then(|a| a.to_u128()).unwrap_or(0);
         let mag = t.as_atom().and_then(|a| a.to_u128()).unwrap_or(0) as f64 / 1000.0;
@@ -907,7 +899,6 @@ fn sf_to_f64(n: &crate::knot::N) -> f64 {
 /// Run lib/ta.lat's composite `votes` over the last `win` closes (computed on Loom),
 /// decoding the verdict rows. `closes_x100` are prices in cents.
 pub fn ta_votes(closes_x100: &[i64], win: usize) -> Result<(Vec<TaRow>, i32), String> {
-    use crate::knot::Knot;
     let n = closes_x100.len();
     let w = &closes_x100[n.saturating_sub(win)..];
     // a chronological Latte list of fixed-point prices (cents x10 = x1000 fixed point)
@@ -962,6 +953,18 @@ pub fn news_dir() -> std::path::PathBuf {
 /// one signal the advisor blends with the headline corpus. Returns
 /// (rows newest-first, weighted aggregate, or None when the directory is empty).
 pub fn docs_stream() -> Option<(Vec<DocAdvice>, f64)> {
+    docs_stream_scored(crate::sentiment::score_document)
+}
+
+/// The SAME advice stream scored for the BOND market (hawk/dove axis with the
+/// flight-to-quality inversion — sentiment::score_document_bond). One stream,
+/// one recency discipline, per-market polarity: the unification that lets a
+/// report dropped in news/ advise the crypto desk and the bond desk at once.
+pub fn docs_stream_bond() -> Option<(Vec<DocAdvice>, f64)> {
+    docs_stream_scored(crate::sentiment::score_document_bond)
+}
+
+fn docs_stream_scored(score: fn(&str) -> (f64, Vec<(String, f64)>)) -> Option<(Vec<DocAdvice>, f64)> {
     let dir = news_dir();
     let rd = std::fs::read_dir(&dir).ok()?;
     let mut items: Vec<(i64, String, String, f64, String)> = Vec::new(); // (ord, date, name, pol, evidence)
@@ -992,7 +995,7 @@ pub fn docs_stream() -> Option<(Vec<DocAdvice>, f64)> {
             })
             .unwrap_or_else(|| "1970-01-01".into());
         let ord = crate::dates::date_ordinal(&date).unwrap_or(0);
-        let (pol, sents) = crate::sentiment::score_document(&text);
+        let (pol, sents) = score(&text);
         let evidence = sents
             .iter()
             .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
@@ -1246,17 +1249,7 @@ pub fn conformal_band(rets: &[f64], win: usize, q: f64) -> f64 {
     a[idx.min(a.len() - 1)]
 }
 
-fn vol_model_acc() -> f64 {
-    vol_model_acc_market("btc")
-}
 
-/// The volatility model's out-of-sample accuracy for a market — trained ONCE per
-/// process per market and recorded in the on-disk model registry
-/// (~/.cache/orpheus/models/<market>.txt), so `latte trade --market eth` after a
-/// fetch trains the eth model and remembers it.
-fn vol_model_acc_market(market: &str) -> f64 {
-    vol_model_stats(market).0
-}
 /// (test accuracy %, baseline accuracy %) of the per-market volatility model —
 /// trained once per process per market and recorded honestly in the registry.
 /// The EDGE is test − baseline; a model below its baseline has none, and the
@@ -1301,22 +1294,6 @@ pub fn model_registry_dir() -> std::path::PathBuf {
     }
 }
 
-/// Compute a trade recommendation by fusing TECHNICAL ANALYSIS (lib/ta.lat: five
-/// classical indicators voting on Loom) with NEWS SENTIMENT (lib/sentiment.lat:
-/// Loughran-McDonald scores over real recent headlines, recency-weighted), sized by
-/// fractional Kelly + volatility targeting against the volatility model's regime call.
-/// `kelly_mult` is the fractional-Kelly multiplier (e.g. 0.25). `sentiment_override`
-/// replaces the aggregated news score. `live` refreshes the price series first;
-/// `news_text` (a `--news` file) replaces the bundled headline corpus.
-pub fn trade_advice(
-    account: f64,
-    kelly_mult: f64,
-    sentiment_override: Option<f64>,
-    live: bool,
-    news_text: Option<&str>,
-) -> Result<TradeAdvice, String> {
-    trade_advice_market("btc", account, kelly_mult, sentiment_override, live, news_text)
-}
 
 /// `trade_advice` for ANY fetched market: the same pipeline — TA votes, news
 /// sentiment, HAR-RV-targeted Kelly sizing — runs on that market's series, and
@@ -1520,7 +1497,7 @@ fn flat_atoms(n: &N) -> Vec<u128> {
 /// a binary), falling back to the high-fuel interpreter only if the native build/run declines.
 /// The bond model's full 4000-iteration training pipeline compiles natively, so this keeps the
 /// advisor and dashboard fast and off the interpreter's fuel budget.
-fn eval_native_or_interp(expr: &str, libs: &[&str]) -> Result<N, String> {
+pub(crate) fn eval_native_or_interp(expr: &str, libs: &[&str]) -> Result<N, String> {
     if let Some(n) = crate::rustgen::run_native_noun(expr, libs) {
         return Ok(n);
     }
@@ -1528,39 +1505,44 @@ fn eval_native_or_interp(expr: &str, libs: &[&str]) -> Result<N, String> {
 }
 
 /// `latte trade --market bonds` — the bond-market advisor: the lib/finbond.lat monetary-policy
-/// duration model (trained through the db->tensor bridge) fused with the live monetary regime
-/// from lib/finmoney.lat. Reports the model's out-of-sample edge, the money-supply backdrop, the
-/// model's current directional call, and edge-sized fractional-Kelly position sizing.
-fn trade_advice_bonds(account: f64, kelly_frac: f64) {
+/// duration model (trained through the db->tensor bridge, now with the Cochrane–Piazzesi tent
+/// and the Cieslak–Povala cycle factors) FUSED with bond-scored news sentiment (the hawk/dove
+/// axis — the same engine, document stream, and overrides that advise the crypto desk) and
+/// sized with volatility-aware fractional Kelly. Reports the model's out-of-sample edge, the
+/// money-supply backdrop, the news lean, and the sized call.
+fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<f64>, news_text: Option<&str>) {
     println!("trade - bond-market advisor: the monetary-policy duration model + the money-supply regime\n");
     let libs = latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
     // Train once and read the live regime in a single evaluation:
-    //   [ train_mag test_mag base_mag signal us_m2 cross_avg n_easing ]
-    // accuracies are fixed-point fractions x1000; m2/avg are hundredths of a percent.
+    //   [ train_mag test_mag base_mag signal us_m2 cross_avg n_easing vol_mag ]
+    // accuracies are fixed-point fractions x1000; m2/avg are hundredths of a percent;
+    // vol is the annualized bond-return volatility x1000 (finbond.bvol).
     let expr = "(let r=(breport 0), md=(fm_load 0) in \
         [ (tail (head r)) [ (tail (head (tail r))) [ (tail (head (tail (tail r)))) \
         [ (head (tail (tail (tail r)))) \
         [ (db_field (tail (fm_bank md %us)) 2) [ (fm_avg md) \
-        [ (db_count (fm_easing md (fm_avg md))) 0 ] ] ] ] ] ] ])";
+        [ (db_count (fm_easing md (fm_avg md))) [ (tail (bvol 0)) 0 ] ] ] ] ] ] ] ])";
     let vals = match eval_native_or_interp(expr, &refs) {
         Ok(n) => flat_atoms(&n),
         Err(e) => { eprintln!("  bond model error: {}", e); return; }
     };
-    if vals.len() < 7 {
+    if vals.len() < 8 {
         eprintln!("  bond model produced an unexpected result");
         return;
     }
     let (train, test, base) = (vals[0] as f64 / 10.0, vals[1] as f64 / 10.0, vals[2] as f64 / 10.0);
     let signal = vals[3]; // 1 = model expects bond prices UP next month (bullish), 0 = down
     let (us_m2, avg, neasing) = (vals[4] as f64 / 100.0, vals[5] as f64 / 100.0, vals[6]);
+    let ann_vol = vals[7] as f64 / 1000.0; // annualized %, from the model's own return series
     let edge = test - base;
     let has_edge = test > base;
 
     println!("  market            : US Treasuries (10y constant maturity)");
     println!("  -- model edge (lib/finbond.lat, trained through the db->tensor bridge) --");
     println!("    features          : level, slope, curvature, yield-momentum, M2-growth,");
-    println!("                        carry+roll-down, forward-rate momentum, money-supply acceleration");
+    println!("                        carry+roll-down, forward-rate momentum, M2 acceleration,");
+    println!("                        the Cochrane-Piazzesi forward-rate tent, the Cieslak-Povala cycle");
     if has_edge {
         println!("    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  (+{:.1} pts — a real edge)", test, base, edge);
     } else {
@@ -1572,27 +1554,70 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64) {
     println!("    cross-bank average: {:.2}%   ({} of 23 central banks easing above average)", avg, neasing);
     println!("    rising money supply is historically bullish for bond prices (yields fall)");
 
-    // Edge-sized fractional-Kelly on the test win probability, taken only when the model
-    // has a real edge; direction is the model's live out-of-sample call on the latest month.
+    // -- NEWS, scored FOR BONDS: dovish = bullish, risk-off = a Treasury bid ----------
+    // The same sentiment engine and the same news/ document stream the crypto advisor
+    // reads — through the bond polarity (hawk/dove fused with inverted LM). A --news
+    // file scores directly; --sentiment overrides the aggregate outright.
+    let direct = news_text.map(|t| crate::sentiment::score_document_bond(t).0);
+    let docs_pair = docs_stream_bond();
+    let stream = docs_pair.as_ref().map(|(_, agg)| *agg);
+    let blended = match (direct, stream) {
+        (Some(d), Some(s)) => 0.6 * d + 0.4 * s, // fresh text outweighs the standing stream
+        (Some(d), None) => d,
+        (None, Some(s)) => s,
+        (None, None) => 0.0,
+    };
+    let used_sentiment = sentiment_override.unwrap_or(blended);
+    println!("  -- news sentiment, scored for BONDS (hawk/dove axis; risk-off = Treasury bid) --");
+    if let Some((rows, agg)) = &docs_pair {
+        println!("    news/ documents   : {} scored, recency-weighted aggregate {:+.2}", rows.len(), agg);
+        for r in rows.iter().take(3) {
+            println!("      {:>10}  {:+.2}  {}", r.date, r.polarity, r.name);
+        }
+    } else {
+        println!("    news/ documents   : none (drop reports in news/ to feed the advisor)");
+    }
+    if let Some(d) = direct {
+        println!("    --news document   : {:+.2}", d);
+    }
+    println!("    sentiment used    : {:+.2}{}", used_sentiment,
+        if sentiment_override.is_some() { "  (overridden via --sentiment)" } else { "" });
+
+    // -- the COMBINED lean: the trained model carries 60%, bond-scored news 40% -------
+    let model_dir = if signal == 1 { 1.0 } else { -1.0 };
+    let combined = 0.6 * model_dir + 0.4 * used_sentiment;
+    let long = combined > 0.1;
+    let bearish = combined < -0.1;
+
+    // Edge-sized fractional Kelly on the test win probability (as before), then
+    // VOLATILITY TARGETING: scale so the position's expected annualized vol spends
+    // a ~6% duration-sleeve budget — the same discipline the crypto advisor applies
+    // through HAR-RV, with the vol estimate coming from the model's own return
+    // series (finbond.bvol). Capped at 3x so a placid series cannot over-lever.
     let p = test / 100.0;
     let kelly_full = (2.0 * p - 1.0).max(0.0);
-    let kelly_used = if has_edge { kelly_full * kelly_frac } else { 0.0 };
-    let lean = if !has_edge { "FLAT (no reliable edge)" }
-               else if signal == 1 { "LONG duration — model expects bond prices up (yields down)" }
-               else { "SHORT/underweight duration — model expects bond prices down" };
+    let target_vol = 6.0; // annualized %, of the account, for the duration sleeve
+    let vol_scale = if ann_vol > 0.0 { (target_vol / ann_vol).min(3.0) } else { 1.0 };
+    let kelly_used = if has_edge && (long || bearish) { kelly_full * kelly_frac * vol_scale } else { 0.0 };
+    let lean = if !has_edge { "FLAT (no reliable edge)".to_string() }
+               else if !(long || bearish) { format!("FLAT — model and news offset (combined {:+.2})", combined) }
+               else if long { format!("LONG duration (combined {:+.2}: model {}, news {:+.2})", combined, if signal == 1 { "up" } else { "down" }, used_sentiment) }
+               else { format!("SHORT/underweight duration (combined {:+.2})", combined) };
     println!("  -- the call --");
     println!("    model lean        : {}", lean);
-    println!("    Kelly (binary)    : {:+.3}   applied {:.3} (fractional)", kelly_full, kelly_used);
+    println!("    Kelly (binary)    : {:+.3}   x{:.2} fractional  x{:.2} vol-target ({:.0}% budget / {:.1}% realized)",
+        kelly_full, kelly_frac, vol_scale, target_vol, ann_vol);
     if has_edge && kelly_used > 0.0 {
         println!("\n  >> ADVICE: tilt duration {} — notional ~ ${:.0} of a ${:.0} account",
-            if signal == 1 { "LONG" } else { "SHORT" }, account * kelly_used, account);
+            if long { "LONG" } else { "SHORT" }, account * kelly_used, account);
     } else {
         println!("\n  >> ADVICE: stand aside on duration — no reliable edge right now");
     }
-    println!("\n  Rationale: a logistic model over fixed-income factors (yield-curve level/slope/");
-    println!("  curvature, momentum, carry+roll-down, forward-rate momentum) and the monetary");
-    println!("  regime (money-supply growth & acceleration), trained and standardized straight");
-    println!("  from the database via the db->tensor bridge. Research demo, NOT financial advice.");
+    println!("\n  Rationale: a logistic model over the settled bond-return-forecasting factors");
+    println!("  (curve level/slope/curvature, momentum, carry+roll-down, forward-rate momentum,");
+    println!("  the Cochrane-Piazzesi tent, the Cieslak-Povala cycle) and the monetary regime");
+    println!("  (money-supply growth & acceleration), fused with news scored on the hawk/dove");
+    println!("  axis, sized by volatility-aware fractional Kelly. Research demo, NOT financial advice.");
 }
 
 pub fn cmd_trade(args: &[String]) {
@@ -1625,7 +1650,7 @@ pub fn cmd_trade(args: &[String]) {
     // regime and a duration model. Route Treasuries to the dedicated bond advisor.
     if matches!(market.as_str(),
         "bond" | "bonds" | "treasury" | "treasuries" | "ust" | "10y" | "tnote" | "tlt" | "rates" | "duration") {
-        trade_advice_bonds(account, kelly);
+        trade_advice_bonds(account, kelly, sentiment, news_text.as_deref());
         return;
     }
     println!("trade - advisor: technical analysis + news sentiment + the volatility model\n");
@@ -1778,7 +1803,7 @@ pub fn cmd_fetch(args: &[String]) {
                 // strip nothing (plain text/markdown expected), date-prefix the
                 // filename so the stream's recency weighting can see it
                 let url = &args[i + 1];
-                i += 1;
+                // (no index bump: this branch returns unconditionally below)
                 let out = std::process::Command::new("curl")
                     .args(["-sSL", "--max-time", "60", url])
                     .output();
@@ -1878,10 +1903,13 @@ pub fn cmd_sentiment(args: &[String]) {
     if doc_mode || sent_count > 1 {
         // ---- DOCUMENT MODE: per-sentence evidence + confidence-weighted aggregate ----
         let (doc, sents) = crate::sentiment::score_document(&text);
+        let (bond_doc, _) = crate::sentiment::score_document_bond(&text);
         let label = if doc > 0.15 { "POSITIVE" } else if doc < -0.15 { "NEGATIVE" } else { "neutral" };
+        let blabel = if bond_doc > 0.15 { "BULLISH for bonds" } else if bond_doc < -0.15 { "BEARISH for bonds" } else { "neutral for bonds" };
         println!("sentiment - document scoring (trained classifier, sentence-level)\n");
         println!("  sentences : {}", sents.len());
-        println!("  document  : {:+.3}  ->  {}   (confidence-weighted sentence aggregate)\n", doc, label);
+        println!("  document  : {:+.3}  ->  {}   (confidence-weighted sentence aggregate)", doc, label);
+        println!("  bonds     : {:+.3}  ->  {}   (hawk/dove axis; risk-off = Treasury bid)\n", bond_doc, blabel);
         let mut ranked: Vec<&(String, f64)> = sents.iter().collect();
         ranked.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
         println!("  strongest evidence:");
@@ -1900,12 +1928,16 @@ pub fn cmd_sentiment(args: &[String]) {
     let lex = crate::sentiment::polarity(&text);
     let model = crate::sentiment::model_polarity(&text);
     let fused = crate::sentiment::polarity_fused(&text);
+    let (dove, hawk) = crate::sentiment::rate_counts(&text);
+    let bond = crate::sentiment::bond_polarity(&text);
     let label = if fused > 0.15 { "BULLISH" } else if fused < -0.15 { "BEARISH" } else { "neutral" };
+    let blabel = if bond > 0.15 { "BULLISH for bonds" } else if bond < -0.15 { "BEARISH for bonds" } else { "neutral for bonds" };
     println!("sentiment - financial text scoring\n");
     println!("  text      : {}", text);
     println!("  lexicon   : {:+.3}   (Loughran-McDonald word counts: {} pos / {} neg, ratio on Loom)", lex, pos, neg);
     println!("  model     : {:+.3}   (trained classifier: unigram+bigram logistic regression)", model);
     println!("  fused     : {:+.3}   (0.65 model + 0.35 lexicon)  ->  {}", fused, label);
+    println!("  bonds     : {:+.3}   (hawk/dove axis: {} dovish / {} hawkish; risk-off inverted)  ->  {}", bond, dove, hawk, blabel);
     println!("\n  Multi-sentence input (or --doc/--file) switches to document mode with");
     println!("  per-sentence evidence. The advisor (`latte trade`) uses the fused score.");
 }

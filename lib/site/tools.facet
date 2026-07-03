@@ -33,7 +33,9 @@
 <p class="sub">Every module the environment exposes, each in its own frame — every tool a live, interactive interface.</p>
 
 <p class="lede">A <b>Facet</b> page is pure markup whose holes call environment tools with the Oberon
-convention <code>Module.procedure(args)</code>. Every tool below is a <b>live widget</b>: type in a
+convention <code>Module.procedure(args)</code>. For guided, tutorial-style versions of these
+tools — algorithms animated a step at a time, the language taught in live boxes — see
+<a href="/learn"><b>the Learn page</b></a>. Every tool below is a <b>live widget</b>: type in a
 field and the result updates as you go, re-evaluated on the server through <code>/api/eval</code>
 (debounced and cached on both sides). With JavaScript off, each widget still shows its
 server-rendered default — so the page reads correctly either way and stays byte-for-byte
@@ -285,6 +287,35 @@ deterministic per request.</p>
     <div class="tool">
       <div class="lbl"><code>Sent.counts(text)</code> — how many positive and negative words it found</div>
       {{ Live.box("Sent.counts(text)", [["text", "good news but also some bad risk"]]) }}
+    </div>
+    <div class="w">
+      <div class="lbl"><code>Sent.bond(text)</code> — the same engine read for BOND prices: the
+      hawkish/dovish policy axis, with risk-off scored as a Treasury bid. "Hot inflation forces
+      aggressive hikes" is bullish for nothing — except it is bearish for bonds specifically,
+      while a plain disaster headline is a bond bid.</div>
+      {{ Live.box("Sent.bond(text)", [["text", "hot inflation forces aggressive hikes"]]) }}
+    </div>
+  </div>
+</div>
+
+<!-- ===================== AlgoViz ===================== -->
+<div class="panel">
+  <div class="t">AlgoViz — algorithms, played <span class="sig">frame · steps</span></div>
+  <div class="b">
+    <p class="feat">The <code>algoviz</code> library instruments classic algorithms: every
+    comparison, swap, probe, and visit appends a frame to a trace, and a frame renders through
+    the same <code>gfx</code> scene pipeline <code>latte gfx</code> draws. Drag <code>k</code>
+    and the algorithm runs, step by step, on Loom. The <a href="/learn">Learn page</a> builds
+    full tutorials around these.</p>
+    <div class="w">
+      <div class="lbl"><code>AlgoViz.frame(algo, xs, k, t)</code> — step k of bubble, insert,
+      binsearch, or bfs over the list xs (t is the binsearch target)</div>
+      {{ Live.view("AlgoViz.frame(algo, xs, k, t)", [["algo", "bubble", "bubble", "insert", "binsearch", "bfs"], ["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "40", "1"], ["t", "8", "~", "0", "12", "1"]]) }}
+    </div>
+    <div class="w">
+      <div class="lbl"><code>AlgoViz.steps(algo, xs, t)</code> — how many frames the trace has
+      (the slider's true range)</div>
+      {{ Live.box("AlgoViz.steps(algo, xs, t)", [["algo", "bubble", "bubble", "insert", "binsearch", "bfs"], ["xs", "5 2 8 1 9 3"], ["t", "8"]]) }}
     </div>
   </div>
 </div>
