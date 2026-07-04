@@ -24,11 +24,13 @@ core merkle
   :: combine one level into the next: pair adjacent nodes, an odd one carries up
   mk_pairup = fn [nodes] ->
     loop with [c = nodes, acc = 0] :
-      if (c == 0) then (reverse acc)
-      else if ((tail c) == 0) then (reverse [ (head c) acc ])
+      if (c == 0) then (reverse acc)                       :: level fully paired
+      else if ((tail c) == 0) then (reverse [ (head c) acc ])  :: ODD node out: carried up unpaired
       else
         let l = (head c) in
         let r = (head (tail c)) in
+        :: the parent's hash commits to BOTH children — change any leaf and the
+        :: change propagates hash-by-hash to the root (that is the whole trick)
         again((tail (tail c)),
               [ [ (mk_comb (mk_hash l) (mk_hash r)) [ %node [ l r ] ] ] acc ])
     end
@@ -39,8 +41,8 @@ core merkle
     if (kvs == 0) then [ 0 [ %leaf [ %nil 0 ] ] ]
     else
       loop with [level = (map (fn [kv] -> (mk_leaf kv)) kvs)] :
-        if ((tail level) == 0) then (head level)
-        else again((mk_pairup level))
+        if ((tail level) == 0) then (head level)   :: one node left: the ROOT
+        else again((mk_pairup level))              :: halve the level; O(log n) rounds
       end
   mk_root = fn [tree] -> (mk_hash tree)
 

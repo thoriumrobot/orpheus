@@ -167,20 +167,44 @@ eval (foldl (fn [a b] -> (add a b)) 0 [1 2 3 4 0])
 
 ::  → [1 [4 [9 [16 0]]]] · [3 [4 0]] · 10
 
-One caution: a `let`-bound gate can **not** call itself — the binding is not in scope
-inside its own body. Recursion lives in three places instead: the `loop`/`again`
-construct (next section), **module arms** (§14 — arms may call themselves and each
-other), and a session **`def`** — which you can make right here. Middle-click these
-two lines in order:
+Gates are fully first-class — including **recursion**. A `let`-bound gate may call
+itself (the binding is visible inside its own body), and the same gate can be passed
+to `map` mid-recursion:
+
+eval let f = fn [n] -> if (lt n 2) then 1 else (mul n (f (dec n))) in (f 5)
+
+eval let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)
+
+::  → 120 · 21
+
+A **computed gate is callable** by wrapping it in parentheses — an immediate lambda,
+a composition, a gate pulled out of a list:
+
+eval ((fn [x] -> (mul x x)) 7)
+
+eval ((compose (fn [x] -> (mul x x)) (fn [x] -> (add x 1))) 4)
+
+::  → 49 · 25 — `compose`, `flip`, and `applyn` live in the standard library.
+
+And **module arms are values too**: an arm named where a gate is expected
+eta-expands to one, so the aggregation idioms read the way you'd hope:
+
+eval (foldl add 0 [1 2 3 4 0])
+
+eval (map dec [5 6 7 0])
+
+eval ((flip sub) 3 10)
+
+::  → 10 · [4 [5 [6 0]]] · 7
+
+For a definition that outlives one expression, `def` makes a session function —
+middle-click these two lines in order:
 
 def fact [n] = loop with [i = n, acc = 1] : if (i == 0) then acc else again((dec i), (mul acc i)) end
 
 eval (fact 5)
 
 ::  → 120 — and `fact` now works from every console, page widget, and text in this session.
-
-(The interaction-net engine is the genuine exception: `latte net` compiles
-self-recursive `let` gates to lazily-unrolled Ref nodes.)
 
 ## 10 · Iterating: `loop` / `again`
 
@@ -206,7 +230,7 @@ eval case %move of %move -> 111 ; %stop -> 222 ; _ -> 0 end
 `import std` is automatic under `eval`. The headline arms: arithmetic
 (`dec add sub mul div mod pow`), bitwise (`shl shr band bor bxor popcount`),
 comparison/logic, lists (`len reverse append nth member range take drop last zip
-enumerate`), higher-order (`map filter foldl foldr scanl any all count`), aggregates
+enumerate`), higher-order (`map filter foldl foldr scanl any all count compose flip applyn`), aggregates
 (`sum maximum minimum argmax`), stable merge `sort`/`sortby`, association lists
 (`aget aput ahas adel`), and cords (`cat catall bytelen bytes frombytes numtext`).
 
@@ -325,8 +349,10 @@ eval (av_steps %bubble [5 2 8 1 9 3 0] 0)
 - **Lists end in `0`**: `[1 2 3]` is a pair-of-pairs, not a list.
 - **Cords are atoms**: join text with `cat`, never `add`.
 - **Calls are parenthesized, function first**, arguments space-separated.
-- **Arms and `def`s recurse; bare `let` gates don't** — use `loop`/`again`, a module
-  arm, or a `def`.
+- **Everything recurses**: `let`-bound gates, module arms, and `def`s may all call
+  themselves; `loop`/`again` remains the iteration workhorse.
+- **Computed gates call with an extra pair of parens** — `((compose f g) x)` — and
+  **arms eta-expand to gates**: `(foldl add 0 xs)` just works.
 - **`again` only inside a `loop`, in tail position**; `if` needs both branches.
 - A `def` lasts the session; **Compile + Store** makes it permanent.
 

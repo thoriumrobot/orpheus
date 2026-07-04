@@ -40,8 +40,11 @@ core raft
   :: Returns [%ok newLog] or [%reject 0].
   raft_append = fn [log prevIdx prevTerm entries] ->
     if (or (prevIdx == 0) ((raft_logterm log prevIdx) == prevTerm))
+    :: MATCH: keep exactly the prefix up to prevIdx and graft the leader's
+    :: entries — any conflicting suffix (stale terms) is discarded wholesale,
+    :: which is what keeps every follower's log a prefix of the leader's
     then [ %ok (append (take prevIdx log) entries) ]
-    else [ %reject 0 ]
+    else [ %reject 0 ]   :: MISMATCH: the leader must retry with an earlier prevIdx
 
   :: COMMIT RULE: given each server's highest replicated index (matchIndex,
   :: including the leader), the commit index is the highest entry stored on a
@@ -50,9 +53,9 @@ core raft
   raft_commit = fn [matchIdx n] ->
     let maj = (raft_majority n) in
     loop with [idx = (maximum matchIdx)] :
-      if (idx == 0) then 0
-      else if ((gte (count (fn [m] -> (gte m idx)) matchIdx) maj) == 0) then idx
-      else again((dec idx))
+      if (idx == 0) then 0                                                      :: nothing replicated anywhere
+      else if ((gte (count (fn [m] -> (gte m idx)) matchIdx) maj) == 0) then idx  :: >= maj servers hold idx: committed
+      else again((dec idx))                                                     :: walk down until a majority agrees
     end
 
   :: a ready-made 3-entry log [term command] (terms 1,1,2) so examples run as

@@ -87,6 +87,52 @@ core algoviz
         again(+(i), (head walk), (tail walk))
     end
 
+  :: ---- QUICKSORT (Lomuto), instrumented -------------------------------------
+  :: recursion over subranges [lo, hi]; each comparison against the pivot (the
+  :: range's LAST element) is a frame, as is the final pivot swap. `done` in a
+  :: frame marks nothing (quicksort finalizes non-contiguously), so frames carry
+  :: done = n (no green region) until the closing all-green frame.
+  :: One Lomuto partition of st over [lo, hi]: returns [ finalPivotIdx [ state trace ] ]
+  av_qpart = fn [st lo hi n acc] ->
+    let piv = (nth st hi) in
+    loop with [j = lo, i = lo, s = st, a2 = acc] :
+      if (j == hi)
+      then
+        let s2 = (av_swap s i hi) in
+        [ i [ s2 [ [ s2 [ i [ hi [ 1 [ n 0 ] ] ] ] ] a2 ] ] ]   :: pivot lands at i (record the swap)
+      else
+        let x = (nth s j) in
+        if (lte x piv)
+        then
+          let s2 = (av_swap s i j) in
+          again(+(j), +(i), s2, [ [ s2 [ i [ j [ 1 [ n 0 ] ] ] ] ] a2 ])   :: x <= pivot: grow the small side
+        else
+          again(+(j), i, s, [ [ s [ j [ hi [ 0 [ n 0 ] ] ] ] ] a2 ])       :: x > pivot: compare only (vs the pivot cell)
+    end
+  :: an explicit RANGE STACK drives the recursion (a worklist of [lo hi] pairs),
+  :: so the trace-building loop stays tail-recursive like everything else here
+  av_quicktrace = fn [xs] ->
+    let n = (len xs) in
+    if (lt n 2) then [ [ xs [ 0 [ 0 [ 0 [ 0 0 ] ] ] ] ] 0 ]
+    else
+    loop with [stack = [ [ 0 (sub n 1) ] 0 ], st = xs, acc = 0] :
+      if (stack == 0) then (reverse [ [ st [ 0 [ 0 [ 0 [ 0 0 ] ] ] ] ] acc ])   :: worklist empty: all-green frame
+      else
+        let lo = (head (head stack)) in
+        let hi = (tail (head stack)) in
+        let rest = (tail stack) in
+        if (gte lo hi) then again(rest, st, acc)                                :: 0/1-element range: nothing to do
+        else
+          let pr = (av_qpart st lo hi n acc) in
+          let p = (head pr) in
+          let s2 = (head (tail pr)) in
+          let a2 = (tail (tail pr)) in
+          :: push the two subranges around the settled pivot
+          let push1 = if (gt p 0) then [ [ lo (dec p) ] rest ] else rest in
+          let push2 = [ [ +(p) hi ] push1 ] in
+          again(push2, s2, a2)
+    end
+
   :: ---- BINARY SEARCH, instrumented ------------------------------------------
   :: probes the SORTED list for t; each frame is one probe [ lo mid hi found ].
   av_bintrace = fn [xs t] ->
@@ -243,6 +289,7 @@ core algoviz
     case algo of
       %bubble    -> (av_bubtrace xs) ;
       %insert    -> (av_instrace xs) ;
+      %quick     -> (av_quicktrace xs) ;
       %binsearch -> (av_bintrace xs t) ;
       %bfs       -> (av_bfstrace 0) ;
       _          -> 0
@@ -262,6 +309,8 @@ core algoviz
         %bubble    -> (av_bars (head f) (head (tail f)) (head (tail (tail f)))
                                (head (tail (tail (tail f)))) (head (tail (tail (tail (tail f))))) cap) ;
         %insert    -> (av_bars (head f) (head (tail f)) (head (tail (tail f)))
+                               (head (tail (tail (tail f)))) (head (tail (tail (tail (tail f))))) cap) ;
+        %quick     -> (av_bars (head f) (head (tail f)) (head (tail (tail f)))
                                (head (tail (tail (tail f)))) (head (tail (tail (tail (tail f))))) cap) ;
         %binsearch -> (av_probe (sort xs) (head f) (head (tail f)) (head (tail (tail f)))
                                (head (tail (tail (tail f)))) t) ;

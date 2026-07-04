@@ -50,6 +50,13 @@ result. Nothing here is a recording — drag a slider and the algorithm genuinel
     </div>
 
     <div class="try">
+      <div class="cap"><b>Quicksort.</b> The last element of each range is the pivot; every
+      comparison against it is a step, and the pivot's final swap (red) settles it forever.
+      Note the non-contiguous progress — quicksort finishes ranges, not ends.</div>
+      {{ Live.view("AlgoViz.frame(\"quick\", xs, k, 0)", [["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "40", "1"]]) }}
+    </div>
+
+    <div class="try">
       <div class="cap"><b>Binary search.</b> The list is sorted first; each probe (yellow) halves
       the live window (blue) until the target is found (green) or the window closes. Change
       <code>t</code> and watch the probes route differently — at most ⌈log₂ n⌉ + 1 of them.</div>

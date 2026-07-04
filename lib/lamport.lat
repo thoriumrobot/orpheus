@@ -16,9 +16,11 @@ core lamport
   :: on receive: advance past the message's timestamp, then tick
   lam_recv = fn [c ts] -> +((max c ts))
 
-  :: a stamped event is [ts node]; total order compares ts, then node
+  :: a stamped event is [ts node]; total order compares ts, then node — the
+  :: node id breaks timestamp TIES deterministically, which is what turns
+  :: Lamport's partial order into the total order replicas can all agree on
   lam_lt = fn [a b] ->
-    if ((head a) == (head b)) then (lt (tail a) (tail b))
+    if ((head a) == (head b)) then (lt (tail a) (tail b))   :: tie: lower node id first
     else (lt (head a) (head b))
 
   :: insert a stamped event into a totally-ordered log (insertion sort step)

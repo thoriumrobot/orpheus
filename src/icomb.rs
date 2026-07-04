@@ -1936,7 +1936,7 @@ fn to_r(a: &crate::latte::Ast, param: &str, fname: &str) -> Result<R, String> {
     }
 }
 
-fn mentions(a: &crate::latte::Ast, name: &str) -> bool {
+pub(crate) fn mentions(a: &crate::latte::Ast, name: &str) -> bool {
     use crate::latte::Ast;
     match a {
         Ast::Call(n, args) => n == name || args.iter().any(|x| mentions(x, name)),
@@ -2109,6 +2109,16 @@ fn glower(a: &crate::latte::Ast, env: &mut GEnv, scope: &mut GScope) -> Result<R
     let k = scope.params.len();
     match a {
         Ast::Lit(n) => Ok(R::Num(*n)),
+        // tags and short strings are cords — atoms — and an atom that fits the
+        // net's native word is just a number to it: `case` chains and tag
+        // comparisons work unchanged
+        Ast::Tag(t) | Ast::Text(t) => {
+            let a = crate::knot::cord(t);
+            match a.as_atom().and_then(|x| x.to_u128()) {
+                Some(n) => Ok(R::Num(n)),
+                None => Err("net: cord too long for the net's native word".into()),
+            }
+        }
         Ast::Nil => Ok(R::Num(0)),
         Ast::Var(x) => {
             if let Some((_, r)) = scope.lets.iter().rev().find(|(n, _)| n == x) {
@@ -2292,8 +2302,190 @@ pub fn run_general(src: &str) -> Result<(u128, usize), String> {
 /// The general compiler with an explicit number representation: `native = true`
 /// uses Lit agents + the one-interaction ALU (the HVM2 idea); `false` uses pure
 /// Peano chains and generated recursive `div`/`mod` (the pedagogical mode).
+// ---------------------------------------------------------------------------
+// NET PRE-NORMALIZATION: keep the net compiler abreast of the general one.
+//
+// glower's world is first-order-plus-defs: a let-bound gate becomes a net
+// function (a Ref), and calls apply it. Two general-compiler constructs fall
+// outside that shape and are normalized away here, at the AST level, before
+// glowering:
+//
+//  · `case` lowers to an if/== chain (tags are atoms; short atoms are native
+//    net numbers), so dispatch costs what comparisons cost.
+//  · calls to non-recursive let-bound gates whose bodies contain a NESTED gate
+//    (higher-order results — currying, compose) are β-REDUCED at compile time
+//    with capture-avoiding substitution. What remains after inlining is first-
+//    order and glower's def mechanism handles it — including recursion, which
+//    is deliberately NOT inlined (Ref unrolling owns it).
+// ---------------------------------------------------------------------------
+
+fn subst(a: &crate::latte::Ast, name: &str, v: &crate::latte::Ast, ctr: &mut usize) -> crate::latte::Ast {
+    use crate::latte::Ast as A;
+    match a {
+        A::Var(n) if n == name => v.clone(),
+        A::Var(_) | A::Lit(_) | A::Nil | A::Tag(_) | A::Text(_) => a.clone(),
+        A::Inc(e) => A::Inc(Box::new(subst(e, name, v, ctr))),
+        A::Head(e) => A::Head(Box::new(subst(e, name, v, ctr))),
+        A::Tail(e) => A::Tail(Box::new(subst(e, name, v, ctr))),
+        A::IsCell(e) => A::IsCell(Box::new(subst(e, name, v, ctr))),
+        A::Fast(n, e) => A::Fast(n.clone(), Box::new(subst(e, name, v, ctr))),
+        A::Eq(x, y) => A::Eq(Box::new(subst(x, name, v, ctr)), Box::new(subst(y, name, v, ctr))),
+        A::If(c, t, e) => A::If(
+            Box::new(subst(c, name, v, ctr)),
+            Box::new(subst(t, name, v, ctr)),
+            Box::new(subst(e, name, v, ctr)),
+        ),
+        A::Tuple(es) => A::Tuple(es.iter().map(|e| subst(e, name, v, ctr)).collect()),
+        A::Again(es) => A::Again(es.iter().map(|e| subst(e, name, v, ctr)).collect()),
+        A::Call(f, es) => {
+            let es2: Vec<A> = es.iter().map(|e| subst(e, name, v, ctr)).collect();
+            if f == name {
+                // the substituted value is CALLED by this name: rebind it under a
+                // fresh let so the ordinary let-bound-gate machinery (defs, or
+                // another round of inlining for higher-order bodies) applies
+                *ctr += 1;
+                let fresh = format!("__inl{}", ctr);
+                A::Let(fresh.clone(), Box::new(v.clone()), Box::new(A::Call(fresh, es2)))
+            } else {
+                A::Call(f.clone(), es2)
+            }
+        }
+        A::Case(sc, arms) => A::Case(
+            Box::new(subst(sc, name, v, ctr)),
+            arms.iter().map(|(p, b)| (p.clone(), subst(b, name, v, ctr))).collect(),
+        ),
+        A::Let(n, val, b) => {
+            let val2 = subst(val, name, v, ctr);
+            if n == name {
+                A::Let(n.clone(), Box::new(val2), b.clone()) // shadowed below
+            } else {
+                A::Let(n.clone(), Box::new(val2), Box::new(subst(b, name, v, ctr)))
+            }
+        }
+        A::Gate(ps, b) => {
+            if ps.iter().any(|p| p == name) {
+                a.clone() // shadowed by a parameter
+            } else {
+                // capture avoidance: rename any binder that appears free in v
+                let mut ps2 = ps.clone();
+                let mut b2 = (**b).clone();
+                for i in 0..ps2.len() {
+                    if mentions(v, &ps2[i]) {
+                        *ctr += 1;
+                        let fresh = format!("{}__r{}", ps2[i], ctr);
+                        b2 = subst(&b2, &ps2[i].clone(), &A::Var(fresh.clone()), ctr);
+                        ps2[i] = fresh;
+                    }
+                }
+                A::Gate(ps2, Box::new(subst(&b2, name, v, ctr)))
+            }
+        }
+        A::Loop(binds, b) => A::Loop(
+            binds.iter().map(|(n, e)| (n.clone(), subst(e, name, v, ctr))).collect(),
+            Box::new(if binds.iter().any(|(n, _)| n == name) { (**b).clone() } else { subst(b, name, v, ctr) }),
+        ),
+    }
+}
+
+fn contains_gate(a: &crate::latte::Ast) -> bool {
+    use crate::latte::Ast as A;
+    match a {
+        A::Gate(..) => true,
+        A::Inc(e) | A::Head(e) | A::Tail(e) | A::IsCell(e) | A::Fast(_, e) => contains_gate(e),
+        A::Eq(x, y) => contains_gate(x) || contains_gate(y),
+        A::If(c, t, e) => contains_gate(c) || contains_gate(t) || contains_gate(e),
+        A::Tuple(es) | A::Again(es) | A::Call(_, es) => es.iter().any(contains_gate),
+        A::Case(sc, arms) => contains_gate(sc) || arms.iter().any(|(_, b)| contains_gate(b)),
+        A::Let(_, v, b) => contains_gate(v) || contains_gate(b),
+        A::Loop(binds, b) => binds.iter().any(|(_, e)| contains_gate(e)) || contains_gate(b),
+        _ => false,
+    }
+}
+
+fn net_prenorm(
+    a: &crate::latte::Ast,
+    gates: &mut Vec<(String, Vec<String>, crate::latte::Ast)>,
+    ctr: &mut usize,
+    depth: usize,
+) -> crate::latte::Ast {
+    use crate::latte::Ast as A;
+    if depth > 64 {
+        return a.clone(); // inlining fuel exhausted: glower reports what remains
+    }
+    match a {
+        A::Case(sc, arms) => {
+            // case -> if/== chain (right to left, default last)
+            let sc2 = net_prenorm(sc, gates, ctr, depth);
+            let mut acc = arms
+                .iter()
+                .find(|(p, _)| p.is_none())
+                .map(|(_, d)| net_prenorm(d, gates, ctr, depth))
+                .unwrap_or(A::Lit(0));
+            for (pat, body) in arms.iter().rev() {
+                if let Some(tag) = pat {
+                    acc = A::If(
+                        Box::new(A::Eq(Box::new(sc2.clone()), Box::new(A::Tag(tag.clone())))),
+                        Box::new(net_prenorm(body, gates, ctr, depth)),
+                        Box::new(acc),
+                    );
+                }
+            }
+            acc
+        }
+        A::Let(n, v, b) => {
+            let v2 = net_prenorm(v, gates, ctr, depth);
+            if let A::Gate(ps, gb) = &v2 {
+                let recursive = mentions(gb, n) && !ps.iter().any(|p| p == n);
+                if !recursive && contains_gate(gb) {
+                    // a HIGHER-ORDER gate: record it for β-reduction at call sites
+                    gates.push((n.clone(), ps.clone(), (**gb).clone()));
+                    let b2 = net_prenorm(b, gates, ctr, depth);
+                    gates.pop();
+                    return b2; // fully inlined away
+                }
+            }
+            A::Let(n.clone(), Box::new(v2), Box::new(net_prenorm(b, gates, ctr, depth)))
+        }
+        A::Call(f, args) => {
+            let args2: Vec<A> = args.iter().map(|x| net_prenorm(x, gates, ctr, depth)).collect();
+            if let Some((_, ps, gb)) = gates.iter().rev().find(|(n, _, _)| n == f).cloned() {
+                if ps.len() == args2.len() {
+                    let mut body = gb;
+                    for (p, arg) in ps.iter().zip(args2.iter()) {
+                        body = subst(&body, p, arg, ctr);
+                    }
+                    return net_prenorm(&body, gates, ctr, depth + 1);
+                }
+            }
+            A::Call(f.clone(), args2)
+        }
+        A::If(c, t, e) => A::If(
+            Box::new(net_prenorm(c, gates, ctr, depth)),
+            Box::new(net_prenorm(t, gates, ctr, depth)),
+            Box::new(net_prenorm(e, gates, ctr, depth)),
+        ),
+        A::Eq(x, y) => A::Eq(Box::new(net_prenorm(x, gates, ctr, depth)), Box::new(net_prenorm(y, gates, ctr, depth))),
+        A::Inc(e) => A::Inc(Box::new(net_prenorm(e, gates, ctr, depth))),
+        A::Head(e) => A::Head(Box::new(net_prenorm(e, gates, ctr, depth))),
+        A::Tail(e) => A::Tail(Box::new(net_prenorm(e, gates, ctr, depth))),
+        A::IsCell(e) => A::IsCell(Box::new(net_prenorm(e, gates, ctr, depth))),
+        A::Fast(n, e) => A::Fast(n.clone(), Box::new(net_prenorm(e, gates, ctr, depth))),
+        A::Tuple(es) => A::Tuple(es.iter().map(|e| net_prenorm(e, gates, ctr, depth)).collect()),
+        A::Again(es) => A::Again(es.iter().map(|e| net_prenorm(e, gates, ctr, depth)).collect()),
+        A::Gate(ps, b) => A::Gate(ps.clone(), Box::new(net_prenorm(b, gates, ctr, depth))),
+        A::Loop(binds, b) => A::Loop(
+            binds.iter().map(|(n, e)| (n.clone(), net_prenorm(e, gates, ctr, depth))).collect(),
+            Box::new(net_prenorm(b, gates, ctr, depth)),
+        ),
+        _ => a.clone(),
+    }
+}
+
 pub fn run_general_mode(src: &str, native: bool) -> Result<(u128, usize), String> {
-    let ast = crate::latte::parse(src)?;
+    let parsed = crate::latte::parse(src)?;
+    let mut gates = Vec::new();
+    let mut ctr = 0usize;
+    let ast = net_prenorm(&parsed, &mut gates, &mut ctr, 0);
     let mut env = GEnv { defs: Vec::new(), funcs: Vec::new(), div_idx: None, mod_idx: None, native };
     let mut scope = GScope { params: Vec::new(), lets: Vec::new(), loop_idx: None };
     let main = glower(&ast, &mut env, &mut scope)?;
@@ -2499,6 +2691,34 @@ fn two_redex_net() -> Net {
 
 pub fn cmd_icomb() {
     print!("{}", demo());
+}
+
+#[cfg(test)]
+mod parity_tests {
+    // the net's parity with the general compiler: every construct here also runs
+    // on the interpreter, and run_str cross-checks the two per invocation
+    fn v(src: &str) -> u128 {
+        super::run_str(src).expect(src).0
+    }
+
+    #[test]
+    fn net_case_lowers_to_comparisons() {
+        assert_eq!(v("case %go of %go -> 7 ; %stop -> 2 ; _ -> 0 end"), 7);
+        assert_eq!(v("case %huh of %go -> 7 ; _ -> 99 end"), 99);
+    }
+
+    #[test]
+    fn net_handles_higher_order_gates_by_inlining() {
+        assert_eq!(v("let addk = fn [k] -> fn [x] -> (add x k) in ((addk 5) 10)"), 15);
+        assert_eq!(v("let compose = fn [f g] -> fn [x] -> (f (g x)) in ((compose (fn [x] -> (mul x x)) (fn [x] -> (add x 1))) 4)"), 25);
+        assert_eq!(v("let flip = fn [f] -> fn [a b] -> (f b a) in ((flip (fn [a b] -> (sub a b))) 3 10)"), 7);
+    }
+
+    #[test]
+    fn net_recursion_and_loops_survive_prenormalization() {
+        assert_eq!(v("let f = fn [n] -> if (lt n 2) then 1 else (mul n (f (dec n))) in (f 5)"), 120);
+        assert_eq!(v("loop with [i = 3, a = 1] : if (i == 0) then a else again((dec i), (mul a 2)) end"), 8);
+    }
 }
 
 #[cfg(test)]

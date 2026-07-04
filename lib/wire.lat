@@ -16,16 +16,16 @@ core wire
   :: ---- varint (LEB128) ------------------------------------------------------
   w_varint = fn [n] ->
     loop with [x = n, acc = 0] :
-      let b = (mod x 128) in
+      let b = (mod x 128) in                    :: low 7 bits of what remains
       let r = (div x 128) in
-      if (r == 0) then (reverse [ b acc ])
-      else again(r, [ (add b 128) acc ])
+      if (r == 0) then (reverse [ b acc ])      :: last byte: high bit CLEAR ends the number
+      else again(r, [ (add b 128) acc ])        :: more to come: set the continuation bit
     end
   w_unvarint = fn [bytes] ->
     loop with [c = bytes, acc = 0, sh = 1] :
       if (c == 0) then acc
-      else if (lt (head c) 128) then (add acc (mul (head c) sh))
-      else again((tail c), (add acc (mul (sub (head c) 128) sh)), (mul sh 128))
+      else if (lt (head c) 128) then (add acc (mul (head c) sh))                   :: terminator byte: done
+      else again((tail c), (add acc (mul (sub (head c) 128) sh)), (mul sh 128))    :: strip the bit, weight by 128^i
     end
   :: total encoded size (bytes) of a natural under varint
   w_varlen = fn [n] -> (len (w_varint n))

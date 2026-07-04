@@ -122,6 +122,10 @@ instead of a tower of nested `let`s:
 let a = 10, b = (add a 5), c = (mul b 2) in c   :: 30
 ```
 
+A `let`-bound **gate** may reference its own name inside its body (see *Gates —
+Recursion* below); every other kind of binding is visible only in the body, not
+in its own initializer.
+
 ### Short-circuit `and` / `or`
 ```
 (and a b)     :: 0 (true) iff both are true; b is evaluated only if a is true
@@ -165,6 +169,34 @@ passed to higher-order arms:
 ```
 Parameters are destructured positionally; a one-parameter gate `fn [x] -> …` receives the whole
 argument, a two-parameter gate `fn [a b] -> …` receives a pair, and so on.
+
+**Recursion.** A `let`-bound gate may call itself — the binding is in scope inside its own
+body — and remains an ordinary value while doing so (it can be passed to `map` mid-recursion):
+```
+let f = fn [n] -> if (lt n 2) then 1 else (mul n (f (dec n))) in (f 5)      → 120
+let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)
+```
+A like-named parameter shadows the self-reference (`let f = fn [f] -> …` sees the argument).
+Self-recursion is supported on all three engines; the interpreter compiles it as the
+loop/again trap idiom generalized (the gate's own core is the face's referent), the native
+backend ties a reference knot, and the interaction net unrolls a `Ref`. Mutual recursion
+between two `let` bindings is not expressible (`f` cannot see a later `g`) — use module arms.
+
+**Calling a computed gate.** When the head of an application is itself an expression —
+an immediate lambda, a composition, a gate taken out of a data structure — wrap it in
+parentheses:
+```
+((fn [x] -> (mul x x)) 7)                    → 49
+((compose dec dec) 10)                       → 8
+((nth gates 1) 5)
+```
+This desugars to `let __call = <head> in (__call args…)`; the name `__call` is reserved.
+
+**Arms as values (eta-expansion).** A module arm named where a gate is expected becomes a
+gate that calls it, so the aggregation idioms read directly:
+```
+(foldl add 0 xs)      (map dec xs)      (sortby lte xs)      ((flip sub) 3 10)
+```
 
 ### Jet hints
 ```
@@ -216,7 +248,7 @@ end
 - comparison / logic (loobean): `lt gt lte gte not and or min max`
 - lists: `len reverse append nth member range`, `take drop`, and stable `sort` / `sortby`
   (merge sort; a `sortby` comparator returns the loobean `0` when its first argument sorts first)
-- higher-order: `map filter foldl foldr`
+- higher-order: `map filter foldl foldr scanl any all count`; combinators `compose flip applyn`
 - cords (strings): `bytelen cat catall`, plus `bytes` (cord → low-first byte list) and
   `frombytes` (byte list → cord) — the basis of the string-algorithms library
 

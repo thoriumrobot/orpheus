@@ -27,7 +27,9 @@ core bloom
     let b = (dh_h2 key) in
     let bits =
       loop with [i = 0, bs = (bloom_bits bf)] :
-        if (i == k) then bs
+        if (i == k) then bs                                        :: all k probes set
+        :: DOUBLE HASHING (Kirsch-Mitzenmacher): probe i = h1 + i·h2, remixed and
+        :: reduced mod m — k independent-enough bit positions from just two hashes
         else again(+(i), (dh_set bs (dh_idx (dh_mix (add a (mul i b))) m)))
       end in
     [ m [ k bits ] ]
@@ -43,9 +45,9 @@ core bloom
     let b = (dh_h2 key) in
     let bs = (bloom_bits bf) in
     loop with [i = 0] :
-      if (i == k) then 0
-      else if ((dh_bit bs (dh_idx (dh_mix (add a (mul i b))) m)) == 0) then 1
-      else again(+(i))
+      if (i == k) then 0                                           :: every probe set: POSSIBLY present
+      else if ((dh_bit bs (dh_idx (dh_mix (add a (mul i b))) m)) == 0) then 1  :: one clear bit: DEFINITELY absent
+      else again(+(i))                                             :: this probe set: keep checking
     end
 
   :: number of bits currently set (its "fill")

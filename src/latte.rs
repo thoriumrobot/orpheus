@@ -534,10 +534,30 @@ impl Parser {
                         Ok(a) // grouping
                     }
                     _ => {
-                        // function application: (fname arg1 arg2 ...)
+                        // function application: (fname arg1 arg2 ...) — or, when the
+                        // head is itself an EXPRESSION (a computed gate: the result of
+                        // (compose f g), an immediate (fn [x] -> …), a gate pulled out
+                        // of a list…), desugar to a let-bound call:
+                        //     ((E) a b)  ≡  let __call = E in (__call a b)
+                        // which reuses the ordinary face-call path on every engine.
+                        // The name __call is reserved for this desugaring.
                         let name = match a {
                             Ast::Var(n) => n,
-                            _ => return Err(self.err("call: expected a function name")),
+                            expr_head => {
+                                let mut args = Vec::new();
+                                while !matches!(self.peek(), Some(Tok::RParen)) {
+                                    args.push(self.expr()?);
+                                }
+                                self.eat(&Tok::RParen)?;
+                                if args.is_empty() {
+                                    return Err(self.err("call: a computed gate needs at least one argument"));
+                                }
+                                return Ok(Ast::Let(
+                                    "__call".to_string(),
+                                    Box::new(expr_head),
+                                    Box::new(Ast::Call("__call".to_string(), args)),
+                                ));
+                            }
                         };
                         let mut args = Vec::new();
                         while !matches!(self.peek(), Some(Tok::RParen)) {
@@ -1590,7 +1610,17 @@ fn gen(ast: &Ast, env: &Env) -> Result<N, String> {
         Ast::Text(t) => Ok(f_quote(cord(t))),
         Ast::Var(name) => match env.lookup(name) {
             Some(axis) => Ok(f_axis(axis)),
-            None => Err(format!("unbound face '{}'", name)),
+            None => {
+                // ETA-EXPANSION: a module arm used as a VALUE becomes a gate that
+                // calls it — `(foldl add 0 xs)`, `(map dec xs)`, `((flip sub) a b)`
+                // all read naturally, and arms are first-class wherever gates are.
+                if let Some((_, arity)) = env.lookup_func(name) {
+                    let params: Vec<String> = (0..arity).map(|i| format!("__e{}", i)).collect();
+                    let call = Ast::Call(name.clone(), params.iter().map(|p| Ast::Var(p.clone())).collect());
+                    return gen_gate(&params, &call, env, None);
+                }
+                Err(format!("unbound face '{}'", name))
+            }
         },
         Ast::Tuple(elems) => {
             // right-nested autocons of the element formulas
@@ -1613,7 +1643,18 @@ fn gen(ast: &Ast, env: &Env) -> Result<N, String> {
             cell(gen(c, env)?, cell(gen(a, env)?, gen(b, env)?)),
         )),
         Ast::Let(name, val, body) => {
-            let fv = gen(val, env)?;
+            // A SELF-RECURSIVE let-bound gate: `let f = fn [x] -> … (f …) in body`.
+            // Compile the gate with a face for its own name (see gen_gate) so the
+            // body can call it or pass it along — full first-class recursion.
+            let fv = if let Ast::Gate(ps, gb) = &**val {
+                if crate::icomb::mentions(gb, name) && !ps.iter().any(|p| p == name) {
+                    gen_gate(ps, gb, env, Some(name))?
+                } else {
+                    gen(val, env)?
+                }
+            } else {
+                gen(val, env)?
+            };
             let mut env2 = env.rebase_push();
             env2.faces.push((name.clone(), 2)); // freshly pushed value at axis 2
             let fb = gen(body, &env2)?;
@@ -1669,30 +1710,41 @@ fn gen(ast: &Ast, env: &Env) -> Result<N, String> {
             Err(format!("unknown function or gate '{}'", name))
         }
         Ast::Fast(name, body) => Ok(crate::loom::f_jet(name, gen(body, env)?)),
-        Ast::Gate(params, body) => {
-            let arity = params.len();
-            if arity == 0 {
-                return Err("a gate must take at least one parameter".into());
-            }
-            // gate value = [battery [sample context]]; context captures the current
-            // subject (closure). Inside the body: sample at axis 6, context at axis 7.
-            let mut faces: Vec<(String, u128)> =
-                env.faces.iter().map(|(n, a)| (n.clone(), peg(7, *a))).collect();
-            for (j, p) in params.iter().enumerate() {
-                faces.push((p.clone(), tuple_elem_axis(6, j, arity)));
-            }
-            let genv = Env {
-                faces,
-                loops: None,
-                funcs: env.funcs.clone(),
-                module_core: env.module_core.map(|a| peg(7, a)),
-            };
-            let body_f = gen(body, &genv)?;
-            // [ [1 body] [ [1 0] [0 1] ] ]  => [battery [bunt context]]
-            let payload = cell(cell(num(1), num(0)), f_axis(1));
-            Ok(cell(cell(num(1), body_f), payload))
-        }
+        Ast::Gate(params, body) => gen_gate(params, body, env, None),
     }
+}
+
+/// Compile a gate value `[battery [sample context]]`. Inside the body the sample
+/// sits at axis 6 and the captured context at axis 7. With `self_face`, the gate
+/// can name ITSELF: the face resolves to axis 1 — the whole running core — which
+/// is exactly the loop/again trap idiom generalized to a first-class value. A
+/// call through that face edits a fresh sample into the core's own slot 6 and
+/// fires its battery (the ordinary face-call path in `Ast::Call` — no special
+/// case needed there); used as a VALUE, the face yields the core itself, whose
+/// stale sample is irrelevant because every caller overwrites slot 6.
+fn gen_gate(params: &[String], body: &Ast, env: &Env, self_face: Option<&str>) -> Result<N, String> {
+    let arity = params.len();
+    if arity == 0 {
+        return Err("a gate must take at least one parameter".into());
+    }
+    let mut faces: Vec<(String, u128)> =
+        env.faces.iter().map(|(n, a)| (n.clone(), peg(7, *a))).collect();
+    if let Some(me) = self_face {
+        faces.push((me.to_string(), 1)); // pushed before params: a like-named param shadows it
+    }
+    for (j, p) in params.iter().enumerate() {
+        faces.push((p.clone(), tuple_elem_axis(6, j, arity)));
+    }
+    let genv = Env {
+        faces,
+        loops: None,
+        funcs: env.funcs.clone(),
+        module_core: env.module_core.map(|a| peg(7, a)),
+    };
+    let body_f = gen(body, &genv)?;
+    // [ [1 body] [ [1 0] [0 1] ] ]  => [battery [bunt context]]
+    let payload = cell(cell(num(1), num(0)), f_axis(1));
+    Ok(cell(cell(num(1), body_f), payload))
 }
 
 /// Build a call sample: a single arg is passed bare; multiple args form a right-nested tuple.
@@ -1937,6 +1989,59 @@ mod def_tests {
         assert!(define_user_arm("9lives [x] = x").is_err());
         assert!(define_user_arm("noeq").is_err());
         assert!(define_user_arm("empty [x] =").is_err());
+    }
+}
+
+#[cfg(test)]
+mod recursion_tests {
+    use super::*;
+
+    fn go(e: &str) -> String {
+        crate::serve::render_noun(&run_with_libs(e, &["std"]).unwrap())
+    }
+
+    #[test]
+    fn let_bound_gate_recurses() {
+        assert_eq!(go("let f = fn [n] -> if (lt n 2) then 1 else (mul n (f (dec n))) in (f 5)"), "120");
+        // two recursive calls per level
+        assert_eq!(go("let fib = fn [n] -> if (lt n 2) then n else (add (fib (dec n)) (fib (sub n 2))) in (fib 10)"), "55");
+        // multi-argument recursion
+        assert_eq!(go("let gcd = fn [a b] -> if (b == 0) then a else (gcd b (mod a b)) in (gcd 1071 462)"), "21");
+    }
+
+    #[test]
+    fn recursive_gate_is_a_value() {
+        // passed to a library HOF
+        assert_eq!(go("let f = fn [n] -> if (lt n 2) then 1 else (mul n (f (dec n))) in (map f [1 2 3 4 0])"),
+                   "[1 [2 [6 [24 0]]]]");
+        // referenced as a value inside its own body
+        assert_eq!(go("let f = fn [n] -> if (n == 0) then 0 else (add (len (map f [0 0])) (f (dec n))) in (f 3)"), "3");
+    }
+
+    #[test]
+    fn recursion_respects_scope() {
+        // closure capture across the recursion
+        assert_eq!(go("let k = 10 in let f = fn [n] -> if (n == 0) then k else (f (dec n)) in (f 4)"), "10");
+        // a like-named parameter shadows the self-face
+        assert_eq!(go("let f = fn [f] -> (add f 1) in (f 41)"), "42");
+    }
+
+    #[test]
+    fn computed_gates_are_callable() {
+        assert_eq!(go("((fn [x] -> (mul x x)) 7)"), "49");
+        assert_eq!(go("let addk = fn [k] -> fn [x] -> (add x k) in ((addk 5) 10)"), "15");
+        assert_eq!(go("((nth [ (fn [x] -> (add x 1)) (fn [x] -> (mul x 10)) 0 ] 1) 5)"), "50");
+        assert_eq!(go("((compose (fn [x] -> (mul x x)) (fn [x] -> (add x 1))) 4)"), "25");
+    }
+
+    #[test]
+    fn arms_eta_expand_to_gates() {
+        assert_eq!(go("(foldl add 0 [1 2 3 4 0])"), "10");
+        assert_eq!(go("(map dec [5 6 7 0])"), "[4 [5 [6 0]]]");
+        assert_eq!(go("((flip sub) 3 10)"), "7");
+        assert_eq!(go("(sortby lte [3 1 2 0])"), "[1 [2 [3 0]]]");
+        assert_eq!(go("((compose dec dec) 10)"), "8");
+        assert_eq!(go("(applyn (fn [x] -> (mul x 2)) 10 1)"), "1024");
     }
 }
 

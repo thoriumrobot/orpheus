@@ -1146,7 +1146,7 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             module: "AlgoViz",
             proc: "frame",
             sig: "AlgoViz.frame(algo, xs, k, t)",
-            summary: "step k of an instrumented algorithm (bubble, insert, binsearch, bfs) over the list xs, drawn as SVG; t is the binsearch target",
+            summary: "step k of an instrumented algorithm (bubble, insert, quick, binsearch, bfs) over the list xs, drawn as SVG; t is the binsearch target",
             handler: tool_algoviz_frame,
         },
         ToolSpec {
@@ -1403,8 +1403,8 @@ fn algoviz_eval(expr: &str) -> Result<crate::knot::N, String> {
 /// AlgoViz.frame(algo, xs, k, t) -> the k-th frame as inline SVG.
 fn tool_algoviz_frame(args: &[Val]) -> Result<Val, String> {
     let algo = arg_text(args, 0)?.trim().trim_start_matches('%').to_string();
-    if !matches!(algo.as_str(), "bubble" | "insert" | "binsearch" | "bfs") {
-        return Err("algo must be bubble, insert, binsearch, or bfs".into());
+    if !matches!(algo.as_str(), "bubble" | "insert" | "quick" | "binsearch" | "bfs") {
+        return Err("algo must be bubble, insert, quick, binsearch, or bfs".into());
     }
     let blank = Val::Text(String::new());
     let xs = algoviz_list(args.get(1).unwrap_or(&blank));
@@ -1417,8 +1417,8 @@ fn tool_algoviz_frame(args: &[Val]) -> Result<Val, String> {
 /// AlgoViz.steps(algo, xs, t) -> how many frames the trace has (the slider range).
 fn tool_algoviz_steps(args: &[Val]) -> Result<Val, String> {
     let algo = arg_text(args, 0)?.trim().trim_start_matches('%').to_string();
-    if !matches!(algo.as_str(), "bubble" | "insert" | "binsearch" | "bfs") {
-        return Err("algo must be bubble, insert, binsearch, or bfs".into());
+    if !matches!(algo.as_str(), "bubble" | "insert" | "quick" | "binsearch" | "bfs") {
+        return Err("algo must be bubble, insert, quick, binsearch, or bfs".into());
     }
     let blank = Val::Text(String::new());
     let xs = algoviz_list(args.get(1).unwrap_or(&blank));

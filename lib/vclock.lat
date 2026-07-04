@@ -18,7 +18,8 @@ core vclock
       else if ((head (head c)) == node) then (tail (head c))
       else again((tail c))
     end
-  :: set node's counter (replace or insert)
+  :: set node's counter (replace or insert): cons the fresh entry onto the
+  :: vector with any old entry for the same node filtered away
   vc_set = fn [vc node n] -> [ [node n] (filter (fn [e] -> (not ((head e) == node))) vc) ]
   :: a local event on `node`: bump its counter
   vc_inc = fn [vc node] -> (vc_set vc node +((vc_get vc node)))
@@ -32,18 +33,20 @@ core vclock
   vc_merge = fn [a b] ->
     (map (fn [nd] -> [ nd (max (vc_get a nd) (vc_get b nd)) ]) (vc_nodes a b))
 
-  :: a <= b  (every component of a is <= b's) — loobean 0 = true
+  :: a <= b  (every component of a is <= b's) — loobean 0 = true. Only a's
+  :: entries need checking: a node absent from a has count 0, which is <= anything
   vc_le = fn [a b] -> (all (fn [e] -> (lte (tail e) (vc_get b (head e)))) a)
   vc_eq = fn [a b] -> (and (vc_le a b) (vc_le b a))
 
-  :: the causal relationship as a tag: %eq, %before, %after, or %concurrent
+  :: the causal relationship as a tag: %eq, %before, %after, or %concurrent —
+  :: both directions of <= decide all four cases
   vc_compare = fn [a b] ->
     let ab = (vc_le a b) in
     let ba = (vc_le b a) in
-    if ((and ab ba) == 0) then %eq
-    else if (ab == 0) then %before
+    if ((and ab ba) == 0) then %eq          :: <= both ways: identical histories
+    else if (ab == 0) then %before          :: a <= b strictly: a happened-before b
     else if (ba == 0) then %after
-    else %concurrent
+    else %concurrent                        :: neither dominates: causally unordered
 
   :: a write conflict is two CONCURRENT vectors
   vc_conflict = fn [a b] -> if ((vc_compare a b) == %concurrent) then 0 else 1

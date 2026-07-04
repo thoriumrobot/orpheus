@@ -18,10 +18,10 @@ core stream
   :: group events into [windowId values] buckets (out-of-order safe)
   stream_addpair = fn [groups k v] ->
     loop with [c = groups, acc = 0] :
-      if (c == 0) then (append (reverse acc) [ [k [v 0]] 0 ])
+      if (c == 0) then (append (reverse acc) [ [k [v 0]] 0 ])         :: new window: fresh bucket at the end
       else if ((head (head c)) == k) then
-        (append (reverse acc) [ [k [v (tail (head c))]] (tail c) ])
-      else again((tail c), [ (head c) acc ])
+        (append (reverse acc) [ [k [v (tail (head c))]] (tail c) ])   :: found it: cons v into the bucket, splice back
+      else again((tail c), [ (head c) acc ])                          :: keep walking with a reversed prefix
     end
   stream_tumble = fn [events size] ->
     (foldl (fn [g e] -> (stream_addpair g (stream_win (head e) size) (tail e))) 0 events)

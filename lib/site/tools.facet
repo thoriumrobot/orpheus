@@ -310,12 +310,12 @@ deterministic per request.</p>
     <div class="w">
       <div class="lbl"><code>AlgoViz.frame(algo, xs, k, t)</code> — step k of bubble, insert,
       binsearch, or bfs over the list xs (t is the binsearch target)</div>
-      {{ Live.view("AlgoViz.frame(algo, xs, k, t)", [["algo", "bubble", "bubble", "insert", "binsearch", "bfs"], ["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "40", "1"], ["t", "8", "~", "0", "12", "1"]]) }}
+      {{ Live.view("AlgoViz.frame(algo, xs, k, t)", [["algo", "bubble", "bubble", "insert", "quick", "binsearch", "bfs"], ["xs", "5 2 8 1 9 3"], ["k", "0", "~", "0", "40", "1"], ["t", "8", "~", "0", "12", "1"]]) }}
     </div>
     <div class="w">
       <div class="lbl"><code>AlgoViz.steps(algo, xs, t)</code> — how many frames the trace has
       (the slider's true range)</div>
-      {{ Live.box("AlgoViz.steps(algo, xs, t)", [["algo", "bubble", "bubble", "insert", "binsearch", "bfs"], ["xs", "5 2 8 1 9 3"], ["t", "8"]]) }}
+      {{ Live.box("AlgoViz.steps(algo, xs, t)", [["algo", "bubble", "bubble", "insert", "quick", "binsearch", "bfs"], ["xs", "5 2 8 1 9 3"], ["t", "8"]]) }}
     </div>
   </div>
 </div>

@@ -152,7 +152,7 @@ fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize, arms: &Ha
             cases.iter().map(|(p, e)| (p.clone(), unshadow(e, env, ctr, arms))).collect(),
         ),
         Ast::Let(n, v, b) => {
-            let v2 = unshadow(v, env, ctr, arms); // initialiser is in the outer scope
+            let recursive = recursive_let_gate(n, v);
             let mut env2 = env.clone();
             let name = if needs_rename(n) {
                 let f = fresh(n, ctr);
@@ -162,6 +162,9 @@ fn unshadow(ast: &Ast, env: &HashMap<String, String>, ctr: &mut usize, arms: &Ha
                 env2.remove(n); // a plain binding shadows any active rename
                 n.clone()
             };
+            // a SELF-RECURSIVE gate's initialiser references the binding itself,
+            // so it renames under env2; an ordinary initialiser is outer-scope
+            let v2 = if recursive { unshadow(v, &env2, ctr, arms) } else { unshadow(v, env, ctr, arms) };
             Ast::Let(name, Box::new(v2), Box::new(unshadow(b, &env2, ctr, arms)))
         }
         Ast::Gate(params, body) => {
@@ -325,6 +328,19 @@ fn eval_prim(name: &str, xs: &[u128]) -> Option<u128> {
 // ---------------------------------------------------------------------------
 // Free-variable analysis (for closing over enclosing locals in lambdas).
 // ---------------------------------------------------------------------------
+/// `let name = fn … in …` where the gate's body mentions `name` (and no
+/// parameter shadows it): the SELF-RECURSIVE let-bound gate. The three walkers
+/// below (unshadow, free_vars, emit) must all treat `name` as bound INSIDE the
+/// initialiser for such a let — mirroring the interpreter, where the gate gets
+/// a face for its own name.
+fn recursive_let_gate(name: &str, val: &Ast) -> bool {
+    if let Ast::Gate(ps, gb) = val {
+        !ps.iter().any(|p| p == name) && crate::icomb::mentions(gb, name)
+    } else {
+        false
+    }
+}
+
 fn free_vars(ast: &Ast, bound: &HashSet<String>, arms: &HashSet<String>, out: &mut Vec<String>) {
     let see = |n: &str, out: &mut Vec<String>| {
         if !bound.contains(n) && !arms.contains(n) && prim_arity(n).is_none() && cord_jet_arity(n).is_none() && !out.contains(&n.to_string()) {
@@ -352,9 +368,14 @@ fn free_vars(ast: &Ast, bound: &HashSet<String>, arms: &HashSet<String>, out: &m
             free_vars(e, bound, arms, out);
         }
         Ast::Let(n, v, b) => {
-            free_vars(v, bound, arms, out);
             let mut b2 = bound.clone();
             b2.insert(n.clone());
+            // in a self-recursive gate the name is bound within its own initialiser
+            if recursive_let_gate(n, v) {
+                free_vars(v, &b2, arms, out);
+            } else {
+                free_vars(v, bound, arms, out);
+            }
             free_vars(b, &b2, arms, out);
         }
         Ast::Tuple(es) | Ast::Again(es) => {
@@ -416,6 +437,13 @@ fn emit(ast: &Ast, c: &mut Ctx) -> Result<String, String> {
         Ast::Var(n) => {
             if c.bound.contains(n) {
                 format!("{}.clone()", sanitize(n))
+            } else if let Some(&k) = c.arity.get(n) {
+                // eta-expansion (mirrors the interpreter): an arm as a value is a
+                // gate that calls it
+                let params: Vec<String> = (0..k).map(|i| format!("__e{}", i)).collect();
+                let call = Ast::Call(n.clone(), params.iter().map(|p| Ast::Var(p.clone())).collect());
+                let gate = Ast::Gate(params, Box::new(call));
+                return emit(&gate, c);
             } else {
                 return Err(format!("unbound variable '{}'", n));
             }
@@ -445,13 +473,56 @@ fn emit(ast: &Ast, c: &mut Ctx) -> Result<String, String> {
             emit(e, c)?
         ),
         Ast::Let(n, v, b) => {
-            let vs = emit(v, c)?;
-            let added = c.bound.insert(n.clone());
-            let bs = emit(b, c)?;
-            if added {
-                c.bound.remove(n);
+            if recursive_let_gate(n, v) {
+                // THE KNOT: a self-recursive gate becomes a closure that pulls
+                // itself out of a shared cell tied immediately after creation —
+                // the Rust rendering of the interpreter's axis-1 self-face.
+                let (params, gbody) = match v.as_ref() {
+                    Ast::Gate(p, gb) => (p, gb.as_ref()),
+                    _ => unreachable!(),
+                };
+                let id = c.fresh();
+                // captured frees of the gate body: params and the name are bound
+                let mut pset: HashSet<String> = params.iter().cloned().collect();
+                pset.insert(n.clone());
+                let mut fvs = Vec::new();
+                free_vars(gbody, &pset, c.arms, &mut fvs);
+                let fvs: Vec<String> = fvs.into_iter().filter(|x| c.bound.contains(x)).collect();
+                let mut caps = String::new();
+                for x in &fvs {
+                    caps.push_str(&format!("let {0} = {0}.clone(); ", sanitize(x)));
+                }
+                let saved = c.bound.clone();
+                c.bound = params.iter().cloned().collect();
+                c.bound.insert(n.clone());
+                for x in &fvs {
+                    c.bound.insert(x.clone());
+                }
+                let mut binds = String::new();
+                for (i, p) in params.iter().enumerate() {
+                    binds.push_str(&format!("let {} = __args[{}].clone(); ", sanitize(p), i));
+                }
+                let gs = emit(gbody, c)?;
+                // the let-body sees the finished gate
+                c.bound = saved;
+                let added = c.bound.insert(n.clone());
+                let bs = emit(b, c)?;
+                if added {
+                    c.bound.remove(n);
+                }
+                format!(
+                    "{{ let __knot{id}: std::rc::Rc<std::cell::RefCell<Option<V>>> = std::rc::Rc::new(std::cell::RefCell::new(None));                      let {nm} = {{ {caps}let __k = __knot{id}.clone();                      V::F(std::rc::Rc::new(move |__args: Vec<V>| -> V {{                      let {nm} = __k.borrow().as_ref().expect(\"recursive gate untied\").clone(); {binds}{gs} }})) }};                      *__knot{id}.borrow_mut() = Some({nm}.clone()); {bs} }}",
+                    id = id, nm = sanitize(n), caps = caps, binds = binds, gs = gs, bs = bs
+                )
+            } else {
+                let vs = emit(v, c)?;
+                let added = c.bound.insert(n.clone());
+                let bs = emit(b, c)?;
+                if added {
+                    c.bound.remove(n);
+                }
+                format!("{{ let {} = {}; {} }}", sanitize(n), vs, bs)
             }
-            format!("{{ let {} = {}; {} }}", sanitize(n), vs, bs)
         }
         Ast::Case(scrut, cases) => {
             let s = emit(scrut, c)?;
@@ -1156,13 +1227,57 @@ fn rustc_opt_level(src: &str) -> String {
 /// Compile emitted Rust `src` into `bin` (atomically, via a temp file + rename), under a
 /// global build lock so concurrent identical requests compile once. Returns whether `bin`
 /// is present and usable afterwards. The single point where the native toolchain is invoked.
+/// The CROSS-PROCESS build lock: rustc invocations from every process sharing a
+/// cache dir (the server, detached warm children, the anvil daemon, a CLI eval)
+/// serialize on one lock file. One compiler at a time keeps a small machine
+/// responsive when a widget-heavy page warms a virgin cache — the burst becomes
+/// a queue instead of N concurrent rustcs. Stale locks (a build killed mid-rustc)
+/// are broken after 10 minutes; the guard removes the file on drop, panics
+/// included.
+struct BuildFileLock(std::path::PathBuf);
+impl Drop for BuildFileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+fn acquire_build_file_lock() -> Option<BuildFileLock> {
+    let path = cache_dir().join("build.lock");
+    let _ = std::fs::create_dir_all(cache_dir());
+    for _ in 0..3000 {
+        // ~10 minutes of patience
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = write!(f, "{}", std::process::id());
+                return Some(BuildFileLock(path));
+            }
+            Err(_) => {
+                // break a stale lock: its holder died mid-build
+                let stale = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|age| age.as_secs() > 600)
+                    .unwrap_or(false);
+                if stale {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+    None // could not acquire: proceed unlocked rather than never building
+}
+
 fn build_native(src: &str, bin: &std::path::Path, force: bool) -> bool {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CTR: AtomicUsize = AtomicUsize::new(0);
     static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = acquire_build_file_lock();
     if !force && bin.exists() {
-        return true; // built by another thread while we waited for the lock
+        return true; // built by another thread OR PROCESS while we waited
     }
     // Read-through: a same-toolchain host may have already built this exact program and published
     // it — to the shared dir, or to the networked registry (signature-verified). Either skips rustc.
@@ -2043,14 +2158,19 @@ fn spawn_detached_warm(expr: &str) {
     if !inflight.lock().unwrap().insert(expr.to_string()) {
         return; // already warming
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe)
+    let spawned = std::env::current_exe().ok().and_then(|exe| {
+        std::process::Command::new(exe)
             .args(["cache", "warm", expr])
             .env("ORPHEUS_NO_SPAWN", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+            .ok()
+    });
+    if spawned.is_none() {
+        // the spawn itself failed (fork limits, missing exe): allow a retry later
+        inflight.lock().unwrap().remove(expr);
     }
 }
 
@@ -2858,23 +2978,20 @@ mod tests {
 
     #[test]
     fn native_and_interp_agree_on_rejected_programs() {
-        // Latte has no first-class primitive/arm references and no partial application: a bare
-        // function name in a value position (`add`, `db_pk`, the cord-jet `bytes`) and an
-        // under-applied primitive (`(add 1)`) are rejected by the INTERPRETER. The native backend
-        // must AGREE — it must never silently lower one of these into a value the interpreter
-        // would never produce. The invariant checked is "native accepts iff the interpreter
-        // accepts". If first-class functions are ever introduced, that is a LANGUAGE change: both
-        // engines must adopt it together (e.g. eta-expanding a bare name into a closure on both
-        // sides), and this test must be updated deliberately — its failure here is the signal that
-        // the two engines have drifted apart.
+        // The invariant: "native accepts iff the interpreter accepts" — the two engines must
+        // never silently drift. HISTORY: this test originally pinned bare arm names in value
+        // position (`(foldl add 0 …)`) as REJECTED on both sides, with instructions that
+        // introducing first-class functions is a language change both engines must adopt
+        // together, eta-expanding on both sides, updating this test deliberately. That change
+        // has now been made deliberately: arms ETA-EXPAND to gates on the interpreter AND the
+        // native backend (see Ast::Var in latte::gen and in emit), so the former rejects are
+        // now ACCEPTS — and the drift check for them is stronger: both engines must also agree
+        // on the VALUE. What remains rejected on both: wrong arity and unbound names.
         let libs = latte::all_libs();
         let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
         let rejected = [
-            "(foldl add 0 [1 [2 [3 0]]])",                 // primitive as a first-class value
-            "(map dec [3 [4 [5 0]]])",                      // primitive as a value
-            "(map bytes [%ab [%cd 0]])",                     // cord-jet as a value
-            "(map db_pk (db_scan (db_orders 0) %o0 %o9))",  // library arm as a value
-            "(add 1)",                                       // partial application
+            "(add 1)",                 // partial application: arity is still checked
+            "(map zzz9 [1 [2 0]])",    // an unbound name is not an arm; nothing to expand
         ];
         for expr in rejected {
             let interp_ok = crate::latte::run_with_libs(expr, &refs).is_ok();
@@ -2885,6 +3002,17 @@ mod tests {
                 "native and interpreter must agree on acceptance (no silent divergence): {}",
                 expr
             );
+        }
+        // the deliberately-adopted eta-expansion: both engines accept AND agree on values
+        let now_accepted = [
+            ("(foldl add 0 [1 [2 [3 0]]])", "6"),
+            ("(map dec [3 [4 [5 0]]])", "[2 [3 [4 0]]]"),
+        ];
+        for (expr, want) in now_accepted {
+            let iv = crate::latte::run_with_libs(expr, &refs).expect(expr);
+            assert_eq!(crate::serve::render_noun(&iv), want, "interpreter value: {}", expr);
+            let nv = super::run_native_noun_opts(expr, &refs, false).expect(expr);
+            assert_eq!(crate::serve::render_noun(&nv), want, "native value: {}", expr);
         }
     }
 

@@ -1518,16 +1518,20 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
     //   [ train_mag test_mag base_mag signal us_m2 cross_avg n_easing vol_mag ]
     // accuracies are fixed-point fractions x1000; m2/avg are hundredths of a percent;
     // vol is the annualized bond-return volatility x1000 (finbond.bvol).
-    let expr = "(let r=(breport 0), md=(fm_load 0) in \
+    let expr = "(let r=(breport 0), md=(fm_load 0), dv=(bdrivers 4000 150) in \
         [ (tail (head r)) [ (tail (head (tail r))) [ (tail (head (tail (tail r)))) \
         [ (head (tail (tail (tail r)))) \
         [ (db_field (tail (fm_bank md %us)) 2) [ (fm_avg md) \
-        [ (db_count (fm_easing md (fm_avg md))) [ (tail (bvol 0)) 0 ] ] ] ] ] ] ] ])";
+        [ (db_count (fm_easing md (fm_avg md))) [ (tail (bvol 0)) \
+        [ (head (nth dv 0)) [ (head (tail (nth dv 0))) [ (tail (tail (nth dv 0))) \
+        [ (head (nth dv 1)) [ (head (tail (nth dv 1))) [ (tail (tail (nth dv 1))) \
+        [ (head (nth dv 2)) [ (head (tail (nth dv 2))) [ (tail (tail (nth dv 2))) 0 \
+        ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ])";
     let vals = match eval_native_or_interp(expr, &refs) {
         Ok(n) => flat_atoms(&n),
         Err(e) => { eprintln!("  bond model error: {}", e); return; }
     };
-    if vals.len() < 8 {
+    if vals.len() < 17 {
         eprintln!("  bond model produced an unexpected result");
         return;
     }
@@ -1549,6 +1553,25 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
         println!("    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  — NO EDGE; the advisor says so", test, base);
     }
     println!("    train accuracy    : {:.1}%", train);
+    // -- WHY: the latest month's logit, decomposed per factor (w·x, std units) --
+    const FACTORS: [&str; 10] = [
+        "curve level", "curve slope", "curvature", "yield momentum", "M2 growth",
+        "carry+roll-down", "fwd-rate momentum", "M2 acceleration",
+        "Cochrane-Piazzesi tent", "Cieslak-Povala cycle",
+    ];
+    let drv: Vec<(usize, f64)> = (0..3)
+        .map(|i| {
+            let (idx, sign, mag) = (vals[8 + i * 3] as usize, vals[9 + i * 3], vals[10 + i * 3]);
+            (idx, if sign == 0 { mag as f64 } else { -(mag as f64) })
+        })
+        .collect();
+    let total: f64 = drv.iter().map(|(_, c)| c.abs()).sum::<f64>().max(1.0);
+    println!("    top drivers now   : {}   (shares of the top-3 pull; sign = direction)",
+        drv.iter()
+            .map(|(idx, c)| format!("{} {}{:.0}%", FACTORS.get(*idx).unwrap_or(&"?"),
+                if *c >= 0.0 { "+" } else { "-" }, c.abs() * 100.0 / total))
+            .collect::<Vec<_>>()
+            .join("  ·  "));
     println!("  -- monetary regime (lib/finmoney.lat) --");
     println!("    US M2 YoY growth  : {:.2}%", us_m2);
     println!("    cross-bank average: {:.2}%   ({} of 23 central banks easing above average)", avg, neasing);

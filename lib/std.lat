@@ -66,6 +66,18 @@ core std
   replicate = fn [n v] -> loop with [k = n, acc = 0] : if (k == 0) then acc else again((dec k), [ v acc ]) end
   zip = fn [a b] -> loop with [x = a, y = b, acc = 0] : if (x == 0) then (reverse acc) else if (y == 0) then (reverse acc) else again((tail x), (tail y), [ [ (head x) (head y) ] acc ]) end
   foldr = fn [f z xs] -> (foldl (fn [a v] -> (f v a)) z (reverse xs))
+
+  :: ---- user-facing higher-order combinators --------------------------------
+  :: composition: (compose f g) is the gate x -> f(g(x)); call the result
+  :: directly — ((compose f g) x) — or pass it on to map and friends
+  compose = fn [f g] -> fn [x] -> (f (g x))
+  :: argument flip for binary gates: ((flip f) a b) = (f b a)
+  flip = fn [f] -> fn [a b] -> (f b a)
+  :: iterate: apply f to x, n times — ((applyn f 10) squares a growth model)
+  applyn = fn [f n x] ->
+    loop with [i = n, a = x] :
+      if (i == 0) then a else again((dec i), (f a))
+    end
   :: --- general-purpose SORT (stable merge sort) ------------------------------
   :: A comparator `cmp a b` returns the loobean 0 when a should come BEFORE b (i.e.
   :: a <= b). Sorting is the single most-used interview primitive, so it lives here.

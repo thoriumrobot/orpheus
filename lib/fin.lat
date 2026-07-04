@@ -62,6 +62,23 @@ core fin
       else let p = (lr_step w b xs ys lr) in again((head p), (tail p), +(k))
     end
 
+  :: RIDGE (L2) logistic training: each step also shrinks the weights toward
+  :: zero — w <- w·(1 − lr·λ/n) before the gradient step. With correlated
+  :: factor sets (a ten-factor yield-curve row!) the penalty spreads weight
+  :: across the correlated group instead of letting one column soak it up,
+  :: the standard cure for coefficient variance (Hoerl-Kennard 1970). The bias
+  :: is never penalized. λ arrives as a signed fixed-point (e.g. [0 50] = 0.05).
+  lr_step_l2 = fn [w b xs ys lr lam] ->
+    let n = (npos (mul (len xs) 1000)) in
+    let shrink = (nsub [0 1000] (ndiv (nmul lr lam) n)) in  :: 1 − lr·λ/n
+    let w2 = (vscale shrink w) in
+    (lr_step w2 b xs ys lr)
+  lr_train_l2 = fn [xs ys lr iters lam] ->
+    loop with [w = (vzeros (len (head xs))), b = [0 0], k = 0] :
+      if (k == iters) then [ w b ]
+      else let p = (lr_step_l2 w b xs ys lr lam) in again((head p), (tail p), +(k))
+    end
+
   :: classification accuracy as a signed fraction (e.g. [0 560] = 0.560)
   lr_acc = fn [w b xs ys] ->
     let c = loop with [px = xs, py = ys, n = 0] :
@@ -173,10 +190,12 @@ core fin
   :: train + evaluate on already-prepared (standardized) features.
   ::   xs = feature rows, ys = 0/1 labels, r1 = next-day return per row (percent).
   :: returns [ train_acc test_acc baseline_test strategy_equity buyhold_equity ].
-  fit_eval = fn [xs ys r1 split iters] ->
+  fit_eval = fn [xs ys r1 split iters] -> (fit_eval_l2 xs ys r1 split iters [0 0])
+  :: the same evaluation with RIDGE training (λ = lam; [0 0] recovers plain).
+  fit_eval_l2 = fn [xs ys r1 split iters lam] ->
     let xtr = (take split xs) in let ytr = (take split ys) in
     let xte = (drop split xs) in let yte = (drop split ys) in
-    let wb = (lr_train xtr ytr [0 1500] iters) in
+    let wb = (lr_train_l2 xtr ytr [0 1500] iters lam) in
     let w = (head wb) in let b = (tail wb) in
     let rte = (drop split r1) in
     let ps = (preds w b xte) in
