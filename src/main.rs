@@ -696,8 +696,8 @@ fn cmd_gui(args: &[String]) {
     match ledger::init(kv_store.as_deref(), &kv_listen, &kv_peers, kv_id) {
         Ok(desc) => {
             println!("{}", desc);
-            if !kv_listen.is_empty() {
-                println!("  (the ledger port trusts any host that can reach it — LAN/VPN/tunnel it; docs/network-gui.md)");
+            if !kv_listen.is_empty() || !notes_listen.is_empty() {
+                println!("  (these node ports trust any host that can reach them — LAN/VPN/tunnel; docs/network-gui.md)");
             }
         }
         Err(e) => {

@@ -405,6 +405,7 @@ deterministic per request.</p>
     {{ Live.form("Note.set(id, bid, author, text)", [["id", ""], ["bid", "1-2a"], ["author", "ada"], ["text", "revised point"]]) }}
     {{ Live.form("Note.del(id, bid)", [["id", ""], ["bid", "1-2a"]]) }}
     {{ Live.form("Note.retitle(id, title)", [["id", ""], ["title", "minutes, v2"]]) }}
+    {{ Live.form("Note.remove(id)", [["id", ""]]) }}
     {{ Live.view("Note.history(id, k)", [["id", ""], ["k", "1", "~", "1", "100", "1"]]) }}
     {{ Live.form("Note.connect(addr)", [["addr", "203.0.113.7:9601"]]) }}
     {{ Live.form("Note.forget(addr)", [["addr", "203.0.113.7:9601"]]) }}
@@ -478,6 +479,7 @@ deterministic per request.</p>
     on any machine), evaluate distributable shapes across them, train a model by FedAvg cycles —
     shards on the workers, consolidation in Latte — and use the persisted model straight from the
     page. Naming a store in <code>Net.train</code> commits exactly ONE final-model event.</p>
+    {{ Live.form("Net.connect(host)", [["host", "203.0.113.7"]]) }}
     {{ Live.watch("Net.workers()", [], 5) }}
     {{ Live.form("Net.addWorker(addr)", [["addr", "127.0.0.1:9700"]]) }}
     {{ Live.form("Net.rmWorker(addr)", [["addr", "127.0.0.1:9700"]]) }}

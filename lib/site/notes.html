@@ -66,6 +66,7 @@ Kinds: <b>note</b> prose · <b>plan</b> an economy spec the planner solves ·
   </select>
   <button onclick="createNote()">＋ Create</button>
   <button onclick="connectPeer()" title="dial another instance's notes port (9601 by default) — documents reconcile automatically">⇄ Connect peer…</button>
+  <span id="peers" class="histnote" title="live gossip links on the notes node"></span>
 </div>
 
 <div class="bar" id="histbar" style="display:none">
@@ -81,6 +82,7 @@ Kinds: <b>note</b> prose · <b>plan</b> an economy spec the planner solves ·
 <div class="bar">
   <button onclick="addBlock()">＋ block</button>
   <button onclick="toggleHistory()" id="histbtn">⌛ history</button>
+  <button onclick="removeDoc()" title="remove this document (history keeps it)">🗑 remove</button>
 </div>
 <div class="bar" id="kindbar"></div>
 <div id="result"></div>
@@ -203,6 +205,7 @@ function act(cmd){
 
 function open(id){
   noteId = id; atEvent = 0; lastLines = ''; dirty = {};
+  try{ history.replaceState(null, '', '?id=' + encodeURIComponent(id)); }catch(e){}
   $('histbar').style.display = 'none';
   $('title').disabled = false;
   kindPanel(id);
@@ -357,7 +360,37 @@ function leaveHistory(){
   setAt(parseInt($('hist').max, 10), parseInt($('hist').max, 10));
 }
 
-refreshIndex();
+function removeDoc(){
+  if(!noteId) return;
+  if(!confirm('Remove this document for every connected instance? (the history slider keeps its past)')) return;
+  api('Note.remove ' + q(noteId), function(err, body){
+    if(err){ status(err); return; }
+    noteId = ''; if(polling) clearInterval(polling);
+    $('title').value = ''; $('title').disabled = true;
+    $('blocks').innerHTML = '<div id="empty">No note open.</div>';
+    $('kindbar').style.display = 'none'; $('result').style.display = 'none';
+    try{ history.replaceState(null, '', location.pathname); }catch(e){}
+    status(body); refreshIndex();
+  });
+}
+
+// the peer pulse: how many live links the notes node has right now
+function refreshPeers(){
+  api('Note.info', function(err, body){
+    if(err) return;
+    var m = body.match(/live links\s+(\d+)/);
+    var el = $('peers');
+    if(m && el) el.textContent = m[1] === '0' ? 'no peers linked' : m[1] + ' peer link(s) live';
+  });
+}
+
+refreshIndex(function(){
+  // a shared URL opens its document directly: /notes?id=nLAM-HEX
+  var m = location.search.match(/[?&]id=([^&]+)/);
+  if(m){ var id = decodeURIComponent(m[1]); $('pick').value = id; open(id); }
+});
 setInterval(refreshIndex, 8000);
+refreshPeers();
+setInterval(refreshPeers, 8000);
 })();
 </script>

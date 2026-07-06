@@ -38,7 +38,10 @@ tutorials</b></a> — sorting, searching, and maze-flooding algorithms play step
 slider, and the Latte language explains itself in four live boxes. And to connect this Orpheus
 to others — over a LAN or the open Internet — open <a href="/network"><b>the network page</b></a>:
 a shared, persistent ledger that converges across machines, time travel over its history,
-distributed workers, and model training whose consolidated result lands in the durable log.</p>
+distributed workers, and model training whose consolidated result lands in the durable log.
+And to <em>work together</em>, open <a href="/notes"><b>the shared documents editor</b></a>:
+notes, economic plans, quadratic-vote ballots, live code modules, and conlangs, each edited
+concurrently by every connected instance and put to work with one button.</p>
 
 <h2>Core vocabulary</h2>
 <table>

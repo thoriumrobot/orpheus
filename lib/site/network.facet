@@ -65,6 +65,10 @@ public address — the wire is plain TCP.</p>
     connector <b>retries forever</b>, so you can connect first and start the peer later — the
     logs reconcile the moment it appears. Connections work in either direction; one side
     suffices.</p>
+    {{ Live.form("Net.connect(host)", [["host", "192.168.1.20"]]) }}
+    <p class="lede"><code>Net.connect</code> is the ONE-STOP form: it dials the peer's ledger
+    (<code>host:9600</code>) and its shared documents (<code>host:9601</code>) together. The
+    forms below manage the ledger link alone.</p>
     {{ Live.form("Kv.connect(addr)", [["addr", "192.168.1.20:9600"]]) }}
     {{ Live.form("Kv.forget(addr)", [["addr", "192.168.1.20:9600"]]) }}
     {{ Live.watch("Kv.peers()", [], 5) }}

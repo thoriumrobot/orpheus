@@ -1177,6 +1177,38 @@ fn named_store(name: &str) -> Result<Option<std::path::PathBuf>, String> {
     Ok(Some(crate::rustgen::cache_dir().join("stores").join(name)))
 }
 
+/// ONE-STOP PEERING: "connect this Orpheus to that Orpheus". A bare host
+/// dials the two default ports (ledger 9600, notes 9601); "host:port" dials
+/// the ledger there and the notes node at port+1. Each link retries forever
+/// and persists; Kv.forget / Note.forget undo them separately.
+fn tool_net_connect(args: &[Val]) -> Result<Val, String> {
+    let host = arg_text(args, 0)?;
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Net.connect: give the other instance's host (or host:ledger-port)".into());
+    }
+    let (kv_addr, notes_addr) = match host.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() => {
+            let port: u32 = p.parse().unwrap();
+            (format!("{}:{}", h, port), format!("{}:{}", h, port + 1))
+        }
+        _ => (format!("{}:9600", host), format!("{}:9601", host)),
+    };
+    let mut lines = Vec::new();
+    match crate::ledger::connect(&kv_addr) {
+        Ok(m) => lines.push(format!("ledger → {}", m)),
+        Err(e) => lines.push(format!("ledger: {}", e)),
+    }
+    match crate::notes::connect(&notes_addr) {
+        Ok(m) => lines.push(format!("notes → {}", m)),
+        Err(e) => lines.push(format!("notes: {}", e)),
+    }
+    Ok(ok_note(&format!(
+        "{} — one command, both layers: the shared ledger and the shared documents reconcile with that instance",
+        lines.join(" · ")
+    )))
+}
+
 fn tool_net_workers(_args: &[Val]) -> Result<Val, String> {
     let ws = crate::dist::workers();
     let rows: Vec<Vec<String>> = ws
@@ -1711,7 +1743,9 @@ fn tool_code_run(args: &[Val]) -> Result<Val, String> {
         return Err("this document is not a `core NAME` module — leave expr blank to run the document itself".into());
     }
     let refs: Vec<&str> = libs.iter().map(|x| x.as_str()).collect();
-    let v = crate::latte::run_with_libs(&run_expr, &refs)?;
+    // shared code earns the adaptive engine too: profiled, JIT-compiled when
+    // hot, distributed when the shape allows and workers are registered
+    let v = crate::rustgen::run_adaptive(&run_expr, &refs)?;
     Ok(Val::Text(format!("<code>{}</code>", html_escape(&crate::net::show_state(&v)))))
 }
 
@@ -1813,6 +1847,12 @@ fn tool_note_del(args: &[Val]) -> Result<Val, String> {
     let bid = arg_text(args, 1)?;
     crate::notes::del_block(id.trim(), &bid)?;
     Ok(ok_note(&format!("block {} tombstoned (it still anchors concurrent inserts)", bid.trim())))
+}
+
+fn tool_note_remove(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    crate::notes::remove(id.trim())?;
+    Ok(ok_note(&format!("document {} removed (its events stay in the log — the history slider still replays it)", id.trim())))
 }
 
 fn tool_note_retitle(args: &[Val]) -> Result<Val, String> {
@@ -2039,7 +2079,10 @@ fn tool_latte_eval(args: &[Val]) -> Result<Val, String> {
     // for speed; the scope-core cache made the full scope effectively free.)
     let libs = crate::latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
-    let n = crate::latte::run_with_libs(&expr, &refs).map_err(|e| format!("Latte.eval: {}", e))?;
+    // the ADAPTIVE engine, not the bare interpreter: page evaluations profile
+    // themselves, compile when measured hot, and distribute eligible shapes
+    // across registered workers — the same policy `latte eval` applies
+    let n = crate::rustgen::run_adaptive(&expr, &refs).map_err(|e| format!("Latte.eval: {}", e))?;
     Ok(Val::Text(render_noun(&n)))
 }
 
@@ -2271,6 +2314,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
         },
         ToolSpec {
             module: "Net",
+            proc: "connect",
+            sig: "Net.connect(host)",
+            summary: "ONE-STOP peering: dial another instance's ledger (host:9600) and notes (host:9601) together — both layers reconcile; links retry forever and persist — use inside Live.form",
+            handler: tool_net_connect,
+        },
+        ToolSpec {
+            module: "Net",
             proc: "workers",
             sig: "Net.workers()",
             summary: "the worker registry with liveness — every address distribution may fan work out to",
@@ -2387,6 +2437,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             sig: "Note.del(id, bid)",
             summary: "tombstone a block: it leaves the page but keeps holding its position for concurrent anchors — use inside Live.form",
             handler: tool_note_del,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "remove",
+            sig: "Note.remove(id)",
+            summary: "remove a whole document from the live view (its events remain in the log; time travel still replays it) — use inside Live.form",
+            handler: tool_note_remove,
         },
         ToolSpec {
             module: "Note",
@@ -3453,6 +3510,31 @@ mod tests {
         // fewer than 4 points refuses gracefully
         let out = tool_net_trainledger(&[Val::Text("nosuch.".into())]).unwrap().to_text();
         assert!(out.contains("need at least 4"), "{}", out);
+    }
+
+    #[test]
+    fn one_stop_connect_and_document_removal() {
+        let _g = crate::notes::test_guard();
+        crate::ledger::init(None, "", &[], Some(17)).unwrap();
+        crate::notes::init(None, "", &[], Some(17)).unwrap();
+        // Net.connect derives both addresses from one host
+        let out = tool_net_connect(&[Val::Text("127.0.0.1:9750".into())]).unwrap().to_text();
+        assert!(out.contains("9750") && out.contains("9751"), "both layers dialled: {}", out);
+        // stop the retry loops and drop the persisted intents
+        crate::ledger::forget("127.0.0.1:9750").unwrap();
+        crate::notes::forget("127.0.0.1:9751").unwrap();
+        // bare host → default ports
+        let out = tool_net_connect(&[Val::Text("203.0.113.9".into())]).unwrap().to_text();
+        assert!(out.contains("203.0.113.9:9600") && out.contains("203.0.113.9:9601"), "{}", out);
+        crate::ledger::forget("203.0.113.9:9600").unwrap();
+        crate::notes::forget("203.0.113.9:9601").unwrap();
+        // Note.remove drops the doc from the live view; history still has it
+        let id = crate::notes::create_kind("n", "ephemeral").unwrap();
+        crate::notes::append_block(&id, "x", "soon gone").unwrap();
+        let total = crate::notes::event_count();
+        tool_note_remove(&[Val::Text(id.clone())]).unwrap();
+        assert!(crate::notes::read_note(&id, 0).unwrap().is_none(), "removed from the present");
+        assert!(crate::notes::read_note(&id, total).unwrap().is_some(), "time travel still replays it");
     }
 
     #[test]

@@ -13,6 +13,21 @@ external crates. Its layers:
 | Server | **Hymn** | a web server hosting Facet pages (static assets + fonts) |
 | Sound-change applier | **SCArs** | a fully-featured conlang sound-change engine, written in Latte |
 
+## Two machines, five commands
+
+```sh
+machine-a$ latte gui                  # prints its URLs and node identities
+machine-b$ latte gui
+# in either browser: open /network and submit  Net.connect <other-host>
+#   — the shared ledger AND the shared documents reconcile, both directions
+# write together at /notes · put keys at /network · train models on shared data
+machine-b$ latte worker --listen 0.0.0.0:9700    # optional: lend compute
+# register it on A's /network page — distribution becomes the default
+```
+
+Every form on those pages is a `Module.procedure` tool that works identically
+typed into the System console — one registry, three surfaces.
+
 It keeps shared state across machines over the Internet (content-addressed event log,
 gossip, no blockchain), persists durably with safe upgrades, accelerates with audited
 jets, and ships a working application: a sound-change applier that a hosted web page
