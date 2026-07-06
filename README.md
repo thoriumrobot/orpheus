@@ -273,6 +273,21 @@ round, and **only the final consolidated model is committed to the persistent
 log** (one kv `%put` event under `--store DIR`); the intermediate cycles never
 touch it. See `docs/distributed-execution.md`.
 
+**All of it has a GUI.** `latte gui` hosts a **ledger** — a persistent,
+gossiped kv node on the same layer as `latte node` (listening on `:9600` by
+default) — and the `/network` page is its interactive interface: connect
+peers over the Internet with a form (retry-forever links; either direction
+suffices), put durable keys and watch them converge on every connected
+instance's page within seconds, scrub a **time-travel slider** over the
+shared history, manage the worker registry, run distribution-aware
+evaluations, and train models whose final consolidated state lands as one
+event in a durable store — then predict from that persisted model, on the
+page. The same `Kv.*` / `Net.*` commands work typed into any System console
+text (`Kv.put greeting "hello"`), because pages and the console share one
+tool registry. A new Facet widget, `Live.watch(expr, fields, secs)`,
+re-runs itself every few seconds so gossiped events and worker liveness
+appear without any user action. See `docs/network-gui.md`.
+
 ## Mocha — the application environment
 
 Mocha runs higher-level **apps written in Latte** on the same persistent, distributed

@@ -1,0 +1,141 @@
+<!-- THE NETWORK PAGE: connect Orpheus instances over the Internet and make
+     productive use of the persistent state — entirely through the GUI.
+     Every element reuses an existing sophisticated piece:
+       · the LEDGER is src/ledger.rs: a kv-agent Node (src/net.rs gossip +
+         src/agent.rs) hosted inside the GUI server — the same machinery
+         `latte node` runs, so a GUI and a bare CLI node are full peers
+       · Kv.connect uses net.rs's retry-forever connectors (added at runtime),
+         so a peer that is offline now is adopted the moment it appears
+       · Live.watch polls, and the ledger's generation keys the render memo,
+         so a peer's gossiped event is in your very next repaint — never stale
+       · Net.* is src/dist.rs: the worker registry, distribution-aware eval,
+         FedAvg training, and models persisted as ONE event in a durable log -->
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network — connected Orpheus instances</title>
+<style>
+  :root { --paper:#fbf8f3; --rule:#8e8a7a; --title:#cfcaba; --ink:#1a1320; --accent:#5a1530; --heart:#8a1538; }
+  body { font-family:'Ligos', Georgia, 'Times New Roman', serif; max-width:48rem; margin:3rem auto; padding:0 1rem; line-height:1.6; color:var(--ink); background:var(--paper); }
+  h1 { font-variant:small-caps; letter-spacing:.03em; color:var(--accent); font-size:2.4rem; margin-bottom:0; }
+  .sub { color:#8a6d3b; font-style:italic; margin:.2rem 0 1.6rem; }
+  .panel { background:var(--paper); border:1.5px solid var(--rule); border-radius:4px; margin:1.4rem 0; box-shadow:0 1px 4px #0001; }
+  .panel > .t { background:var(--title); border-bottom:1.5px solid var(--rule); padding:5px 11px; font-weight:700; font-variant:small-caps; letter-spacing:.04em; color:var(--accent); border-radius:4px 4px 0 0; }
+  .panel > .b { padding:11px 13px; }
+  .lede { margin:.1rem 0 .8rem; color:#473b4a; }
+  table { border-collapse:collapse; width:100%; margin:.4rem 0; }
+  td, th { border-bottom:1px solid #e4dccc; padding:.32rem .6rem; text-align:left; vertical-align:top; }
+  th { color:var(--accent); font-variant:small-caps; letter-spacing:.03em; }
+  code { background:#efe9dd; padding:0 .3rem; border-radius:3px; font-family:'DejaVu Sans Mono', ui-monospace, monospace; font-size:.92em; }
+  .feat { color:#6b6256; font-style:italic; font-size:.9em; }
+  .live { display:inline-flex; gap:.4rem; align-items:baseline; flex-wrap:wrap; }
+  .live input.li, .live select.li { font-family:inherit; font-size:.95rem; padding:.2rem .45rem; border:1px solid var(--rule); border-radius:3px; background:#fff; color:var(--ink); }
+  .live input[type=range].li { padding:0; vertical-align:middle; accent-color:var(--accent); }
+  .live .liv { font-variant-numeric:tabular-nums; color:var(--accent); min-width:2.4em; display:inline-block; font-size:.9rem; }
+  .live .out { display:block; width:100%; }
+  footer { margin-top:2.4rem; color:#998; font-size:.85rem; border-top:1px solid #e4dccc; padding-top:1rem; }
+</style>
+
+<h1>The Network</h1>
+<p class="sub">Connect Orpheus instances — over a LAN or the open Internet — and put the shared,
+persistent state to work, all from this page.</p>
+
+<p class="lede">This GUI hosts a <b>ledger</b>: a persistent key-value <b>node</b> on the same
+gossip layer as <code>latte node</code>. Every put below is a durable event in an append-only
+log; peers exchange events continuously and fold them in one agreed total order, so connected
+instances converge on <b>byte-identical state</b> — no consensus protocol, no conflicts to
+resolve, and every past state kept. To try it with two machines: run <code>latte gui</code> on
+each, then paste one machine's address (it prints <code>ledger node … listen=0.0.0.0:9600</code>)
+into the other's <b>Connect</b> form. Behind NAT, forward the port or meet on a host with a
+public address — the wire is plain TCP.</p>
+
+<div class="panel">
+  <div class="t">This instance</div>
+  <div class="b">
+    <p class="lede">Identity and vitals — refreshed every few seconds by <code>Live.watch</code>,
+    so an arriving peer link or gossiped event shows up on its own.</p>
+    {{ Live.watch("Kv.info()", [], 5) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">Connect a peer</div>
+  <div class="b">
+    <p class="lede">Dial another instance's ledger (<code>host:9600</code> by default). The
+    connector <b>retries forever</b>, so you can connect first and start the peer later — the
+    logs reconcile the moment it appears. Connections work in either direction; one side
+    suffices.</p>
+    {{ Live.form("Kv.connect(addr)", [["addr", "192.168.1.20:9600"]]) }}
+    {{ Live.watch("Kv.peers()", [], 5) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">The shared ledger</div>
+  <div class="b">
+    <p class="lede">Durable, gossiped key-value state. Put something here, then watch it appear
+    on every connected instance's page (and vice versa) — the state table below refreshes
+    itself. Values that parse as numbers are stored as numbers; anything else as text.</p>
+    {{ Live.form("Kv.put(key, value)", [["key", "greeting"], ["value", "hello, network"]]) }}
+    {{ Live.form("Kv.del(key)", [["key", "greeting"]]) }}
+    {{ Live.watch("Kv.state()", [], 3) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">History &amp; time travel</div>
+  <div class="b">
+    <p class="lede">The event log <b>is</b> the state — so every past state is free. Scrub the
+    slider to replay the shared history event by event; the log shows who did what, in the
+    total order every node agrees on (lamport, then node id).</p>
+    {{ Live.view("Kv.at(k)", [["k", "0", "~", "0", "200", "1"]]) }}
+    {{ Live.view("Kv.log(n)", [["n", "12", "~", "3", "50", "1"]]) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">Workers — distributed execution</div>
+  <div class="b">
+    <p class="lede">A <b>worker</b> is any Orpheus instance running <code>latte worker</code>
+    (a phone in Termux counts). Register its address and distribution becomes the <b>default</b>:
+    distributable shapes — <code>dmap</code>, a measured-heavy <code>map</code>,
+    <code>predict_all</code> — split across the registered workers; failed chunks re-run locally,
+    so the answer is always complete and always correct.</p>
+    {{ Live.watch("Net.workers()", [], 5) }}
+    {{ Live.form("Net.addWorker(addr)", [["addr", "192.168.1.20:9700"]]) }}
+    {{ Live.form("Net.rmWorker(addr)", [["addr", "192.168.1.20:9700"]]) }}
+    {{ Live.form("Net.eval(expr)", [["expr", "(dmap (fn [x] -> (mul x x)) [ 1 [ 2 [ 3 [ 4 0 ] ] ] ])"]]) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">Distributed training → persistent model</div>
+  <div class="b">
+    <p class="lede">Cycles of distributed execution and consolidation: each round, every worker
+    runs local gradient steps on its own data shard; the models are consolidated by
+    <code>fedavg</code> (lib/dist.lat — computed in Latte); the error falls cycle over cycle.
+    Only when the cycles are done does the persistent state change: naming a store commits the
+    final consolidated model as <b>one</b> event in a durable log — which the widgets below then
+    read back and use for predictions. That is the whole loop: distributed work, consolidated
+    result, persistent state, productive use.</p>
+    {{ Live.form("Net.train(rounds, iters, store)", [["rounds", "3"], ["iters", "300"], ["store", "demo"]]) }}
+    {{ Live.box("Net.model(store)", [["store", "demo"]]) }}
+    {{ Live.box("Net.predict(store, x)", [["store", "demo"], ["x", "7"]]) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">The same commands, everywhere</div>
+  <div class="b">
+    <p class="lede">Every widget on this page is a <code>Module.procedure</code> tool from one
+    shared registry — the same commands work typed into any text of the
+    <a href="/">System console</a> (<code>Kv.put greeting "hello"</code> ·
+    <code>Kv.state</code> · <code>Net.workers</code> · <code>Net.train 3 300 demo</code>) and
+    from the CLI (<code>latte node</code>, <code>latte worker</code>, <code>latte workers</code>,
+    <code>latte ml linear --store DIR</code>). A page, a console text, and a shell are three
+    surfaces of one system.</p>
+  </div>
+</div>
+
+<footer>The gossip protocol, the worker protocol, and the store format are architecture-independent
+— a PC, a phone (docs/android.md), and a server are full peers. Details: docs/network-gui.md.</footer>

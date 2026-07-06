@@ -35,7 +35,10 @@ sound-change applier to the Latte language, SVG charts, the market-data lab, dat
 and SHA3 hashing, is a live widget you can drive right in the browser. To be <em>taught</em> by
 the system rather than just handed its tools, open <a href="/learn"><b>the interactive
 tutorials</b></a> — sorting, searching, and maze-flooding algorithms play step by step under a
-slider, and the Latte language explains itself in four live boxes.</p>
+slider, and the Latte language explains itself in four live boxes. And to connect this Orpheus
+to others — over a LAN or the open Internet — open <a href="/network"><b>the network page</b></a>:
+a shared, persistent ledger that converges across machines, time travel over its history,
+distributed workers, and model training whose consolidated result lands in the durable log.</p>
 
 <h2>Core vocabulary</h2>
 <table>

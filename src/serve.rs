@@ -1559,6 +1559,16 @@ fn run_tool(cmd: &str) -> String {
         // parsed argument(s). Because every loaded library is linked into one namespace, the
         // arm is reachable by name — so the system's command set is just Latte source.
         _ if head.contains('.') && head.split('.').all(|p| is_ident(p)) => {
+            // HOST tools first (Kv.*, Net.*, Db.*, Txt.*, …): the console and
+            // Facet pages share ONE tool registry (facet::tool_specs), so a
+            // command works identically typed into a text or wired into a
+            // page widget. Rich HTML results are flattened to console text.
+            if let Some(res) = crate::facet::run_host_tool(head, rest) {
+                return match res {
+                    Ok(html) => strip_tags(&html),
+                    Err(e) => format!("{} error: {}", head, e),
+                };
+            }
             let arm = head.rsplit('.').next().unwrap_or(head);
             let expr = if rest.is_empty() {
                 format!("({} 0)", arm)
@@ -1574,6 +1584,41 @@ fn run_tool(cmd: &str) -> String {
             head
         ),
     }
+}
+
+/// Flatten tool HTML for the console log: tags removed, table rows and divs
+/// become lines, cells become columns, entities decoded.
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut tag = String::new();
+    for c in html.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' => {
+                in_tag = false;
+                let t = tag.trim_start_matches('/').split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                if matches!(t.as_str(), "tr" | "div" | "p" | "br" | "table") && !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                if matches!(t.as_str(), "td" | "th") && !out.ends_with([' ', '\n']) && !out.is_empty() {
+                    out.push_str("  ");
+                }
+            }
+            c if in_tag => tag.push(c),
+            c => out.push(c),
+        }
+    }
+    out.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string()
 }
 
 /// True for a Latte identifier / module name component.

@@ -146,6 +146,16 @@ appends an entry under a Lamport-pair key, `Db.board(board, n)` renders the newe
 `Db.sync(board, url)` reconciles the table with a peer node (see "Shared state over the
 network" in the-system.md).
 
+`Live.watch(expr, fields, secs)` is the third sibling: a `Live.view` that re-runs itself every
+`secs` seconds (clamped 1–60) with no user action — made for state that changes *behind the
+page's back*: gossiped ledger events, a worker coming alive, a peer link appearing. Its field
+list may be empty (a pure display). The `Kv.*` tools surface the GUI's **ledger** — the
+persistent, gossiped key-value node behind `/network` — and `Net.*` the distributed-execution
+layer (workers, distribution-aware eval, FedAvg training, persisted models); both are marked
+volatile, so their results are never served from the render memo, and the ledger's generation
+stamp keys that memo, so a gossiped event from a peer invalidates exactly the pages that show
+ledger state (see docs/network-gui.md).
+
 `Live.box` shows the result as text (escaped); `Live.view` inserts it as raw markup, so chart
 and HTML tools display live. As the reader edits a control, the widget re-evaluates the
 expression on the server through `POST /api/eval` and swaps in the new result — debounced, with

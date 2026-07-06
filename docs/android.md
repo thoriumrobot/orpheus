@@ -75,6 +75,11 @@ already and carries a mobile viewport.
 
 ## Phones and PCs are equal peers
 
+The GUI's **/network page** (docs/network-gui.md) works identically on a
+phone: the ledger it hosts converges with any PC's, the connect/put/time-travel
+forms are touch widgets, and the whole page refreshes itself as gossiped
+events arrive — verified cross-architecture in this repository's tests.
+
 The wire protocols — gossip (`latte node`) and evaluation tasks
 (`latte worker`) — are architecture-independent (length-framed jammed nouns;
 Latte programs are pure functions, so a task computes the same noun on any

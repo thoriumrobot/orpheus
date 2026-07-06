@@ -468,21 +468,7 @@ pub fn start(node: NodeHandle, cfg: Arc<Config>) -> Peers {
 
     // peer connectors (retry forever)
     for addr in cfg.peers.iter().cloned() {
-        let node = node.clone();
-        let peers = peers.clone();
-        let cfg = cfg.clone();
-        thread::spawn(move || loop {
-            match TcpStream::connect(&addr) {
-                Ok(s) => {
-                    if cfg.verbose {
-                        eprintln!("[{}] connected to {}", cfg.name, addr);
-                    }
-                    let _ = handle_conn(s, node.clone(), peers.clone(), cfg.clone());
-                }
-                Err(_) => {}
-            }
-            thread::sleep(Duration::from_millis(1000));
-        });
+        spawn_connector(node.clone(), peers.clone(), cfg.clone(), addr);
     }
 
     // anti-entropy: periodically advertise everything we hold, and GC the log
@@ -509,6 +495,30 @@ pub fn start(node: NodeHandle, cfg: Arc<Config>) -> Peers {
     }
 
     peers
+}
+
+/// One retrying peer connector: dial `addr`, run the sync protocol, reconnect
+/// on loss — forever. Shared by the startup peer list and runtime additions.
+fn spawn_connector(node: NodeHandle, peers: Peers, cfg: Arc<Config>, addr: String) {
+    thread::spawn(move || loop {
+        match TcpStream::connect(&addr) {
+            Ok(s) => {
+                if cfg.verbose {
+                    eprintln!("[{}] connected to {}", cfg.name, addr);
+                }
+                let _ = handle_conn(s, node.clone(), peers.clone(), cfg.clone());
+            }
+            Err(_) => {}
+        }
+        thread::sleep(Duration::from_millis(1000));
+    });
+}
+
+/// Connect to one more peer at RUNTIME — the engine behind the GUI's
+/// "connect" button. Identical to a peer named at startup: it retries
+/// forever, so a peer that is offline now is adopted the moment it appears.
+pub fn connect_peer(node: NodeHandle, peers: Peers, cfg: Arc<Config>, addr: String) {
+    spawn_connector(node, peers, cfg, addr);
 }
 
 fn handle_conn(stream: TcpStream, node: NodeHandle, peers: Peers, cfg: Arc<Config>) -> io::Result<()> {
@@ -688,6 +698,46 @@ mod tests {
         assert_eq!(b.state().unwrap(), a.state().unwrap());
         assert_eq!(show_state(&b.state().unwrap()), "5");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_connect_peer_reconciles_live_nodes() {
+        // Two LIVE nodes over real TCP; B dials A at RUNTIME (the GUI's
+        // "connect" button) with events already on both sides — they must
+        // converge, and new submissions must reach both.
+        let a = Arc::new(Mutex::new(mk(31)));
+        let b = Arc::new(Mutex::new(mk(32)));
+        let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr_a = la.local_addr().unwrap().to_string();
+        drop(la); // free the port for start() to rebind
+        let cfg_a = Arc::new(Config { name: "A".into(), listen: addr_a.clone(), peers: vec![], verbose: false, compact_every: 0 });
+        let cfg_b = Arc::new(Config { name: "B".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0 });
+        let peers_a = start(a.clone(), cfg_a);
+        let peers_b: Peers = Arc::new(Mutex::new(Vec::new()));
+        submit(&a, &peers_a, act_add(5));
+        submit(&b, &peers_b, act_add(7));
+        // runtime connection, exactly as ledger::connect does it
+        connect_peer(b.clone(), peers_b.clone(), cfg_b, addr_a);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let sa = a.lock().unwrap().state().unwrap();
+            let sb = b.lock().unwrap().state().unwrap();
+            if sa == sb && show_state(&sa) == "12" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "nodes did not converge: A={} B={}", show_state(&sa), show_state(&sb));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // a post-connection submission on either side reaches the other
+        submit(&b, &peers_b, act_add(3));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if show_state(&a.lock().unwrap().state().unwrap()) == "15" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "post-connect event did not propagate");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     #[test]

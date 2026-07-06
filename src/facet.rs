@@ -814,7 +814,9 @@ if(force){window.dispatchEvent(new Event('facet-action'));}});}\
 var btn=box.querySelector('.lgo');\
 if(btn){btn.addEventListener('click',function(){set('…');run(true);});}\
 else{ins.forEach(function(i){['input','change'].forEach(function(ev){i.addEventListener(ev,function(){if(i.nextElementSibling&&i.nextElementSibling.className==='liv'){i.nextElementSibling.textContent=i.value;}clearTimeout(timer);timer=setTimeout(run,140);});});});\
-window.addEventListener('facet-action',function(){cache={};last=null;run(false);});}}\
+window.addEventListener('facet-action',function(){cache={};last=null;run(false);});}\
+var evr=box.getAttribute('data-live-every');\
+if(evr&&!btn){setInterval(function(){cache={};last=null;run(false);},Math.max(1,parseInt(evr,10)||3)*1000);}}\
 document.querySelectorAll('[data-live-expr]').forEach(wire);})();</script>";
 
 /// `Live.box(expr, [name, default, …])` renders a LIVE, client-updating widget: one text input per
@@ -828,16 +830,20 @@ document.querySelectorAll('[data-live-expr]').forEach(wire);})();</script>";
 /// `[name, default, …]` pairs (text inputs) or structured `[[name, default, opt…], …]` (text inputs
 /// and dropdowns).
 fn build_live_widget(expr: &str, fields_val: &[Val], html_out: bool) -> Result<String, String> {
-    build_live_widget_mode(expr, fields_val, html_out, false)
+    build_live_widget_mode(expr, fields_val, html_out, false, 0)
 }
 
 /// `form = true` is the ACTION widget (`Live.form`): the expression runs ONLY when
 /// its button is clicked — never at render time (a page view must not perform the
 /// action), never on keystrokes, and never from the client cache (a second click
 /// must re-execute). Made for side-effecting tools like Db.post and Db.sync.
-fn build_live_widget_mode(expr: &str, fields_val: &[Val], html_out: bool, form: bool) -> Result<String, String> {
-    if fields_val.is_empty() {
-        return Err("a live widget needs a non-empty field list".into());
+/// `every > 0` is the WATCH widget (`Live.watch`): the client re-runs the
+/// expression every `every` seconds, so state arriving from the NETWORK —
+/// gossiped ledger events, a worker coming alive — appears without any user
+/// action. A watch widget may have an empty field list (pure display).
+fn build_live_widget_mode(expr: &str, fields_val: &[Val], html_out: bool, form: bool, every: u64) -> Result<String, String> {
+    if fields_val.is_empty() && every == 0 {
+        return Err("a live widget needs a non-empty field list (or use Live.watch for a field-less display)".into());
     }
     struct Field {
         name: String,
@@ -927,10 +933,12 @@ fn build_live_widget_mode(expr: &str, fields_val: &[Val], html_out: bool, form: 
         if html_out { (initial.clone(), " data-live-html=\"1\"") } else { (esc_attr(&initial), "") };
     // the form's button carries class "lgo": the runtime wires click -> run(force)
     let button = if form { "<button class=\"lgo\" type=\"button\">Go</button>" } else { "" };
+    let every_attr = if every > 0 { format!(" data-live-every=\"{}\"", every) } else { String::new() };
     let widget = format!(
-        "<span class=\"live\" data-live-expr=\"{expr}\"{marker}>{controls}{button} <span class=\"out\">{out}</span></span>",
+        "<span class=\"live\" data-live-expr=\"{expr}\"{marker}{every}>{controls}{button} <span class=\"out\">{out}</span></span>",
         expr = esc_attr(expr),
         marker = marker,
+        every = every_attr,
         controls = controls,
         button = button,
         out = out_html
@@ -1038,13 +1046,364 @@ fn fmt_when(ms: u64) -> String {
     format!("{} {:02}:{:02} UTC", date, hh, mm)
 }
 
+// ---------------------------------------------------------------------------
+// Kv.* — the LEDGER: the GUI's persistent, gossiped key-value node
+// (src/ledger.rs). Where Db.* is this node's own WAL database with explicit
+// pull/push sync, the ledger is the EVENT-SOURCED layer: every put is a
+// durable event in an append-only log, gossiped continuously to every
+// connected peer, with strong-eventual-consistency convergence and free time
+// travel. Two GUIs pointed at each other (Kv.connect) share one ledger.
+// ---------------------------------------------------------------------------
+
+fn html_rows(headers: &[&str], rows: &[Vec<String>], empty: &str) -> String {
+    if rows.is_empty() {
+        return format!("<span class=\"feat\">{}</span>", html_escape(empty));
+    }
+    let mut t = String::from("<table><tr>");
+    for h in headers {
+        t.push_str(&format!("<th>{}</th>", html_escape(h)));
+    }
+    t.push_str("</tr>");
+    for r in rows {
+        t.push_str("<tr>");
+        for c in r {
+            t.push_str(&format!("<td>{}</td>", html_escape(c)));
+        }
+        t.push_str("</tr>");
+    }
+    t.push_str("</table>");
+    t
+}
+
+fn ok_note(msg: &str) -> Val {
+    Val::Text(format!("<span style=\"color:#7a9\">{}</span>", html_escape(msg)))
+}
+
+fn tool_kv_info(_args: &[Val]) -> Result<Val, String> {
+    match crate::ledger::info_lines() {
+        Ok(lines) => {
+            let rows: Vec<Vec<String>> = lines.into_iter().map(|(k, v)| vec![k, v]).collect();
+            Ok(Val::Text(html_rows(&["", ""], &rows, "")))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+fn tool_kv_state(_args: &[Val]) -> Result<Val, String> {
+    match crate::ledger::state_rows() {
+        Ok(rows) => {
+            let rows: Vec<Vec<String>> = rows.into_iter().map(|(k, v)| vec![k, v]).collect();
+            Ok(Val::Text(html_rows(&["key", "value"], &rows, "the ledger is empty — Kv.put something")))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+fn tool_kv_at(args: &[Val]) -> Result<Val, String> {
+    let k = arg_num_or(args, 0, u128::MAX) as usize;
+    match crate::ledger::state_at_rows(k) {
+        Ok((at, total, rows)) => {
+            let rows: Vec<Vec<String>> = rows.into_iter().map(|(k, v)| vec![k, v]).collect();
+            Ok(Val::Text(format!(
+                "<div class=\"feat\">state as of event {} of {} (event sourcing gives every past state for free)</div>{}",
+                at,
+                total,
+                html_rows(&["key", "value"], &rows, "(empty at this point in history)")
+            )))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+fn tool_kv_log(args: &[Val]) -> Result<Val, String> {
+    let n = arg_num_or(args, 0, 12) as usize;
+    match crate::ledger::log_rows(n.clamp(1, 200)) {
+        Ok(rows) => {
+            let rows: Vec<Vec<String>> = rows
+                .into_iter()
+                .map(|(lam, nid, act)| vec![lam.to_string(), format!("{:x}", nid), act])
+                .collect();
+            Ok(Val::Text(html_rows(&["lamport", "node", "event"], &rows, "no events yet")))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+fn tool_kv_put(args: &[Val]) -> Result<Val, String> {
+    let k = arg_text(args, 0)?;
+    let v = arg_text(args, 1)?;
+    crate::ledger::put(&k, &v).map(|m| ok_note(&m))
+}
+
+fn tool_kv_del(args: &[Val]) -> Result<Val, String> {
+    let k = arg_text(args, 0)?;
+    crate::ledger::del(&k).map(|m| ok_note(&m))
+}
+
+fn tool_kv_connect(args: &[Val]) -> Result<Val, String> {
+    let addr = arg_text(args, 0)?;
+    crate::ledger::connect(&addr).map(|m| ok_note(&m))
+}
+
+fn tool_kv_peers(_args: &[Val]) -> Result<Val, String> {
+    match crate::ledger::peers_info() {
+        Ok((addrs, live)) => {
+            let rows: Vec<Vec<String>> = addrs.into_iter().map(|a| vec![a]).collect();
+            Ok(Val::Text(format!(
+                "<div class=\"feat\">{} live link(s) right now (dialled peers retry forever; inbound peers count as links too)</div>{}",
+                live,
+                html_rows(&["peer address"], &rows, "no peers dialled — Kv.connect one, or have a peer connect to this node")
+            )))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Net.* — DISTRIBUTED EXECUTION, surfaced to pages: the worker registry, a
+// distribution-aware evaluator, and FedAvg model training with the final
+// consolidated model committed to a persistent store (src/dist.rs).
+// ---------------------------------------------------------------------------
+
+/// A named model store under the cache dir — pages name stores, never paths.
+fn named_store(name: &str) -> Result<Option<std::path::PathBuf>, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.len() > 40 || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        return Err("store names are short identifiers (letters, digits, - and _)".into());
+    }
+    Ok(Some(crate::rustgen::cache_dir().join("stores").join(name)))
+}
+
+fn tool_net_workers(_args: &[Val]) -> Result<Val, String> {
+    let ws = crate::dist::workers();
+    let rows: Vec<Vec<String>> = ws
+        .iter()
+        .map(|w| {
+            vec![
+                w.clone(),
+                if crate::dist::worker_alive(w) { "alive".into() } else { "unreachable (chunks fall back locally)".into() },
+            ]
+        })
+        .collect();
+    Ok(Val::Text(html_rows(
+        &["worker", "status"],
+        &rows,
+        "no workers registered — distribution stays local (start one: latte worker; add it below)",
+    )))
+}
+
+fn tool_net_addworker(args: &[Val]) -> Result<Val, String> {
+    let addr = arg_text(args, 0)?;
+    let addr = addr.trim();
+    if addr.is_empty()
+        || !addr.contains(':')
+        || !addr.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_'))
+    {
+        return Err("Net.addWorker: give a worker as host:port (e.g. 192.168.1.20:9700)".into());
+    }
+    crate::dist::workers_add(addr).map_err(|e| format!("Net.addWorker: {}", e))?;
+    Ok(ok_note(&format!(
+        "added {} — the adaptive engine now distributes eligible work to it by default",
+        addr
+    )))
+}
+
+fn tool_net_rmworker(args: &[Val]) -> Result<Val, String> {
+    let addr = arg_text(args, 0)?;
+    crate::dist::workers_remove(addr.trim()).map_err(|e| format!("Net.rmWorker: {}", e))?;
+    Ok(ok_note(&format!("removed {}", addr.trim())))
+}
+
+fn tool_net_eval(args: &[Val]) -> Result<Val, String> {
+    let expr = arg_text(args, 0)?;
+    let expr = expr.trim();
+    if expr.is_empty() || expr.len() > 4000 {
+        return Err("Net.eval: give a Latte expression (up to 4000 chars)".into());
+    }
+    let libs_owned = crate::latte::all_libs();
+    let libs: Vec<&str> = libs_owned.iter().map(|x| x.as_str()).collect();
+    let ws = crate::dist::workers();
+    let (result, note) = match crate::dist::detect(expr) {
+        Some(shape) if !ws.is_empty() => (
+            crate::dist::distribute(&ws, &shape, expr, &libs, false)?,
+            format!("distributed across {} worker(s)", ws.len()),
+        ),
+        Some(_) => (
+            crate::latte::run_with_libs(expr, &libs)?,
+            "distributable shape, but no workers registered — evaluated locally".into(),
+        ),
+        None => (crate::latte::run_with_libs(expr, &libs)?, "evaluated locally (not a distributable shape)".into()),
+    };
+    Ok(Val::Text(format!(
+        "<code>{}</code> <span class=\"feat\">— {}</span>",
+        html_escape(&crate::net::show_state(&result)),
+        html_escape(&note)
+    )))
+}
+
+fn tool_net_train(args: &[Val]) -> Result<Val, String> {
+    let rounds = arg_num_or(args, 0, 3).clamp(1, 10) as u64;
+    let iters = arg_num_or(args, 1, 300).clamp(1, 20_000) as u64;
+    let store_name = args.get(2).map(|v| v.to_text()).unwrap_or_default();
+    let store_path = named_store(&store_name)?;
+    let store_str = store_path.as_ref().map(|p| p.to_string_lossy().to_string());
+    let ws = crate::dist::workers();
+    let (xs, ys) = crate::dist::demo_data();
+    let rep = crate::dist::fedavg_linear(
+        &ws,
+        &xs,
+        &ys,
+        rounds,
+        iters,
+        &crate::dist::spos(25),
+        store_str.as_deref(),
+        false,
+    )?;
+    let rows: Vec<Vec<String>> = rep
+        .rounds
+        .iter()
+        .enumerate()
+        .map(|(i, r)| vec![format!("round {}", i + 1), format!("MSE {}", r.mse)])
+        .collect();
+    let mut out = String::from("<div class=\"feat\">y = w·x + b on 12 points of y = 2x + 1 — local SGD per shard, FedAvg consolidation in Latte per round</div>");
+    out.push_str(&html_rows(&["cycle", "consolidated model, full-data error"], &rows, ""));
+    out.push_str(&format!(
+        "<div>learned <b>w = {}</b>, <b>b = {}</b> · {} shard(s) on {} worker(s), {} local fallback(s)</div>",
+        html_escape(&crate::dist::fmt_signed(&rep.w)),
+        html_escape(&crate::dist::fmt_signed(&rep.b)),
+        rep.shards,
+        if ws.is_empty() { 0 } else { ws.len() },
+        rep.local_fallbacks
+    ));
+    match (&rep.persisted, store_name.trim().is_empty()) {
+        (Some(_), _) => out.push_str(&format!(
+            "<div style=\"color:#7a9\">persistent state updated: ONE event (kv %model) in store '{}' — the training cycles never touched the log</div>",
+            html_escape(store_name.trim())
+        )),
+        (None, true) => out.push_str("<div class=\"feat\">no store named — the model was not persisted (name one to commit it)</div>"),
+        (None, false) => {}
+    }
+    Ok(Val::Text(out))
+}
+
+/// Read the persisted model `[w b]` from a named store (written by Net.train
+/// or `latte ml linear --store`). Returns None when the store has no model.
+fn read_model(store_name: &str) -> Result<Option<(crate::knot::N, crate::knot::N)>, String> {
+    let path = match named_store(store_name)? {
+        Some(p) => p,
+        None => return Err("name a model store (the one Net.train wrote)".into()),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let agent = crate::agent::Agent::new_kv()?;
+    let node = crate::net::Node::open(1, agent, &path.to_string_lossy(), 0).map_err(|e| e.to_string())?;
+    let st = node.state().map_err(|e| format!("{:?}", e))?;
+    // assoc list [[%model [w b]] …]
+    let mut cur = st;
+    while let crate::knot::Knot::Cell(pair, rest) = &*cur.clone() {
+        if let Some((k, v)) = pair.as_cell() {
+            if k.as_atom().and_then(|a| a.as_cord()).as_deref() == Some("model") {
+                if let Some((w, b)) = v.as_cell() {
+                    return Ok(Some((w.clone(), b.clone())));
+                }
+            }
+        }
+        cur = rest.clone();
+    }
+    Ok(None)
+}
+
+fn tool_net_model(args: &[Val]) -> Result<Val, String> {
+    let name = args.first().map(|v| v.to_text()).unwrap_or_default();
+    if name.trim().is_empty() {
+        return Ok(Val::Text("<span class=\"feat\">name a model store to inspect</span>".into()));
+    }
+    match read_model(&name) {
+        Ok(Some((w, b))) => Ok(Val::Text(format!(
+            "store '{}': <b>w = {}</b>, <b>b = {}</b> <span class=\"feat\">(the final consolidated model — one event in a durable, gossipable log)</span>",
+            html_escape(name.trim()),
+            html_escape(&crate::dist::fmt_signed(&w)),
+            html_escape(&crate::dist::fmt_signed(&b))
+        ))),
+        Ok(None) => Ok(Val::Text(format!(
+            "<span class=\"feat\">store '{}' holds no model yet — run Net.train with that store name</span>",
+            html_escape(name.trim())
+        ))),
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+/// "3.5" / "-2" → the signed fixed-point noun lib/num.lat uses ([sign mag], ×1000).
+fn parse_signed(s: &str) -> Result<crate::knot::N, String> {
+    let t = s.trim();
+    let (sign, rest) = match t.strip_prefix('-') {
+        Some(r) => (1u128, r),
+        None => (0u128, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let (ip, fp) = match rest.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (rest, ""),
+    };
+    let int: u128 = if ip.is_empty() { 0 } else { ip.parse().map_err(|_| format!("'{}' is not a number", s))? };
+    let mut frac = fp.to_string();
+    frac.truncate(3);
+    while frac.len() < 3 {
+        frac.push('0');
+    }
+    let frac: u128 = if frac.is_empty() { 0 } else { frac.parse().map_err(|_| format!("'{}' is not a number", s))? };
+    Ok(crate::knot::cell(crate::knot::num(sign), crate::knot::num(int * 1000 + frac)))
+}
+
+fn tool_net_predict(args: &[Val]) -> Result<Val, String> {
+    let name = arg_text(args, 0)?;
+    let x = arg_text(args, 1)?;
+    let (w, b) = match read_model(&name)? {
+        Some(m) => m,
+        None => {
+            return Ok(Val::Text(format!(
+                "<span class=\"feat\">store '{}' holds no model yet — run Net.train first</span>",
+                html_escape(name.trim())
+            )))
+        }
+    };
+    let xv = parse_signed(&x)?;
+    let expr = format!(
+        "(predict {} {} {})",
+        crate::dist::noun_literal(&w).ok_or("model too large to render")?,
+        crate::dist::noun_literal(&b).ok_or("model too large to render")?,
+        crate::dist::noun_literal(&xv).ok_or("input too large to render")?
+    );
+    let libs_owned = crate::latte::all_libs();
+    let libs: Vec<&str> = libs_owned.iter().map(|s| s.as_str()).collect();
+    let y = crate::latte::run_with_libs(&expr, &libs)?;
+    Ok(Val::Text(format!(
+        "y({}) = <b>{}</b> <span class=\"feat\">— computed by lib/ml.lat's predict from the persisted model</span>",
+        html_escape(x.trim()),
+        html_escape(&crate::dist::fmt_signed(&y))
+    )))
+}
+
+fn tool_live_watch(args: &[Val]) -> Result<Val, String> {
+    let expr = arg_text(args, 0)?;
+    let fields: &[Val] = match args.get(1) {
+        Some(Val::List(vs)) => vs.as_slice(),
+        _ => &[],
+    };
+    let secs = arg_num_or(args, 2, 3).clamp(1, 60) as u64;
+    Ok(Val::Text(build_live_widget_mode(&expr, fields, true, false, secs)?))
+}
+
 fn tool_live_form(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
     let fields = match args.get(1) {
         Some(Val::List(vs)) => vs.as_slice(),
         _ => return Err("Live.form(expr, fields) needs a field list".into()),
     };
-    Ok(Val::Text(build_live_widget_mode(&expr, fields, true, true)?))
+    Ok(Val::Text(build_live_widget_mode(&expr, fields, true, true, 0)?))
 }
 fn tool_live_box(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
@@ -1306,6 +1665,118 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_live_view,
         },
         ToolSpec {
+            module: "Live",
+            proc: "watch",
+            sig: "Live.watch(expr, fields, secs)",
+            summary: "a live widget that re-runs itself every `secs` seconds — network state (gossiped ledger events, worker liveness) appears without any user action; fields may be empty",
+            handler: tool_live_watch,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "info",
+            sig: "Kv.info()",
+            summary: "this instance's ledger node: id, listen address, event count, store, live peer links",
+            handler: tool_kv_info,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "state",
+            sig: "Kv.state()",
+            summary: "the ledger's current key-value state — the deterministic fold of the shared event log",
+            handler: tool_kv_state,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "at",
+            sig: "Kv.at(k)",
+            summary: "TIME TRAVEL: the ledger state as of the first k events — put it on a slider and scrub history",
+            handler: tool_kv_at,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "log",
+            sig: "Kv.log(n)",
+            summary: "the last n ledger events (lamport, node, action) — the shared history itself, newest first",
+            handler: tool_kv_log,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "put",
+            sig: "Kv.put(key, value)",
+            summary: "a durable, GOSSIPED write: one event in the append-only log, pushed to every connected peer — use inside Live.form",
+            handler: tool_kv_put,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "del",
+            sig: "Kv.del(key)",
+            summary: "a durable, gossiped delete — use inside Live.form",
+            handler: tool_kv_del,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "connect",
+            sig: "Kv.connect(addr)",
+            summary: "dial another Orpheus instance (host:port) at runtime; the link retries forever and the ledgers reconcile automatically — use inside Live.form",
+            handler: tool_kv_connect,
+        },
+        ToolSpec {
+            module: "Kv",
+            proc: "peers",
+            sig: "Kv.peers()",
+            summary: "the peers this ledger dials, and how many links are live right now",
+            handler: tool_kv_peers,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "workers",
+            sig: "Net.workers()",
+            summary: "the worker registry with liveness — every address distribution may fan work out to",
+            handler: tool_net_workers,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "addWorker",
+            sig: "Net.addWorker(addr)",
+            summary: "register a worker (host:port of a `latte worker`) — distribution becomes the default for eligible work — use inside Live.form",
+            handler: tool_net_addworker,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "rmWorker",
+            sig: "Net.rmWorker(addr)",
+            summary: "remove a worker from the registry — use inside Live.form",
+            handler: tool_net_rmworker,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "eval",
+            sig: "Net.eval(expr)",
+            summary: "evaluate a Latte expression with distribution: a distributable shape (dmap/map/predict_all) splits across the registered workers; anything else runs locally — use inside Live.form",
+            handler: tool_net_eval,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "train",
+            sig: "Net.train(rounds, iters, store)",
+            summary: "distributed FedAvg training: rounds of local SGD on each worker's shard, consolidated in Latte; naming a store commits ONE final-model event — use inside Live.form",
+            handler: tool_net_train,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "model",
+            sig: "Net.model(store)",
+            summary: "the persisted model [w b] in a named store (written by Net.train or `latte ml linear --store`)",
+            handler: tool_net_model,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "predict",
+            sig: "Net.predict(store, x)",
+            summary: "predict y = w·x + b from the PERSISTED model — the trained state, productively used from a page",
+            handler: tool_net_predict,
+        },
+        ToolSpec {
             module: "Viz",
             proc: "chart",
             sig: "Viz.chart(kind, numbers)",
@@ -1541,7 +2012,72 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Phono", summary: "phonology: inventories, word generation, typology" },
         ModuleSpec { name: "Trade", summary: "the trading advisor — one engine, every market, switchable live" },
         ModuleSpec { name: "Db", summary: "shared persistent state: boards, posts, and node-to-node sync" },
+        ModuleSpec { name: "Kv", summary: "the ledger: the event-sourced, gossiped key-value node this GUI hosts" },
+        ModuleSpec { name: "Net", summary: "distributed execution: workers, distribution-aware eval, FedAvg training, persisted models" },
     ]
+}
+
+/// The System console's road into the SAME tool registry pages use: parse a
+/// `Module.proc arg …` command line (quote-aware; bare numbers become Num)
+/// and call the registered handler. Returns None when no such host tool
+/// exists, so the console can fall back to Latte-arm dispatch — one command
+/// namespace across pages and the console.
+pub fn run_host_tool(head: &str, rest: &str) -> Option<Result<String, String>> {
+    let (module, proc) = head.split_once('.')?;
+    let spec = tool_specs().iter().find(|s| s.module == module && s.proc == proc)?;
+    // Arity from the signature: a ONE-parameter tool takes the whole rest of
+    // the line verbatim (`Net.eval (dmap (fn [x] -> +(x)) xs)`, `Kv.del my
+    // key`); multi-parameter tools split quote-aware (`Kv.put greeting
+    // "hello world"`).
+    let arity = spec
+        .sig
+        .split_once('(')
+        .map(|(_, t)| {
+            let inner = t.trim_end_matches(')');
+            if inner.trim().is_empty() { 0 } else { inner.split(',').count() }
+        })
+        .unwrap_or(0);
+    let args = if arity == 1 && !rest.trim().is_empty() {
+        vec![Val::Text(rest.trim().trim_matches('"').to_string())]
+    } else {
+        split_console_args(rest)
+    };
+    Some((spec.handler)(&args).map(|v| v.to_text()))
+}
+
+/// Quote-aware argument splitting for console command lines:
+/// `Kv.put greeting "hello world"` → ["greeting", "hello world"].
+fn split_console_args(s: &str) -> Vec<Val> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                if in_q {
+                    out.push(cur.clone());
+                    cur.clear();
+                }
+                in_q = !in_q;
+            }
+            c if c.is_whitespace() && !in_q => {
+                if !cur.is_empty() {
+                    out.push(cur.clone());
+                    cur.clear();
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.into_iter()
+        .map(|t| match t.parse::<u128>() {
+            Ok(n) => Val::Num(n),
+            Err(_) => Val::Text(t),
+        })
+        .collect()
 }
 
 fn dispatch_tool(module: &str, proc: &str, args: &[Val]) -> Result<Val, String> {
@@ -1740,7 +2276,15 @@ fn cached_segments(expr: &str) -> Result<Arc<Vec<Seg>>, String> {
 /// and shared defaults are free; and on a result miss, the *parsed* expression is reused from
 /// `parse_cache`, so a fresh input value pays only for evaluation, never for re-parsing.
 pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
-    let gen = (crate::latte::lib_generation() ^ (crate::dbservice::data_generation() << 32), today_stamp());
+    let gen = (
+        crate::latte::lib_generation()
+            ^ (crate::dbservice::data_generation() << 32)
+            ^ crate::ledger::generation().wrapping_mul(0x9E37_79B9),
+        today_stamp(),
+    );
+    // Kv./Net. results depend on live network facts (peer links, worker
+    // liveness) beyond any generation stamp — never serve them from the memo.
+    let volatile = expr.contains("Kv.") || expr.contains("Net.");
     let mut key = String::with_capacity(expr.len() + inputs.len() * 8 + 1);
     key.push_str(expr);
     for (n, v) in inputs {
@@ -1754,8 +2298,10 @@ pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
             g.1.clear();
             g.0 = gen;
         }
-        if let Some(out) = g.1.get(&key) {
-            return out.clone();
+        if !volatile {
+            if let Some(out) = g.1.get(&key) {
+                return out.clone();
+            }
         }
     }
     // result-cache miss: evaluate, reusing the parsed expression and replicating render_with's
@@ -1778,11 +2324,13 @@ pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
         }
         Err(e) => format!("error: {}", e),
     };
-    if let Ok(mut g) = eval_cache().lock() {
-        if g.1.len() >= 8192 {
-            g.1.clear(); // simple bound: drop the table wholesale rather than track LRU
+    if !volatile {
+        if let Ok(mut g) = eval_cache().lock() {
+            if g.1.len() >= 8192 {
+                g.1.clear(); // simple bound: drop the table wholesale rather than track LRU
+            }
+            g.1.insert(key, out.clone());
         }
-        g.1.insert(key, out.clone());
     }
     out
 }
@@ -1800,7 +2348,14 @@ pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, Str
     // tool-level special-casing). Repeated visits to a widget-heavy page — the
     // /tools shelf, the /learn tutorials — become a single map lookup.
     let day = today_stamp();
-    let gen = crate::latte::lib_generation() ^ (crate::dbservice::data_generation() << 32);
+    let gen = crate::latte::lib_generation()
+        ^ (crate::dbservice::data_generation() << 32)
+        ^ crate::ledger::generation().wrapping_mul(0x9E37_79B9);
+    // A page with Kv./Net. holes shows live network facts (peer links, worker
+    // liveness) that no generation stamp captures — render it fresh each time.
+    // Its non-volatile holes still hit the expression memo, so the cost is
+    // parsing plus the handful of genuinely live widgets.
+    let volatile_page = src.contains("Kv.") || src.contains("Net.");
     let mut pkey = String::with_capacity(src.len() / 8 + 64);
     pkey.push_str(&crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()))[..32]);
     for (k, v) in params {
@@ -1815,8 +2370,10 @@ pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, Str
             g.1.clear();
             g.0 = (gen, day);
         }
-        if let Some(hit) = g.1.get(&pkey) {
-            return Ok(hit.clone());
+        if !volatile_page {
+            if let Some(hit) = g.1.get(&pkey) {
+                return Ok(hit.clone());
+            }
         }
     }
     let top = RENDER_DEPTH.with(|d| {
@@ -1834,11 +2391,13 @@ pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, Str
     })();
     RENDER_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
     if let Ok(html) = &result {
-        let mut g = page_cache().lock().unwrap();
-        if g.1.len() >= 128 {
-            g.1.clear();
+        if !volatile_page {
+            let mut g = page_cache().lock().unwrap();
+            if g.1.len() >= 128 {
+                g.1.clear();
+            }
+            g.1.insert(pkey, html.clone());
         }
-        g.1.insert(pkey, html.clone());
     }
     result
 }
@@ -2073,6 +2632,46 @@ mod tests {
         assert_eq!(render(r#"{{ "tab\tend" }}"#).unwrap(), "tab\tend");
         // an unknown escape is just the char
         assert_eq!(render(r#"{{ "x\;y" }}"#).unwrap(), "x;y");
+    }
+
+    #[test]
+    fn live_watch_polls_and_allows_empty_fields() {
+        // the watch widget carries its poll period for the runtime, and may be field-less
+        let html = render(r#"{{ Live.watch("Kv.info()", [], 7) }}"#).unwrap();
+        assert!(html.contains(r#"data-live-every="7""#), "watch period attribute missing: {}", html);
+        assert!(html.contains("data-live-expr"), "watch is a live widget");
+        assert!(html.contains("__facetLive"), "watch emits the shared runtime");
+        // the runtime knows how to poll
+        assert!(LIVE_RUNTIME.contains("data-live-every"), "runtime must read the poll attribute");
+        // a period is clamped to sane bounds
+        let html = render(r#"{{ Live.watch("Kv.state()", [], 9999) }}"#).unwrap();
+        assert!(html.contains(r#"data-live-every="60""#), "period clamps to 60s");
+        // non-watch widgets still demand fields
+        assert!(render(r#"{{ Live.box("Kv.info()", []) }}"#).is_err());
+    }
+
+    #[test]
+    fn console_reaches_the_same_tool_registry() {
+        // Module.proc command lines dispatch to the SAME handlers pages use;
+        // quote-aware args; unknown tools return None so the console can fall
+        // back to Latte arms
+        assert!(run_host_tool("Txt", "").is_none());
+        assert!(run_host_tool("NoSuch.tool", "x").is_none());
+        let out = run_host_tool("Txt.upper", "\"heart speech\"").unwrap().unwrap();
+        assert_eq!(out, "HEART SPEECH");
+        // a ONE-parameter tool takes the whole rest verbatim — a Latte
+        // expression with spaces needs no quoting on the console
+        let out = run_host_tool("Net.eval", "(dmap (fn [x] -> (mul x x)) [ 1 [ 2 0 ] ])").unwrap();
+        assert!(out.is_ok(), "single-arg passthrough: {:?}", out);
+        assert!(out.unwrap().contains("[1 [4 0]]"));
+        // ledger tools answer through the same road (graceful with or without
+        // a ledger in this test process; other tests may have started one)
+        let out = run_host_tool("Kv.state", "").unwrap();
+        assert!(out.is_ok(), "Kv.state must not error: {:?}", out);
+        let args = split_console_args(r#"greeting "hello world" 42"#);
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[1], Val::Text(t) if t == "hello world"));
+        assert!(matches!(&args[2], Val::Num(42)));
     }
 
     #[test]

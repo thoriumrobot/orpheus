@@ -364,6 +364,44 @@ deterministic per request.</p>
   </div>
 </div>
 
+<!-- ===================== Kv ===================== -->
+<div class="panel">
+  <div class="t">Kv — the ledger: event-sourced, gossiped state (the <a href="/network">Network</a> page lives on these)</div>
+  <div class="b">
+    <p class="lede">The GUI hosts a persistent kv <b>node</b> (the same machinery <code>latte node</code>
+    runs): every <code>Kv.put</code> is a durable event in an append-only log, gossiped to every
+    connected peer; state is the deterministic fold of that log, so connected instances converge
+    byte-for-byte — and every past state is one <code>Kv.at</code> away. Side-effecting tools sit in
+    <code>Live.form</code>.</p>
+    {{ Live.view("Kv.info()", [["_", "0"]]) }}
+    {{ Live.form("Kv.put(key, value)", [["key", "greeting"], ["value", "hello, network"]]) }}
+    {{ Live.form("Kv.del(key)", [["key", "greeting"]]) }}
+    {{ Live.watch("Kv.state()", [], 4) }}
+    {{ Live.view("Kv.at(k)", [["k", "0", "~", "0", "50", "1"]]) }}
+    {{ Live.view("Kv.log(n)", [["n", "8", "~", "3", "30", "1"]]) }}
+    {{ Live.form("Kv.connect(addr)", [["addr", "203.0.113.7:9600"]]) }}
+    {{ Live.view("Kv.peers()", [["_", "0"]]) }}
+  </div>
+</div>
+
+<!-- ===================== Net ===================== -->
+<div class="panel">
+  <div class="t">Net — distributed execution (workers, training, persisted models)</div>
+  <div class="b">
+    <p class="lede">The distribution layer as page widgets: register workers (<code>latte worker</code>
+    on any machine), evaluate distributable shapes across them, train a model by FedAvg cycles —
+    shards on the workers, consolidation in Latte — and use the persisted model straight from the
+    page. Naming a store in <code>Net.train</code> commits exactly ONE final-model event.</p>
+    {{ Live.watch("Net.workers()", [], 5) }}
+    {{ Live.form("Net.addWorker(addr)", [["addr", "127.0.0.1:9700"]]) }}
+    {{ Live.form("Net.rmWorker(addr)", [["addr", "127.0.0.1:9700"]]) }}
+    {{ Live.form("Net.eval(expr)", [["expr", "(dmap (fn [x] -> (mul x x)) [ 1 [ 2 [ 3 0 ] ] ])"]]) }}
+    {{ Live.form("Net.train(rounds, iters, store)", [["rounds", "3"], ["iters", "300"], ["store", "demo"]]) }}
+    {{ Live.box("Net.model(store)", [["store", "demo"]]) }}
+    {{ Live.box("Net.predict(store, x)", [["store", "demo"], ["x", "7"]]) }}
+  </div>
+</div>
+
 <!-- ===================== Live ===================== -->
 <div class="panel">
   <div class="t">Live — client-updating widgets <span class="sig">box(expr, [name, default…])</span></div>
@@ -373,8 +411,12 @@ deterministic per request.</p>
     default) and a result span showing <code>expr</code> evaluated against them. The server renders
     the initial value; a shared runtime then refreshes just that result on each keystroke. Its
     sibling <code>Live.view(expr, fields)</code> is identical but renders the result as HTML/SVG —
-    that is what makes the charts above redraw live. Boxes
-    compose freely — here a Latte expression feeds straight into a Txt helper:</p>
+    that is what makes the charts above redraw live. A third sibling,
+    <code>Live.watch(expr, fields, secs)</code>, re-runs itself every few seconds with no user
+    action — made for NETWORK state (gossiped ledger events, worker liveness) that changes behind
+    the page's back; its field list may be empty:</p>
+    {{ Live.watch("Kv.info()", [], 6) }}
+    <p class="lede">Boxes compose freely — here a Latte expression feeds straight into a Txt helper:</p>
 
     <div class="tool">
       <div class="lbl"><code>Live.box</code> composing modules — wrap a Latte result in Txt</div>

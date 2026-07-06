@@ -605,11 +605,11 @@ pub struct FedReport {
     pub persisted: Option<String>,
 }
 
-fn spos(mag: u128) -> N {
+pub fn spos(mag: u128) -> N {
     cell(num(0), num(mag))
 }
 
-fn fmt_signed(n: &N) -> String {
+pub fn fmt_signed(n: &N) -> String {
     if let Knot::Cell(s, m) = &**n {
         let sign = s.as_atom().and_then(|a| a.to_u128()).unwrap_or(0);
         let mag = m.as_atom().and_then(|a| a.to_u128()).unwrap_or(0);
