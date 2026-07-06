@@ -273,6 +273,17 @@ round, and **only the final consolidated model is committed to the persistent
 log** (one kv `%put` event under `--store DIR`); the intermediate cycles never
 touch it. See `docs/distributed-execution.md`.
 
+**Collaborative notes.** The same event-log machinery carries shared
+documents: open **/notes** on two connected instances and write together.
+The document model is a block sequence with global ids, anchored insertion,
+and tombstoned deletion — concurrent edits to different paragraphs both
+survive, two writers' runs stay contiguous instead of interleaving, an
+"insert after X" holds its place even when X is deleted concurrently, and
+the whole history sits on a slider. The agent is pure Latte
+(`lib/notes.lat`); the editor (`lib/site/notes.html`) merges peers' edits
+into the page live without touching the block you are typing in. See
+`docs/collaborative-notes.md`.
+
 **All of it has a GUI.** `latte gui` hosts a **ledger** — a persistent,
 gossiped kv node on the same layer as `latte node` (listening on `:9600` by
 default) — and the `/network` page is its interactive interface: connect

@@ -1,0 +1,297 @@
+<!doctype html>
+<!-- THE NOTES EDITOR: collaborative writing over the Internet, in the browser.
+     A thin client over the Note.* tool registry (/api/run):
+       · blocks render as contenteditable divs keyed by their GLOBAL block id
+         (data-bid) — the same [lamport node] ids the agent anchors on
+       · a 2.5 s poll fetches Note.blocks and merges REMOTE changes into the
+         DOM by bid — every block except the one you are editing, so a peer's
+         typing appears live without ever stomping your caret
+       · Enter commits the block and opens a new one anchored AFTER it;
+         Backspace in an empty block tombstones it; blur commits
+       · convergence and history come from the event log (src/notes.rs on
+         lib/notes.lat); this file is only hands and eyes -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes — collaborative editor</title>
+<style>
+  :root { --paper:#fbf8f3; --rule:#8e8a7a; --title:#cfcaba; --ink:#1a1320; --accent:#5a1530; }
+  body { font-family: Georgia, 'Times New Roman', serif; max-width:46rem; margin:2.2rem auto; padding:0 1rem; line-height:1.6; color:var(--ink); background:var(--paper); }
+  h1 { font-variant:small-caps; color:var(--accent); font-size:1.9rem; margin:0; }
+  .sub { color:#8a6d3b; font-style:italic; margin:.2rem 0 1rem; font-size:.92rem; }
+  .bar { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin:.6rem 0 1rem; }
+  .bar input, .bar select, .bar button { font-family:inherit; font-size:.95rem; padding:.28rem .55rem; border:1px solid var(--rule); border-radius:3px; background:#fff; color:var(--ink); }
+  .bar button { background:var(--title); font-variant:small-caps; letter-spacing:.03em; cursor:pointer; }
+  .bar button:hover { background:#dcd6c2; }
+  #doc { border:1.5px solid var(--rule); border-radius:4px; background:#fffdf8; box-shadow:0 1px 4px #0001; min-height:14rem; padding:.9rem 1.1rem; }
+  #title { font-weight:700; font-size:1.25rem; border:none; background:transparent; width:100%; font-family:inherit; color:var(--accent); outline:none; border-bottom:1px dashed #d8d0bc; margin-bottom:.6rem; }
+  .blk { padding:.28rem .4rem; margin:.12rem -0.4rem; border-radius:3px; outline:none; white-space:pre-wrap; }
+  .blk:hover { background:#f4efe2; }
+  .blk:focus { background:#f1ead8; box-shadow:inset 2px 0 0 var(--accent); }
+  .blk .meta { display:none; }
+  .blk:hover::after, .blk:focus::after { content:attr(data-meta); color:#a49a84; font-size:.72rem; margin-left:.5rem; font-family:ui-monospace, monospace; }
+  .remote { animation: land 1.2s ease-out; }
+  @keyframes land { from { background:#e8dfc4; } to { background:transparent; } }
+  #empty { color:#a49a84; font-style:italic; }
+  #status { color:#8a8064; font-size:.8rem; margin-top:.5rem; min-height:1.1em; }
+  #hist { width:100%; accent-color:var(--accent); }
+  .histnote { color:#8a6d3b; font-size:.85rem; }
+  footer { margin-top:1.6rem; color:#998; font-size:.82rem; border-top:1px solid #e4dccc; padding-top:.7rem; }
+  footer a { color:var(--accent); }
+</style>
+
+<h1>Notes</h1>
+<p class="sub">Write together — every block is a durable, gossiped event; connected instances
+converge on one document. Enter = new block · Backspace on an empty block deletes it ·
+click anywhere and type.</p>
+
+<div class="bar">
+  <label>I am <input id="who" size="9" placeholder="name"></label>
+  <select id="pick" title="open a note"></select>
+  <button onclick="openPicked()">Open</button>
+  <input id="newtitle" size="16" placeholder="new note title">
+  <button onclick="createNote()">＋ Create</button>
+  <button onclick="connectPeer()" title="dial another instance's notes port (9601 by default) — documents reconcile automatically">⇄ Connect peer…</button>
+</div>
+
+<div class="bar" id="histbar" style="display:none">
+  <input type="range" id="hist" min="1" value="1">
+  <span class="histnote" id="histlabel"></span>
+  <button onclick="leaveHistory()">back to now</button>
+</div>
+
+<div id="doc">
+  <input id="title" placeholder="(open or create a note)" disabled>
+  <div id="blocks"><div id="empty">No note open.</div></div>
+</div>
+<div class="bar">
+  <button onclick="addBlock()">＋ block</button>
+  <button onclick="toggleHistory()" id="histbtn">⌛ history</button>
+</div>
+<div id="status"></div>
+
+<footer>The agent is pure Latte (lib/notes.lat); merging is the event log's total order plus
+anchored blocks and tombstones — details in <a href="/tools">the Note tools</a> and
+docs/collaborative-notes.md. This editor, the tool widgets, and the System console drive the
+same registry.</footer>
+
+<script>
+(function(){
+'use strict';
+var US='\u001f', RS='\u001e';
+var noteId='', focusedBid=null, dirty={}, atEvent=0, lastLines='', polling=null;
+
+function $(id){ return document.getElementById(id); }
+function status(t){ $('status').textContent = t; }
+function who(){
+  var w = $('who').value.trim();
+  if(!w){ w = 'anon'; }
+  try{ localStorage.setItem('orpheus-notes-who', $('who').value); }catch(e){}
+  return w;
+}
+try{ $('who').value = localStorage.getItem('orpheus-notes-who') || ''; }catch(e){}
+
+function api(cmd, cb){
+  var x = new XMLHttpRequest();
+  x.open('POST', '/api/run');
+  x.onload = function(){ cb(null, x.responseText); };
+  x.onerror = function(){ cb('network error'); };
+  x.send(cmd);
+}
+// quote an argument for the console-grammar dispatch (multi-arg tools split
+// quote-aware, so texts travel in quotes; inner quotes are dropped — the
+// console grammar has no escape — a documented limit of THIS surface)
+function q(s){ return '"' + String(s).replace(/"/g, "\u2033") + '"'; }
+
+// ------------------------------ note list -----------------------------------
+function refreshIndex(cb){
+  api('Note.index', function(err, body){
+    if(err){ status(err); return; }
+    var pick = $('pick'), had = pick.value;
+    pick.innerHTML = '';
+    body.split('\n').forEach(function(line){
+      if(!line) return;
+      var p = line.split(US);
+      var o = document.createElement('option');
+      o.value = p[0]; o.textContent = p[1] + ' (' + p[2] + ')';
+      pick.appendChild(o);
+    });
+    if(had) pick.value = had;
+    if(cb) cb();
+  });
+}
+function openPicked(){ if($('pick').value) open($('pick').value); }
+function createNote(){
+  var t = $('newtitle').value.trim() || 'untitled';
+  api('Note.create ' + q(t), function(err, body){
+    if(err){ status(err); return; }
+    var m = body.match(/created note (\S+)/);
+    $('newtitle').value = '';
+    refreshIndex(function(){ if(m){ $('pick').value = m[1]; open(m[1]); } });
+  });
+}
+function connectPeer(){
+  var a = prompt('peer notes address (host:9601):');
+  if(!a) return;
+  api('Note.connect ' + a.trim(), function(err, body){ status(err || body); });
+}
+
+// ------------------------------ the document --------------------------------
+function open(id){
+  noteId = id; atEvent = 0; lastLines = ''; dirty = {};
+  $('histbar').style.display = 'none';
+  $('title').disabled = false;
+  poll(true);
+  if(polling) clearInterval(polling);
+  polling = setInterval(function(){ poll(false); }, 2500);
+}
+
+function poll(force){
+  if(!noteId) return;
+  api('Note.blocks ' + noteId + ' ' + atEvent, function(err, body){
+    if(err){ status('offline? ' + err); return; }
+    if(!force && body === lastLines) return; // nothing moved anywhere
+    lastLines = body;
+    render(body);
+  });
+}
+
+function render(body){
+  var lines = body.split('\n').filter(function(l){ return l; });
+  var box = $('blocks');
+  if(!lines.length){
+    box.innerHTML = '<div id="empty">No such note (deleted?).</div>';
+    return;
+  }
+  var titleLine = lines.shift().split(US);
+  if(document.activeElement !== $('title')) $('title').value = titleLine[1] || '';
+  var seen = {};
+  var prev = null; // walk in document order, moving/creating DOM nodes to match
+  lines.forEach(function(line){
+    var p = line.split(US);
+    var bid = p[0], alive = p[1] === '1', author = p[2], text = (p[3] || '').split(RS).join('\n');
+    if(!alive) return; // tombstones hold anchors server-side; the page shows the living
+    seen[bid] = true;
+    var el = box.querySelector('[data-bid="' + bid + '"]');
+    if(!el){
+      el = mkBlock(bid);
+      el.classList.add('remote');
+    }
+    if(bid !== focusedBid && !dirty[bid] && el.textContent !== text){
+      el.textContent = text;           // a peer's edit lands live
+      if(document.activeElement !== el) el.classList.add('remote');
+    }
+    el.setAttribute('data-meta', author + ' · ' + bid);
+    // position: after prev (or first)
+    var want = prev ? prev.nextSibling : box.firstChild;
+    if(el !== want) box.insertBefore(el, want);
+    prev = el;
+  });
+  // drop blocks no longer present (unless being edited)
+  Array.prototype.slice.call(box.querySelectorAll('.blk')).forEach(function(el){
+    var bid = el.getAttribute('data-bid');
+    if(!seen[bid] && bid !== focusedBid && !dirty[bid]) el.remove();
+  });
+  var empty = $('empty');
+  var any = box.querySelector('.blk');
+  if(empty) empty.style.display = any ? 'none' : '';
+  status(atEvent ? '' : 'synced · ' + new Date().toLocaleTimeString());
+}
+
+function mkBlock(bid){
+  var el = document.createElement('div');
+  el.className = 'blk';
+  el.contentEditable = (atEvent === 0);
+  el.setAttribute('data-bid', bid);
+  el.addEventListener('focus', function(){ focusedBid = bid; });
+  el.addEventListener('input', function(){ dirty[bid] = true; });
+  el.addEventListener('blur', function(){ focusedBid = null; commit(el); });
+  el.addEventListener('keydown', function(e){
+    if(e.key === 'Enter' && !e.shiftKey){
+      e.preventDefault();
+      commit(el);
+      insertAfter(el);
+    } else if(e.key === 'Backspace' && el.textContent === ''){
+      e.preventDefault();
+      deleteBlock(el);
+    }
+  });
+  $('blocks').appendChild(el);
+  return el;
+}
+
+function commit(el){
+  var bid = el.getAttribute('data-bid');
+  if(!dirty[bid]) return;
+  delete dirty[bid];
+  var t = el.textContent.split('\n').join(RS);
+  api('Note.set ' + q(noteId) + ' ' + q(bid) + ' ' + q(who()) + ' ' + q(t), function(err, body){
+    if(err) status(err); else poll(true);
+  });
+}
+
+function insertAfter(el){
+  var bid = el ? el.getAttribute('data-bid') : lastBid();
+  api('Note.after ' + q(noteId) + ' ' + q(bid || '0') + ' ' + q(who()) + ' ' + q(''), function(err, body){
+    if(err){ status(err); return; }
+    var m = body.match(/inserted block (\S+)/);
+    poll(true);
+    if(m) setTimeout(function(){
+      var n = $('blocks').querySelector('[data-bid="' + m[1] + '"]');
+      if(n) n.focus();
+    }, 250);
+  });
+}
+function lastBid(){
+  var all = $('blocks').querySelectorAll('.blk');
+  return all.length ? all[all.length - 1].getAttribute('data-bid') : '0';
+}
+function addBlock(){
+  if(!noteId){ status('open or create a note first'); return; }
+  insertAfter($('blocks').querySelector('.blk:last-of-type'));
+}
+function deleteBlock(el){
+  var bid = el.getAttribute('data-bid');
+  api('Note.del ' + q(noteId) + ' ' + q(bid), function(err){ if(err) status(err); else poll(true); });
+  el.remove();
+}
+
+$('title').addEventListener('blur', function(){
+  if(noteId && !$('title').disabled)
+    api('Note.retitle ' + q(noteId) + ' ' + q($('title').value.trim() || 'untitled'), function(){ refreshIndex(); });
+});
+$('title').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); $('title').blur(); } });
+
+// ------------------------------ history --------------------------------------
+function toggleHistory(){
+  if(!noteId) return;
+  api('Note.info', function(err, body){
+    if(err) return;
+    var m = body.match(/events\s+(\d+)/);
+    var total = m ? parseInt(m[1], 10) : 1;
+    $('hist').max = total;
+    $('hist').value = total;
+    $('histbar').style.display = '';
+    setAt(total, total);
+  });
+}
+$('hist').addEventListener('input', function(){
+  setAt(parseInt(this.value, 10), parseInt(this.max, 10));
+});
+function setAt(k, total){
+  atEvent = (k >= total) ? 0 : Math.max(1, k);
+  $('histlabel').textContent = atEvent ? ('as of event ' + atEvent + ' of ' + total) : 'now';
+  Array.prototype.forEach.call(document.querySelectorAll('.blk'), function(el){
+    el.contentEditable = (atEvent === 0);
+  });
+  lastLines = '';
+  poll(true);
+}
+function leaveHistory(){
+  $('histbar').style.display = 'none';
+  setAt(parseInt($('hist').max, 10), parseInt($('hist').max, 10));
+}
+
+refreshIndex();
+setInterval(refreshIndex, 8000);
+})();
+</script>

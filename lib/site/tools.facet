@@ -385,6 +385,32 @@ deterministic per request.</p>
   </div>
 </div>
 
+<!-- ===================== Note ===================== -->
+<div class="panel">
+  <div class="t">Note — collaborative notes (the <a href="/notes">live editor</a> drives these)</div>
+  <div class="b">
+    <p class="lede">Shared documents as <b>anchored block sequences</b> over the gossiped event log
+    (lib/notes.lat — the agent is pure Latte). Concurrent edits to different blocks both survive;
+    each writer's run of insertions stays contiguous; deletion is a tombstone, so "insert after
+    X" holds its place even when X is deleted concurrently. The same tools work from the
+    <a href="/notes">/notes editor</a>, these widgets, and the System console.</p>
+    {{ Live.view("Note.info()", [["_", "0"]]) }}
+    {{ Live.form("Note.create(title)", [["title", "meeting minutes"]]) }}
+    {{ Live.watch("Note.list()", [], 5) }}
+    {{ Live.box("Note.index()", [["_", "0"]]) }}
+    {{ Live.view("Note.read(id)", [["id", ""]]) }}
+    {{ Live.box("Note.blocks(id, at)", [["id", ""], ["at", "0"]]) }}
+    {{ Live.form("Note.add(id, author, text)", [["id", ""], ["author", "ada"], ["text", "first point"]]) }}
+    {{ Live.form("Note.after(id, bid, author, text)", [["id", ""], ["bid", "1-2a"], ["author", "ada"], ["text", "inserted point"]]) }}
+    {{ Live.form("Note.set(id, bid, author, text)", [["id", ""], ["bid", "1-2a"], ["author", "ada"], ["text", "revised point"]]) }}
+    {{ Live.form("Note.del(id, bid)", [["id", ""], ["bid", "1-2a"]]) }}
+    {{ Live.form("Note.retitle(id, title)", [["id", ""], ["title", "minutes, v2"]]) }}
+    {{ Live.view("Note.history(id, k)", [["id", ""], ["k", "1", "~", "1", "100", "1"]]) }}
+    {{ Live.form("Note.connect(addr)", [["addr", "203.0.113.7:9601"]]) }}
+    {{ Live.form("Note.forget(addr)", [["addr", "203.0.113.7:9601"]]) }}
+  </div>
+</div>
+
 <!-- ===================== Net ===================== -->
 <div class="panel">
   <div class="t">Net — distributed execution (workers, training, persisted models)</div>

@@ -1481,6 +1481,176 @@ fn tool_net_predict(args: &[Val]) -> Result<Val, String> {
     )))
 }
 
+// ---------------------------------------------------------------------------
+// Note.* — COLLABORATIVE NOTES (src/notes.rs on lib/notes.lat): shared
+// documents as anchored block sequences over the gossiped event log.
+// Concurrent edits to different blocks both survive; anchored insertion keeps
+// each writer's run contiguous; deletion tombstones so anchors hold. The
+// /notes editor drives the same tools this registry exposes.
+// ---------------------------------------------------------------------------
+
+const US: char = '\u{1f}'; // field separator in the machine formats
+const RS: char = '\u{1e}'; // newline stand-in inside block text
+
+fn tool_note_list(_args: &[Val]) -> Result<Val, String> {
+    match crate::notes::list_notes(0) {
+        Ok(rows) => {
+            let rows: Vec<Vec<String>> = rows
+                .into_iter()
+                .map(|(id, t, n)| vec![id, t, format!("{} block(s)", n)])
+                .collect();
+            Ok(Val::Text(html_rows(&["id", "title", "size"], &rows, "no notes yet — Note.create one")))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+fn tool_note_index(_args: &[Val]) -> Result<Val, String> {
+    // machine form for the /notes editor: id US title US live-count, one per line
+    match crate::notes::list_notes(0) {
+        Ok(rows) => Ok(Val::Text(
+            rows.into_iter()
+                .map(|(id, t, n)| format!("{}{}{}{}{}", id, US, t.replace('\n', " "), US, n))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+fn tool_note_create(args: &[Val]) -> Result<Val, String> {
+    let title = arg_text(args, 0)?;
+    let id = crate::notes::create(&title)?;
+    Ok(ok_note(&format!("created note {} — \"{}\" (open it in the /notes editor, or Note.read {})", id, title.trim(), id)))
+}
+
+fn note_html(id: &str, at: usize) -> Result<String, String> {
+    match crate::notes::read_note(id, at)? {
+        None => Ok(format!("<span class=\"feat\">no note '{}'</span>", html_escape(id))),
+        Some((title, blocks)) => {
+            let total = crate::notes::event_count();
+            let mut out = format!("<div><b>{}</b> <span class=\"feat\">({})</span></div>", html_escape(&title), html_escape(id));
+            if at > 0 {
+                out.push_str(&format!("<div class=\"feat\">as of event {} of {}</div>", at.min(total), total));
+            }
+            let mut any = false;
+            for b in blocks.iter().filter(|b| b.alive) {
+                any = true;
+                out.push_str(&format!(
+                    "<div style=\"margin:.35rem 0\">{} <span class=\"feat\">— {} · {}</span></div>",
+                    html_escape(&b.text),
+                    html_escape(&b.author),
+                    html_escape(&b.bid)
+                ));
+            }
+            if !any {
+                out.push_str("<div class=\"feat\">(empty — Note.add a first block)</div>");
+            }
+            let dead = blocks.iter().filter(|b| !b.alive).count();
+            if dead > 0 {
+                out.push_str(&format!("<div class=\"feat\">{} tombstone(s) hold positions for concurrent anchors</div>", dead));
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn tool_note_read(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    note_html(id.trim(), 0).map(Val::Text)
+}
+
+fn tool_note_history(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let k = arg_num_or(args, 1, u128::MAX) as usize;
+    note_html(id.trim(), k.max(1)).map(Val::Text)
+}
+
+fn tool_note_blocks(args: &[Val]) -> Result<Val, String> {
+    // machine form: bid US alive US author US text (newlines as RS); line 0 = title
+    let id = arg_text(args, 0)?;
+    let at = arg_num_or(args, 1, 0) as usize;
+    match crate::notes::read_note(id.trim(), at)? {
+        None => Ok(Val::Text(String::new())),
+        Some((title, blocks)) => {
+            let mut lines = vec![format!("title{}{}", US, title.replace('\n', " "))];
+            for b in blocks {
+                lines.push(format!(
+                    "{}{}{}{}{}{}{}",
+                    b.bid,
+                    US,
+                    if b.alive { "1" } else { "0" },
+                    US,
+                    b.author.replace('\n', " "),
+                    US,
+                    b.text.replace('\n', &RS.to_string())
+                ));
+            }
+            Ok(Val::Text(lines.join("\n")))
+        }
+    }
+}
+
+fn tool_note_add(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let who = arg_text(args, 1)?;
+    let text = arg_text(args, 2)?;
+    let bid = crate::notes::append_block(id.trim(), &who, &text.replace(RS, "\n"))?;
+    Ok(ok_note(&format!("added block {} (gossiped to every connected peer)", bid)))
+}
+
+fn tool_note_after(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let anchor = arg_text(args, 1)?;
+    let who = arg_text(args, 2)?;
+    let text = arg_text(args, 3)?;
+    let bid = crate::notes::insert_after(id.trim(), &anchor, &who, &text.replace(RS, "\n"))?;
+    Ok(ok_note(&format!("inserted block {} after {}", bid, anchor.trim())))
+}
+
+fn tool_note_set(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let bid = arg_text(args, 1)?;
+    let who = arg_text(args, 2)?;
+    let text = arg_text(args, 3)?;
+    crate::notes::set_text(id.trim(), &bid, &who, &text.replace(RS, "\n"))?;
+    Ok(ok_note(&format!("block {} rewritten", bid.trim())))
+}
+
+fn tool_note_del(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let bid = arg_text(args, 1)?;
+    crate::notes::del_block(id.trim(), &bid)?;
+    Ok(ok_note(&format!("block {} tombstoned (it still anchors concurrent inserts)", bid.trim())))
+}
+
+fn tool_note_retitle(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let title = arg_text(args, 1)?;
+    crate::notes::retitle(id.trim(), &title)?;
+    Ok(ok_note("retitled"))
+}
+
+fn tool_note_info(_args: &[Val]) -> Result<Val, String> {
+    match crate::notes::info_lines() {
+        Ok(lines) => {
+            let rows: Vec<Vec<String>> = lines.into_iter().map(|(k, v)| vec![k, v]).collect();
+            Ok(Val::Text(html_rows(&["", ""], &rows, "")))
+        }
+        Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    }
+}
+
+fn tool_note_connect(args: &[Val]) -> Result<Val, String> {
+    let addr = arg_text(args, 0)?;
+    crate::notes::connect(&addr).map(|m| ok_note(&m))
+}
+
+fn tool_note_forget(args: &[Val]) -> Result<Val, String> {
+    let addr = arg_text(args, 0)?;
+    crate::notes::forget(&addr).map(|m| ok_note(&m))
+}
+
 fn tool_live_watch(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
     let fields: &[Val] = match args.get(1) {
@@ -1885,6 +2055,104 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_net_predict,
         },
         ToolSpec {
+            module: "Note",
+            proc: "list",
+            sig: "Note.list()",
+            summary: "every shared note with its live block count — the converged view of all connected instances",
+            handler: tool_note_list,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "index",
+            sig: "Note.index()",
+            summary: "the note list in machine form (id/title/count per line) — what the /notes editor loads",
+            handler: tool_note_index,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "create",
+            sig: "Note.create(title)",
+            summary: "make a shared note (a durable, gossiped event; the id comes back) — use inside Live.form",
+            handler: tool_note_create,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "read",
+            sig: "Note.read(id)",
+            summary: "a note rendered with authorship and block ids (the ids are what edits name)",
+            handler: tool_note_read,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "blocks",
+            sig: "Note.blocks(id, at)",
+            summary: "a note in machine form (bid/alive/author/text per line; at=0 present, at=k time travel) — what the /notes editor polls",
+            handler: tool_note_blocks,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "add",
+            sig: "Note.add(id, author, text)",
+            summary: "append a block — anchored to the current last block, so concurrent appends stay contiguous — use inside Live.form",
+            handler: tool_note_add,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "after",
+            sig: "Note.after(id, bid, author, text)",
+            summary: "insert a block after the named block — anchors survive concurrent deletion (tombstones) — use inside Live.form",
+            handler: tool_note_after,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "set",
+            sig: "Note.set(id, bid, author, text)",
+            summary: "replace a block's text; concurrent rewrites of the SAME block resolve by the log's total order, nothing else is touched — use inside Live.form",
+            handler: tool_note_set,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "del",
+            sig: "Note.del(id, bid)",
+            summary: "tombstone a block: it leaves the page but keeps holding its position for concurrent anchors — use inside Live.form",
+            handler: tool_note_del,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "retitle",
+            sig: "Note.retitle(id, title)",
+            summary: "rename a note — use inside Live.form",
+            handler: tool_note_retitle,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "history",
+            sig: "Note.history(id, k)",
+            summary: "TIME TRAVEL: the note as of the first k events — every past version of the shared document, free",
+            handler: tool_note_history,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "info",
+            sig: "Note.info()",
+            summary: "this instance's notes node: id, listen address (9601 by default), events, peers",
+            handler: tool_note_info,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "connect",
+            sig: "Note.connect(addr)",
+            summary: "dial another instance's NOTES port; the documents reconcile automatically (persists; Note.forget undoes) — use inside Live.form",
+            handler: tool_note_connect,
+        },
+        ToolSpec {
+            module: "Note",
+            proc: "forget",
+            sig: "Note.forget(addr)",
+            summary: "undo a Note.connect — use inside Live.form",
+            handler: tool_note_forget,
+        },
+        ToolSpec {
             module: "Viz",
             proc: "chart",
             sig: "Viz.chart(kind, numbers)",
@@ -2122,6 +2390,7 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Db", summary: "shared persistent state: boards, posts, and node-to-node sync" },
         ModuleSpec { name: "Kv", summary: "the ledger: the event-sourced, gossiped key-value node this GUI hosts" },
         ModuleSpec { name: "Net", summary: "distributed execution: workers, distribution-aware eval, FedAvg training, persisted models" },
+        ModuleSpec { name: "Note", summary: "collaborative notes: shared block documents that merge concurrent edits (the /notes editor)" },
     ]
 }
 
@@ -2387,12 +2656,13 @@ pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
     let gen = (
         crate::latte::lib_generation()
             ^ (crate::dbservice::data_generation() << 32)
-            ^ crate::ledger::generation().wrapping_mul(0x9E37_79B9),
+            ^ crate::ledger::generation().wrapping_mul(0x9E37_79B9)
+            ^ crate::notes::generation().wrapping_mul(0x51_7CC1),
         today_stamp(),
     );
     // Kv./Net. results depend on live network facts (peer links, worker
     // liveness) beyond any generation stamp — never serve them from the memo.
-    let volatile = expr.contains("Kv.") || expr.contains("Net.");
+    let volatile = expr.contains("Kv.") || expr.contains("Net.") || expr.contains("Note.");
     let mut key = String::with_capacity(expr.len() + inputs.len() * 8 + 1);
     key.push_str(expr);
     for (n, v) in inputs {
@@ -2458,12 +2728,13 @@ pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, Str
     let day = today_stamp();
     let gen = crate::latte::lib_generation()
         ^ (crate::dbservice::data_generation() << 32)
-        ^ crate::ledger::generation().wrapping_mul(0x9E37_79B9);
+        ^ crate::ledger::generation().wrapping_mul(0x9E37_79B9)
+        ^ crate::notes::generation().wrapping_mul(0x51_7CC1);
     // A page with Kv./Net. holes shows live network facts (peer links, worker
     // liveness) that no generation stamp captures — render it fresh each time.
     // Its non-volatile holes still hit the expression memo, so the cost is
     // parsing plus the handful of genuinely live widgets.
-    let volatile_page = src.contains("Kv.") || src.contains("Net.");
+    let volatile_page = src.contains("Kv.") || src.contains("Net.") || src.contains("Note.");
     let mut pkey = String::with_capacity(src.len() / 8 + 64);
     pkey.push_str(&crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()))[..32]);
     for (k, v) in params {

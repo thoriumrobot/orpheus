@@ -81,6 +81,12 @@ core kv
 end
 "#;
 
+// ---- collaborative-notes agent: block-sequence documents, entirely in Latte
+/// The notes agent (lib/notes.lat): shared documents as anchored block
+/// sequences with tombstones — intention-preserving merges on top of the
+/// event log's total order. See the module header for the full model.
+pub const NOTES: &str = include_str!("../lib/notes.lat");
+
 pub struct Agent {
     core: N,
     poke_axis: u128,
@@ -117,10 +123,15 @@ impl Agent {
         Agent::from_module(KV, "kv")
     }
 
+    pub fn new_notes() -> Result<Agent, String> {
+        Agent::from_module(NOTES, "notes")
+    }
+
     pub fn by_name(name: &str) -> Result<Agent, String> {
         match name {
             "v2" => Agent::new_version(2),
             "kv" => Agent::new_kv(),
+            "notes" => Agent::new_notes(),
             _ => Agent::new_version(1),
         }
     }

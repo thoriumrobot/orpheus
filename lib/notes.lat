@@ -1,0 +1,143 @@
+:: ===========================================================================
+:: notes.lat — the COLLABORATIVE NOTES agent: shared documents as a fold over
+:: the gossiped event log.
+::
+:: A note is a sequence of BLOCKS (paragraphs). Every block carries a globally
+:: unique id — a [lamport node] pair minted by the instance that created it —
+:: so edits name their target absolutely, never by position. The convergence
+:: story is the event log's: every replica folds the same event set in the
+:: same total order (lamport, then node id), and this module's poke is a pure
+:: function, so connected instances agree byte-for-byte. On top of that total
+:: order the block model gives INTENTION-preserving merges:
+::
+::   · concurrent edits to DIFFERENT blocks both survive (each names its bid);
+::   · concurrent edits to the SAME block resolve deterministically — the
+::     later event in the total order wins that block, nothing else;
+::   · insertion is ANCHORED (%ins says "after block A"), so two people
+::     typing runs of blocks concurrently produce two contiguous runs, not
+::     an interleaved shuffle — each run chains off its own previous block;
+::   · deletion is a TOMBSTONE (alive := 0): a dead block still anchors, so
+::     "insert after X" survives X's concurrent deletion in place, instead of
+::     falling to the end of the document.
+::
+:: Shapes (all cons lists, 0-terminated):
+::   state  = [ [id note] rest ]                    :: assoc, newest note first
+::   note   = [ title blocks ]
+::   block  = [ bid [ alive [ author text ] ] ]     :: alive: 1 live, 0 tombstone
+::   bid    = [ lam node ]
+::
+:: Actions:
+::   [%mknote  [id title]]                      make a note (ignored if id taken)
+::   [%title   [id title]]                      retitle
+::   [%rmnote  id]                              remove the whole note
+::   [%ins     [id [anchor [bid [author text]]]]]  insert a block after `anchor`
+::                                              (anchor 0 = at the head; a
+::                                              missing anchor appends at end)
+::   [%set     [id [bid [author text]]]]        replace a block's text (LWW)
+::   [%del     [id bid]]                        tombstone a block
+:: ===========================================================================
+import std
+core notes
+  :: assoc lookup: the note bound to id (0 if absent)
+  nget = fn [lst k] ->
+    loop with [cur = lst] :
+      if (cur == 0) then 0
+      else if ((head (head cur)) == k) then (tail (head cur))
+      else again((tail cur))
+    end
+
+  :: assoc removal
+  ndel = fn [lst k] ->
+    loop with [cur = lst, acc = 0] :
+      if (cur == 0) then (reverse acc)
+      else if ((head (head cur)) == k) then again((tail cur), acc)
+      else again((tail cur), [ (head cur) acc ])
+    end
+
+  :: assoc replace IN PLACE (the note list keeps its order across edits)
+  nrep = fn [lst k v] ->
+    loop with [cur = lst, acc = 0] :
+      if (cur == 0) then (reverse acc)
+      else if ((head (head cur)) == k) then again((tail cur), [ [ k v ] acc ])
+      else again((tail cur), [ (head cur) acc ])
+    end
+
+  :: insert block blk after the block whose bid is `anchor`; anchor 0 puts it
+  :: at the head; an unknown anchor appends at the end (the block is never
+  :: lost). Tombstones anchor like live blocks — that is what they are for.
+  bins = fn [blocks anchor blk] ->
+    if (anchor == 0) then [ blk blocks ]
+    else
+      let r = loop with [cur = blocks, acc = 0, hit = 1] :
+                if (cur == 0) then [ hit acc ]
+                else if ((head (head cur)) == anchor)
+                  then again((tail cur), [ blk [ (head cur) acc ] ], 0)
+                  else again((tail cur), [ (head cur) acc ], hit)
+              end in
+      if ((head r) == 0) then (reverse (tail r))
+      else (append blocks [ blk 0 ])
+
+  :: replace a block's author+text, keeping its liveness; missing bid = no-op
+  bset = fn [blocks bid who t] ->
+    loop with [cur = blocks, acc = 0] :
+      if (cur == 0) then (reverse acc)
+      else if ((head (head cur)) == bid)
+        then again((tail cur),
+                   [ [ bid [ (head (tail (head cur))) [ who t ] ] ] acc ])
+      else again((tail cur), [ (head cur) acc ])
+    end
+
+  :: tombstone a block: alive := 0, everything else kept (it still anchors)
+  bdel = fn [blocks bid] ->
+    loop with [cur = blocks, acc = 0] :
+      if (cur == 0) then (reverse acc)
+      else if ((head (head cur)) == bid)
+        then again((tail cur),
+                   [ [ bid [ 0 (tail (tail (head cur))) ] ] acc ])
+      else again((tail cur), [ (head cur) acc ])
+    end
+
+  poke = fn [action state] ->
+    let tag = head action in
+    let p = tail action in
+    case tag of
+      %mknote ->
+        let s2 = if ((nget state (head p)) == 0)
+                   then [ [ (head p) [ (tail p) 0 ] ] state ]
+                   else state in
+        [ nil s2 ] ;
+      %title ->
+        let old = (nget state (head p)) in
+        let s2 = if (old == 0) then state
+                 else (nrep state (head p) [ (tail p) (tail old) ]) in
+        [ nil s2 ] ;
+      %rmnote -> [ nil (ndel state p) ] ;
+      %ins ->
+        let old = (nget state (head p)) in
+        let anchor = head (tail p) in
+        let bid = head (tail (tail p)) in
+        let who = head (tail (tail (tail p))) in
+        let txt = tail (tail (tail (tail p))) in
+        let s2 = if (old == 0) then state
+                 else (nrep state (head p)
+                        [ (head old)
+                          (bins (tail old) anchor [ bid [ 1 [ who txt ] ] ]) ]) in
+        [ nil s2 ] ;
+      %set ->
+        let old = (nget state (head p)) in
+        let bid = head (tail p) in
+        let who = head (tail (tail p)) in
+        let txt = tail (tail (tail p)) in
+        let s2 = if (old == 0) then state
+                 else (nrep state (head p)
+                        [ (head old) (bset (tail old) bid who txt) ]) in
+        [ nil s2 ] ;
+      %del ->
+        let old = (nget state (head p)) in
+        let s2 = if (old == 0) then state
+                 else (nrep state (head p)
+                        [ (head old) (bdel (tail old) (tail p)) ]) in
+        [ nil s2 ] ;
+      _ -> [ nil state ]
+    end
+end

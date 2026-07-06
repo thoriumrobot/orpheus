@@ -20,6 +20,7 @@ mod agent;
 mod net;
 mod dist;
 mod ledger;
+mod notes;
 mod store;
 mod sca;
 mod facet;
@@ -627,7 +628,7 @@ fn main() {
   latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
   latte plan [--iters N]             planning calc (Towards a New Socialism)
   latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\" | --list  the code profiler: measure both engines + detect distributable shapes; --list the table\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--kv-store D] [--kv-listen ADDR|off] [--kv-peer ADDR] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess, /network (ledger listens on 9600; --kv-peer links ledgers)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\" | --list  the code profiler: measure both engines + detect distributable shapes; --list the table\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--kv-store D] [--kv-listen ADDR|off] [--kv-peer ADDR] [--notes-store D] [--notes-listen ADDR|off] [--notes-peer ADDR] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess, /network (ledger listens on 9600; --kv-peer links ledgers)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
             );
         }
     }
@@ -645,6 +646,10 @@ fn cmd_gui(args: &[String]) {
     let mut kv_listen = "0.0.0.0:9600".to_string();
     let mut kv_peers: Vec<String> = Vec::new();
     let mut kv_id: Option<u64> = None;
+    let mut notes_store: Option<String> = None;
+    let mut notes_listen = "0.0.0.0:9601".to_string();
+    let mut notes_peers: Vec<String> = Vec::new();
+    let mut notes_id: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -659,6 +664,10 @@ fn cmd_gui(args: &[String]) {
             "--kv-listen" => { i += 1; kv_listen = args[i].clone(); }
             "--kv-peer" => { i += 1; kv_peers.push(args[i].clone()); }
             "--kv-id" => { i += 1; kv_id = args[i].parse().ok(); }
+            "--notes-store" => { i += 1; notes_store = Some(args[i].clone()); }
+            "--notes-listen" => { i += 1; notes_listen = args[i].clone(); }
+            "--notes-peer" => { i += 1; notes_peers.push(args[i].clone()); }
+            "--notes-id" => { i += 1; notes_id = args[i].parse().ok(); }
             other => { eprintln!("gui: unknown arg {}", other); return; }
         }
         i += 1;
@@ -670,6 +679,19 @@ fn cmd_gui(args: &[String]) {
     // directory. Two GUIs pointed at each other converge on one ledger.
     if kv_listen == "off" || kv_listen == "none" {
         kv_listen.clear();
+    }
+    // COLLABORATIVE NOTES: a second gossiped node (the notes agent,
+    // lib/notes.lat) beside the ledger, on its own port — the state behind
+    // the /notes editor and the Note.* tools.
+    if notes_listen == "off" || notes_listen == "none" {
+        notes_listen.clear();
+    }
+    match notes::init(notes_store.as_deref(), &notes_listen, &notes_peers, notes_id) {
+        Ok(desc) => println!("{}", desc),
+        Err(e) => {
+            eprintln!("gui: notes node failed to start: {}", e);
+            return;
+        }
     }
     match ledger::init(kv_store.as_deref(), &kv_listen, &kv_peers, kv_id) {
         Ok(desc) => {
@@ -714,6 +736,7 @@ fn cmd_gui(args: &[String]) {
     println!("  http://{}/chart     data visualization", listen);
     println!("  http://{}/plan      economic planner", listen);
     println!("  http://{}/network   connect instances: the shared ledger, peers, workers, training", listen);
+    println!("  http://{}/notes     collaborative notes: write together across connected instances", listen);
     println!("  http://{}/board     the shared message board (persistent, multi-user)", listen);
     if !chess_listen.is_empty() || !chess_peers.is_empty() {
         println!("  chess node: listen='{}' peers={:?}", chess_listen, chess_peers);

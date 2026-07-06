@@ -155,5 +155,16 @@ public address — the wire is plain TCP.</p>
   </div>
 </div>
 
+<div class="panel">
+  <div class="t">Collaborative notes</div>
+  <div class="b">
+    <p class="lede">The same event-log machinery carries <b>shared documents</b>: the
+    <a href="/notes">notes editor</a> merges concurrent edits from every connected instance —
+    blocks with global identities, anchored insertion, tombstoned deletion — with the full
+    history on a slider. Its node travels on port <code>9601</code>; connect it from the editor's
+    <b>⇄ Connect peer</b> button or <code>Note.connect(addr)</code>.</p>
+  </div>
+</div>
+
 <footer>The gossip protocol, the worker protocol, and the store format are architecture-independent
 — a PC, a phone (docs/android.md), and a server are full peers. Details: docs/network-gui.md.</footer>
