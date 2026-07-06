@@ -93,6 +93,24 @@ alive — appears without any user action. Its field list may be empty. The
 ledger's generation stamp also keys Facet's render memo, so a gossiped event
 invalidates exactly the pages that show ledger state, and nothing else.
 
+## The trust model — read this before exposing ports
+
+The gossip protocol (ledger/`latte node`, default `:9600`) and the worker
+protocol (`latte worker`, default `:9700`) are **unauthenticated by design**:
+any host that can reach the port can inject ledger events or submit
+evaluation tasks. This is the trusted-peers model — right for a LAN, a
+tailnet/VPN, an SSH tunnel (`ssh -L 9600:localhost:9600 host`), or machines
+you own; wrong for a port forwarded to the open Internet unprotected. The
+GUI's own HTTP port binds `127.0.0.1` by default, so pages and the console
+are local unless you choose otherwise; `--kv-listen off` makes the ledger
+dial-out only. Convergence is still safe in the Byzantine-free sense — events
+are content-addressed and deduplicated, and a malformed frame drops the
+connection — but *authorization* is the network's job, not the protocol's.
+
+Two operational notes: `Kv.connect` persists (a restart redials;
+`Kv.forget` undoes it), and a node that accidentally dials its own address
+is detected by id and dropped.
+
 ## The pieces, and where they live
 
 | piece | source |
@@ -103,3 +121,4 @@ invalidates exactly the pages that show ledger state, and nothing else.
 | the console bridge (one command namespace) | `facet::run_host_tool` ← `serve::run_tool` |
 | distribution, FedAvg, model stores | `src/dist.rs` (docs/distributed-execution.md) |
 | the page | `lib/site/network.facet` |
+| shared-dataset training (`Net.trainLedger`) | ledger `data_points` + `dist::fedavg_linear`, auto learning rate |

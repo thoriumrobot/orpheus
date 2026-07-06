@@ -66,6 +66,7 @@ public address — the wire is plain TCP.</p>
     logs reconcile the moment it appears. Connections work in either direction; one side
     suffices.</p>
     {{ Live.form("Kv.connect(addr)", [["addr", "192.168.1.20:9600"]]) }}
+    {{ Live.form("Kv.forget(addr)", [["addr", "192.168.1.20:9600"]]) }}
     {{ Live.watch("Kv.peers()", [], 5) }}
   </div>
 </div>
@@ -88,7 +89,7 @@ public address — the wire is plain TCP.</p>
     <p class="lede">The event log <b>is</b> the state — so every past state is free. Scrub the
     slider to replay the shared history event by event; the log shows who did what, in the
     total order every node agrees on (lamport, then node id).</p>
-    {{ Live.view("Kv.at(k)", [["k", "0", "~", "0", "200", "1"]]) }}
+    {{ Live.view("Kv.at(k)", [["k", "200", "~", "0", "200", "1"]]) }}
     {{ Live.view("Kv.log(n)", [["n", "12", "~", "3", "50", "1"]]) }}
   </div>
 </div>
@@ -121,6 +122,23 @@ public address — the wire is plain TCP.</p>
     {{ Live.form("Net.train(rounds, iters, store)", [["rounds", "3"], ["iters", "300"], ["store", "demo"]]) }}
     {{ Live.box("Net.model(store)", [["store", "demo"]]) }}
     {{ Live.box("Net.predict(store, x)", [["store", "demo"], ["x", "7"]]) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">Shared dataset → shared model</div>
+  <div class="b">
+    <p class="lede">The persistent state as <b>training data</b>: contribute points to the ledger
+    under a common prefix — from this instance or ANY connected one; the dataset converges by
+    gossip before training does. <code>Net.trainLedger</code> then runs the FedAvg cycle on those
+    points, with the learning rate derived from the data's own stability ceiling (¼ of
+    2/mean(x²)), shards on the registered workers, and the final consolidated model committed to
+    a named store — where the prediction widget reads it back. Distributed collection,
+    distributed training, one persistent result.</p>
+    {{ Live.form("Kv.put(key, value)", [["key", "pt.a"], ["value", "1, 3.1"]]) }}
+    {{ Live.form("Net.trainLedger(prefix, rounds, iters, store)", [["prefix", "pt."], ["rounds", "3"], ["iters", "300"], ["store", "shared"]]) }}
+    {{ Live.box("Net.model(store)", [["store", "shared"]]) }}
+    {{ Live.box("Net.predict(store, x)", [["store", "shared"], ["x", "5"]]) }}
   </div>
 </div>
 

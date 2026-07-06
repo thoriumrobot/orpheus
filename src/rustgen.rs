@@ -1459,12 +1459,13 @@ fn metrics_path() -> std::path::PathBuf {
 // timing can only mis-schedule a build, never change a result.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Profile {
     pub interp_ns: u64, // latest measured interpreter wall time
     pub native_ns: u64, // latest measured native wall time (0 = never measured)
     pub runs: u64,      // interpreter runs recorded
     pub dist: bool,     // profiler detected a distributable (data-parallel) shape
+    pub expr: String,   // a one-line preview of the program (for `latte profile --list`)
 }
 
 pub fn profile_threshold_ns() -> u64 {
@@ -1496,6 +1497,8 @@ fn profile_load() -> std::collections::HashMap<String, Profile> {
                         runs: r.parse().unwrap_or(0),
                         // 5th column (older stores lack it): distributable flag
                         dist: it.next().map(|d| d == "1").unwrap_or(false),
+                        // 6th column (older stores lack it): expression preview
+                        expr: it.next().unwrap_or("").to_string(),
                     },
                 );
             }
@@ -1531,12 +1534,13 @@ fn profile_store(m: &std::collections::HashMap<String, Profile>) {
     let mut s = String::new();
     for (k, p) in m {
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
             k,
             p.interp_ns,
             p.native_ns,
             p.runs,
-            if p.dist { 1 } else { 0 }
+            if p.dist { 1 } else { 0 },
+            p.expr
         ));
     }
     let p = profile_path();
@@ -1550,7 +1554,7 @@ fn profile_store(m: &std::collections::HashMap<String, Profile>) {
 
 /// The stored measurement for a program, if any.
 pub fn profile_lookup(expr: &str, libs: &[&str]) -> Option<Profile> {
-    profile_load().get(&profile_key(expr, libs)).copied()
+    profile_load().get(&profile_key(expr, libs)).cloned()
 }
 
 /// Record an interpreter timing (exponential smoothing so one outlier run
@@ -1562,6 +1566,9 @@ pub fn profile_record_interp(expr: &str, libs: &[&str], ns: u64) {
     let e = m.entry(key).or_default();
     e.interp_ns = if e.runs == 0 { ns } else { (e.interp_ns * 3 + ns) / 4 };
     e.runs += 1;
+    if e.expr.is_empty() {
+        e.expr = expr_preview(expr); // fill the --list preview on first sighting
+    }
     // Write back only when the smoothed value MOVED (>=5% or first sighting):
     // the store is rewritten whole, and an interactive session measures many
     // runs whose smoothing changes nothing decision-relevant.
@@ -1588,15 +1595,63 @@ pub fn profile_record_native(expr: &str, libs: &[&str], ns: u64) {
 }
 
 /// Record that the profiler detected a distributable (data-parallel) shape in
-/// this program — the adaptive engine's distribution decision reads it back.
+/// this program — surfaced by `latte profile --list` alongside the timings.
 pub fn profile_record_dist(expr: &str, libs: &[&str]) {
     let key = profile_key(expr, libs);
     let mut m = profile_load();
     let e = m.entry(key).or_default();
-    if !e.dist {
+    if !e.dist || e.expr.is_empty() {
         e.dist = true;
+        e.expr = expr_preview(expr);
         profile_store(&m);
     }
+}
+
+/// A one-line, tab-free preview of a program for the profile table.
+fn expr_preview(expr: &str) -> String {
+    let one: String = expr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > 64 {
+        let cut: String = one.chars().take(63).collect();
+        format!("{}…", cut)
+    } else {
+        one
+    }
+}
+
+/// `latte profile --list` — every program the profiler has measured, hottest
+/// first, with the engine and distribution decisions the measurements drive.
+pub fn profile_list() -> String {
+    let m = profile_load();
+    if m.is_empty() {
+        return "no profiles recorded yet — run programs (or `latte profile \"<expr>\"`) and return".into();
+    }
+    let mut rows: Vec<&Profile> = m.values().collect();
+    rows.sort_by(|a, b| b.interp_ns.cmp(&a.interp_ns));
+    let thr = profile_threshold_ns();
+    let mut out = format!(
+        "{:>10}  {:>10}  {:>5}  {:<10}  {:<5}  program\n",
+        "interp ms", "native ms", "runs", "engine", "dist"
+    );
+    for p in rows {
+        let engine = if p.native_ns > 0 && p.native_ns < p.interp_ns {
+            "native"
+        } else if p.interp_ns >= thr {
+            "compile"
+        } else {
+            "interpret"
+        };
+        out.push_str(&format!(
+            "{:>10.3}  {:>10.3}  {:>5}  {:<10}  {:<5}  {}\n",
+            p.interp_ns as f64 / 1e6,
+            p.native_ns as f64 / 1e6,
+            p.runs,
+            engine,
+            if p.dist { "yes" } else { "-" },
+            if p.expr.is_empty() { "(recorded before previews; re-run to fill in)" } else { &p.expr }
+        ));
+    }
+    out.push_str("\n(engine: measured policy — interpret below the threshold, compile above, native once a build landed;\n dist: a data-parallel shape the adaptive engine will distribute across connected workers)");
+    out
 }
 
 /// `latte profile "<expr>"` — run the program on BOTH engines, measure, persist,

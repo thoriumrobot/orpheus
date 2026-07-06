@@ -22,7 +22,31 @@ pub struct Ledger {
     pub cfg: Arc<net::Config>,
     pub listen: String,
     store: Option<String>,
-    dyn_peers: Mutex<Vec<String>>,
+    /// Peers dialled at runtime: address → the connector's alive flag
+    /// (clearing it is how `forget` stops the retry loop).
+    dyn_peers: Mutex<Vec<(String, Arc<std::sync::atomic::AtomicBool>)>>,
+}
+
+/// Runtime-connected peers persist here (one address per line), so a GUI
+/// restart redials them — `Kv.connect` is a durable decision, `Kv.forget`
+/// its undo.
+fn peers_path() -> std::path::PathBuf {
+    crate::rustgen::cache_dir().join("ledger-peers")
+}
+
+fn saved_peers() -> Vec<String> {
+    std::fs::read_to_string(peers_path())
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn save_peers(addrs: &[String]) {
+    let _ = std::fs::create_dir_all(crate::rustgen::cache_dir());
+    let body = if addrs.is_empty() { String::new() } else { addrs.join("\n") + "\n" };
+    let _ = std::fs::write(peers_path(), body);
 }
 
 static LEDGER: OnceLock<Ledger> = OnceLock::new();
@@ -73,6 +97,20 @@ pub fn init(store: Option<&str>, listen: &str, peers: &[String], id: Option<u64>
         dyn_peers: Mutex::new(Vec::new()),
     };
     let _ = LEDGER.set(ledger);
+    // Redial the peers earlier sessions connected (only when this ledger is
+    // networked — an in-memory, listen-less ledger, e.g. under test, stays
+    // quiet). `connect` below persists new ones.
+    if !listen.is_empty() {
+        for addr in saved_peers() {
+            if let Some(l) = LEDGER.get() {
+                if !l.cfg.peers.iter().any(|x| *x == addr) {
+                    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    l.dyn_peers.lock().unwrap().push((addr.clone(), alive.clone()));
+                    net::connect_peer_cancellable(l.node.clone(), l.peers.clone(), l.cfg.clone(), addr, alive);
+                }
+            }
+        }
+    }
     Ok(describe())
 }
 
@@ -259,25 +297,63 @@ pub fn connect(addr: &str) -> Result<String, String> {
     {
         return Err("Kv.connect: give a peer as host:port (e.g. 203.0.113.7:9600)".into());
     }
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     {
         let mut d = l.dyn_peers.lock().unwrap();
-        if d.iter().any(|x| x == addr) || l.cfg.peers.iter().any(|x| x == addr) {
+        if d.iter().any(|(a, _)| a == addr) || l.cfg.peers.iter().any(|x| x == addr) {
             return Ok(format!("already connecting to {} (connectors retry forever)", addr));
         }
-        d.push(addr.to_string());
+        d.push((addr.to_string(), alive.clone()));
+        // persist (networked ledgers only): a restart redials this peer
+        if !l.listen.is_empty() {
+            save_peers(&d.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>());
+        }
     }
-    net::connect_peer(l.node.clone(), l.peers.clone(), l.cfg.clone(), addr.to_string());
+    net::connect_peer_cancellable(l.node.clone(), l.peers.clone(), l.cfg.clone(), addr.to_string(), alive);
     Ok(format!(
-        "connecting to {} — the link retries until the peer appears, then the logs reconcile automatically",
+        "connecting to {} — the link retries until the peer appears, then the logs reconcile automatically (persists across restarts; Kv.forget undoes it)",
         addr
     ))
+}
+
+/// Undo a `connect`: stop the retry loop and drop the address from the
+/// persisted list. An already-open link lives until it drops on its own.
+pub fn forget(addr: &str) -> Result<String, String> {
+    let l = require()?;
+    let addr = addr.trim();
+    let mut d = l.dyn_peers.lock().unwrap();
+    let before = d.len();
+    for (a, alive) in d.iter() {
+        if a == addr {
+            alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    d.retain(|(a, _)| a != addr);
+    if !l.listen.is_empty() {
+        save_peers(&d.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>());
+    }
+    if d.len() == before {
+        if l.cfg.peers.iter().any(|x| x == addr) {
+            return Ok(format!("{} was given at startup (--kv-peer) — restart without the flag to drop it", addr));
+        }
+        return Ok(format!("{} was not a dialled peer", addr));
+    }
+    Ok(format!("forgot {} — no more reconnection attempts (an open link, if any, lapses on its own)", addr))
+}
+
+/// The training-data reader: ledger keys beginning with `prefix`, each value
+/// a point "x, y" (or "x y") — the shared, gossiped dataset any connected
+/// instance can contribute to.
+pub fn data_points(prefix: &str) -> Result<Vec<(String, String)>, String> {
+    let rows = state_rows()?;
+    Ok(rows.into_iter().filter(|(k, _)| k.starts_with(prefix)).collect())
 }
 
 /// Peer addresses this node dials (startup + runtime) and how many links are live.
 pub fn peers_info() -> Result<(Vec<String>, usize), String> {
     let l = require()?;
     let mut addrs = l.cfg.peers.clone();
-    addrs.extend(l.dyn_peers.lock().unwrap().iter().cloned());
+    addrs.extend(l.dyn_peers.lock().unwrap().iter().map(|(a, _)| a.clone()));
     let live = l.peers.lock().unwrap().len();
     Ok((addrs, live))
 }
@@ -288,7 +364,7 @@ pub fn info_lines() -> Result<Vec<(String, String)>, String> {
     let n = l.node.lock().unwrap();
     let (addrs, live) = {
         let mut a = l.cfg.peers.clone();
-        a.extend(l.dyn_peers.lock().unwrap().iter().cloned());
+        a.extend(l.dyn_peers.lock().unwrap().iter().map(|(x, _)| x.clone()));
         (a, l.peers.lock().unwrap().len())
     };
     Ok(vec![
@@ -309,14 +385,25 @@ pub fn info_lines() -> Result<Vec<(String, String)>, String> {
     ])
 }
 
+/// Ledger-touching tests share one process-wide node — they serialize on
+/// this guard so history assertions see only their own events.
+#[cfg(test)]
+pub fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn ledger_put_state_timetravel_and_log() {
-        // one shared global per test process: initialize in-memory, no network
+        // one shared global per test process: initialize in-memory, no
+        // network — and serialize with the other ledger-touching tests
+        let _g = test_guard();
         init(None, "", &[], Some(7)).unwrap();
+        let t0 = state_at_rows(usize::MAX).unwrap().1; // events already present
         let g0 = generation();
         put("greeting", "hello").unwrap();
         put("answer", "42").unwrap();
@@ -324,9 +411,10 @@ mod tests {
         let rows = state_rows().unwrap();
         assert!(rows.iter().any(|(k, v)| k == "greeting" && v == "hello"));
         assert!(rows.iter().any(|(k, v)| k == "answer" && v == "42"));
-        // time travel: after the first event only greeting exists
-        let (_k, total, at1) = state_at_rows(1).unwrap();
-        assert!(total >= 2);
+        // time travel, RELATIVE to whatever history preceded this test:
+        // after our first event, greeting exists and answer does not yet
+        let (_k, total, at1) = state_at_rows(t0 + 1).unwrap();
+        assert!(total >= t0 + 2);
         assert!(at1.iter().any(|(k, _)| k == "greeting"));
         assert!(!at1.iter().any(|(k, _)| k == "answer"));
         // the log shows both actions, newest first
@@ -338,5 +426,23 @@ mod tests {
         // values render for people
         assert_eq!(show_noun(&text_to_noun("hello")), "hello");
         assert_eq!(show_noun(&text_to_noun("42")), "42");
+        // dial-out bookkeeping: connect records, forget cancels — and with a
+        // listen-less (test) ledger nothing is persisted to the cache
+        let saved_before = super::saved_peers();
+        connect("127.0.0.1:1").unwrap();
+        let (addrs, _) = peers_info().unwrap();
+        assert!(addrs.iter().any(|a| a == "127.0.0.1:1"));
+        assert_eq!(super::saved_peers(), saved_before, "listen-less ledgers do not write the peers file");
+        let msg = forget("127.0.0.1:1").unwrap();
+        assert!(msg.contains("forgot"), "{}", msg);
+        let (addrs, _) = peers_info().unwrap();
+        assert!(!addrs.iter().any(|a| a == "127.0.0.1:1"));
+        // the shared-dataset reader filters by prefix
+        put("pt.a", "1, 3.0").unwrap();
+        put("pt.b", "2, 5.1").unwrap();
+        put("other", "9").unwrap();
+        let pts = data_points("pt.").unwrap();
+        assert_eq!(pts.len(), 2, "{:?}", pts);
+        assert!(pts.iter().all(|(k, _)| k.starts_with("pt.")));
     }
 }

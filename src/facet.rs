@@ -1289,6 +1289,100 @@ fn tool_net_train(args: &[Val]) -> Result<Val, String> {
     Ok(Val::Text(out))
 }
 
+fn tool_kv_forget(args: &[Val]) -> Result<Val, String> {
+    let addr = arg_text(args, 0)?;
+    crate::ledger::forget(&addr).map(|m| ok_note(&m))
+}
+
+/// A signed fixed-point noun → f64, for the learning-rate stability estimate.
+fn signed_to_f64(n: &crate::knot::N) -> f64 {
+    match n.as_cell() {
+        Some((s, m)) => {
+            let sign = s.as_atom().and_then(|a| a.to_u128()).unwrap_or(0);
+            let mag = m.as_atom().and_then(|a| a.to_u128()).unwrap_or(0) as f64 / 1000.0;
+            if sign == 1 { -mag } else { mag }
+        }
+        None => 0.0,
+    }
+}
+
+fn tool_net_trainledger(args: &[Val]) -> Result<Val, String> {
+    let prefix = arg_text(args, 0)?;
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return Err("Net.trainLedger: give the key prefix of the dataset (e.g. pt.)".into());
+    }
+    let rounds = arg_num_or(args, 1, 3).clamp(1, 10) as u64;
+    let iters = arg_num_or(args, 2, 300).clamp(1, 20_000) as u64;
+    let store_name = args.get(3).map(|v| v.to_text()).unwrap_or_default();
+    let store_path = named_store(&store_name)?;
+    let store_str = store_path.as_ref().map(|p| p.to_string_lossy().to_string());
+    // The dataset: gossiped ledger keys `prefix…`, each value a point "x, y"
+    // — contributed by ANY connected instance, converged before training.
+    let points = crate::ledger::data_points(prefix)?;
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    let mut bad = Vec::new();
+    for (k, v) in &points {
+        let parts: Vec<&str> = v.split([',', ' ']).filter(|p| !p.trim().is_empty()).collect();
+        match (parts.first(), parts.get(1)) {
+            (Some(a), Some(b)) => match (parse_signed(a), parse_signed(b)) {
+                (Ok(x), Ok(y)) => {
+                    xs.push(x);
+                    ys.push(y);
+                }
+                _ => bad.push(k.clone()),
+            },
+            _ => bad.push(k.clone()),
+        }
+    }
+    if xs.len() < 4 {
+        return Ok(Val::Text(format!(
+            "<span class=\"feat\">{} usable point(s) under '{}' — need at least 4. Contribute some: Kv.put {}a \"1, 3.1\" (any connected instance can; the dataset converges before training).</span>",
+            xs.len(),
+            html_escape(prefix),
+            html_escape(prefix)
+        )));
+    }
+    // A STABLE learning rate from the data itself: gradient descent on least
+    // squares diverges above 2 / mean(x²) — pick a quarter of that ceiling,
+    // instead of a fixed constant that fits only the demo's scale.
+    let mean_x2 = xs.iter().map(|x| signed_to_f64(x).powi(2)).sum::<f64>() / xs.len() as f64;
+    let lr_f = (0.5 / mean_x2.max(1e-9)).clamp(0.001, 0.2);
+    let lr = crate::dist::spos((lr_f * 1000.0).round().max(1.0) as u128);
+    let ws = crate::dist::workers();
+    let rep = crate::dist::fedavg_linear(&ws, &xs, &ys, rounds, iters, &lr, store_str.as_deref(), false)?;
+    let rows: Vec<Vec<String>> = rep
+        .rounds
+        .iter()
+        .enumerate()
+        .map(|(i, r)| vec![format!("round {}", i + 1), format!("MSE {}", r.mse)])
+        .collect();
+    let mut out = format!(
+        "<div class=\"feat\">{} point(s) from the shared ledger under '{}'{} · learning rate {:.3} (auto: ¼ of the 2/mean(x²) stability ceiling)</div>",
+        xs.len(),
+        html_escape(prefix),
+        if bad.is_empty() { String::new() } else { format!(" ({} unparsable skipped)", bad.len()) },
+        lr_f
+    );
+    out.push_str(&html_rows(&["cycle", "consolidated model, full-data error"], &rows, ""));
+    out.push_str(&format!(
+        "<div>learned <b>w = {}</b>, <b>b = {}</b> · {} shard(s) on {} worker(s), {} local fallback(s)</div>",
+        html_escape(&crate::dist::fmt_signed(&rep.w)),
+        html_escape(&crate::dist::fmt_signed(&rep.b)),
+        rep.shards,
+        if ws.is_empty() { 0 } else { ws.len() },
+        rep.local_fallbacks
+    ));
+    if rep.persisted.is_some() {
+        out.push_str(&format!(
+            "<div style=\"color:#7a9\">persistent state updated: ONE event (kv %model) in store '{}'</div>",
+            html_escape(store_name.trim())
+        ));
+    }
+    Ok(Val::Text(out))
+}
+
 /// Read the persisted model `[w b]` from a named store (written by Net.train
 /// or `latte ml linear --store`). Returns None when the store has no model.
 fn read_model(store_name: &str) -> Result<Option<(crate::knot::N, crate::knot::N)>, String> {
@@ -1722,6 +1816,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
         },
         ToolSpec {
             module: "Kv",
+            proc: "forget",
+            sig: "Kv.forget(addr)",
+            summary: "undo a Kv.connect: stop reconnection attempts and drop the address from the persisted peer list — use inside Live.form",
+            handler: tool_kv_forget,
+        },
+        ToolSpec {
+            module: "Kv",
             proc: "peers",
             sig: "Kv.peers()",
             summary: "the peers this ledger dials, and how many links are live right now",
@@ -1761,6 +1862,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             sig: "Net.train(rounds, iters, store)",
             summary: "distributed FedAvg training: rounds of local SGD on each worker's shard, consolidated in Latte; naming a store commits ONE final-model event — use inside Live.form",
             handler: tool_net_train,
+        },
+        ToolSpec {
+            module: "Net",
+            proc: "trainLedger",
+            sig: "Net.trainLedger(prefix, rounds, iters, store)",
+            summary: "FedAvg-train on the SHARED DATASET: ledger keys `prefix…` hold points \"x, y\" contributed by any connected instance; learning rate auto-derived from the data's stability ceiling — use inside Live.form",
+            handler: tool_net_trainledger,
         },
         ToolSpec {
             module: "Net",
@@ -2648,6 +2756,34 @@ mod tests {
         assert!(html.contains(r#"data-live-every="60""#), "period clamps to 60s");
         // non-watch widgets still demand fields
         assert!(render(r#"{{ Live.box("Kv.info()", []) }}"#).is_err());
+    }
+
+    #[test]
+    fn train_on_the_shared_ledger_dataset() {
+        // points contributed through the ledger (any peer could have gossiped
+        // them) become the training set; the learning rate is derived from
+        // the data; the model converges near the truth
+        let _g = crate::ledger::test_guard(); // the ledger global is shared across tests
+        crate::ledger::init(None, "", &[], Some(9)).unwrap();
+        for (i, x) in (1..=8u32).enumerate() {
+            let y = 2.0 * x as f64 + 1.0;
+            crate::ledger::put(&format!("tl.{}", i), &format!("{}, {:.1}", x, y)).unwrap();
+        }
+        let out = tool_net_trainledger(&[
+            Val::Text("tl.".into()),
+            Val::Num(3),
+            Val::Num(200),
+            Val::Text(String::new()),
+        ])
+        .unwrap()
+        .to_text();
+        assert!(out.contains("8 point(s)"), "{}", out);
+        assert!(out.contains("learned"), "{}", out);
+        // w lands near 2 (the display is w = 2.0xx or 1.9xx)
+        assert!(out.contains("w = 2.0") || out.contains("w = 1.9"), "w should approach 2: {}", out);
+        // fewer than 4 points refuses gracefully
+        let out = tool_net_trainledger(&[Val::Text("nosuch.".into())]).unwrap().to_text();
+        assert!(out.contains("need at least 4"), "{}", out);
     }
 
     #[test]

@@ -380,6 +380,7 @@ deterministic per request.</p>
     {{ Live.view("Kv.at(k)", [["k", "0", "~", "0", "50", "1"]]) }}
     {{ Live.view("Kv.log(n)", [["n", "8", "~", "3", "30", "1"]]) }}
     {{ Live.form("Kv.connect(addr)", [["addr", "203.0.113.7:9600"]]) }}
+    {{ Live.form("Kv.forget(addr)", [["addr", "203.0.113.7:9600"]]) }}
     {{ Live.view("Kv.peers()", [["_", "0"]]) }}
   </div>
 </div>
@@ -397,6 +398,7 @@ deterministic per request.</p>
     {{ Live.form("Net.rmWorker(addr)", [["addr", "127.0.0.1:9700"]]) }}
     {{ Live.form("Net.eval(expr)", [["expr", "(dmap (fn [x] -> (mul x x)) [ 1 [ 2 [ 3 0 ] ] ])"]]) }}
     {{ Live.form("Net.train(rounds, iters, store)", [["rounds", "3"], ["iters", "300"], ["store", "demo"]]) }}
+    {{ Live.form("Net.trainLedger(prefix, rounds, iters, store)", [["prefix", "pt."], ["rounds", "3"], ["iters", "300"], ["store", "shared"]]) }}
     {{ Live.box("Net.model(store)", [["store", "demo"]]) }}
     {{ Live.box("Net.predict(store, x)", [["store", "demo"], ["x", "7"]]) }}
   </div>

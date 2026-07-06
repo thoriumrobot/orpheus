@@ -500,25 +500,47 @@ pub fn start(node: NodeHandle, cfg: Arc<Config>) -> Peers {
 /// One retrying peer connector: dial `addr`, run the sync protocol, reconnect
 /// on loss — forever. Shared by the startup peer list and runtime additions.
 fn spawn_connector(node: NodeHandle, peers: Peers, cfg: Arc<Config>, addr: String) {
-    thread::spawn(move || loop {
-        match TcpStream::connect(&addr) {
-            Ok(s) => {
-                if cfg.verbose {
-                    eprintln!("[{}] connected to {}", cfg.name, addr);
-                }
-                let _ = handle_conn(s, node.clone(), peers.clone(), cfg.clone());
-            }
-            Err(_) => {}
-        }
-        thread::sleep(Duration::from_millis(1000));
-    });
+    connect_peer_cancellable(node, peers, cfg, addr, Arc::new(std::sync::atomic::AtomicBool::new(true)));
 }
 
 /// Connect to one more peer at RUNTIME — the engine behind the GUI's
 /// "connect" button. Identical to a peer named at startup: it retries
 /// forever, so a peer that is offline now is adopted the moment it appears.
+#[allow(dead_code)] // the un-cancellable convenience form; exercised by the tests
 pub fn connect_peer(node: NodeHandle, peers: Peers, cfg: Arc<Config>, addr: String) {
-    spawn_connector(node, peers, cfg, addr);
+    connect_peer_cancellable(node, peers, cfg, addr, Arc::new(std::sync::atomic::AtomicBool::new(true)));
+}
+
+/// The cancellable form: clearing `alive` stops the retry loop (an existing
+/// link lives until it drops on its own — cancellation governs RECONNECTION).
+/// This is how the ledger forgets a mistyped or retired peer.
+pub fn connect_peer_cancellable(
+    node: NodeHandle,
+    peers: Peers,
+    cfg: Arc<Config>,
+    addr: String,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+) {
+    thread::spawn(move || loop {
+        if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        match TcpStream::connect(&addr) {
+            Ok(s) => {
+                if cfg.verbose {
+                    eprintln!("[{}] connected to {}", cfg.name, addr);
+                }
+                if let Err(e) = handle_conn(s, node.clone(), peers.clone(), cfg.clone()) {
+                    if e.to_string().contains("self-connection") {
+                        eprintln!("[{}] {} is this node's own address — dropping the peer entry", cfg.name, addr);
+                        return; // pointless to redial yourself
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        thread::sleep(Duration::from_millis(1000));
+    });
 }
 
 fn handle_conn(stream: TcpStream, node: NodeHandle, peers: Peers, cfg: Arc<Config>) -> io::Result<()> {
@@ -561,10 +583,24 @@ fn handle_conn(stream: TcpStream, node: NodeHandle, peers: Peers, cfg: Arc<Confi
         }
         match payload[0] {
             T_HELLO => {
-                if cfg.verbose && payload.len() >= 9 {
+                if payload.len() >= 9 {
                     let mut idb = [0u8; 8];
                     idb.copy_from_slice(&payload[1..9]);
-                    eprintln!("[{}] peer hello id={}", cfg.name, u64::from_be_bytes(idb));
+                    let pid = u64::from_be_bytes(idb);
+                    if pid == node.lock().unwrap().id {
+                        // The node dialled itself (its own address entered as
+                        // a peer): syncing with yourself is a no-op that costs
+                        // a connection loop. Shut the socket down (so BOTH
+                        // ends' writer threads fail fast instead of buffering
+                        // into a connection nobody reads) and return the
+                        // sentinel — the connector stops retrying entirely;
+                        // broadcast() prunes the dead senders.
+                        let _ = reader.shutdown(std::net::Shutdown::Both);
+                        return Err(io::Error::new(io::ErrorKind::Other, "self-connection"));
+                    }
+                    if cfg.verbose {
+                        eprintln!("[{}] peer hello id={}", cfg.name, pid);
+                    }
                 }
             }
             T_HAVE => {
@@ -698,6 +734,27 @@ mod tests {
         assert_eq!(b.state().unwrap(), a.state().unwrap());
         assert_eq!(show_state(&b.state().unwrap()), "5");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dialling_yourself_is_dropped_not_looped() {
+        let a = Arc::new(Mutex::new(mk(41)));
+        let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = la.local_addr().unwrap().to_string();
+        drop(la);
+        let cfg = Arc::new(Config { name: "S".into(), listen: addr.clone(), peers: vec![], verbose: false, compact_every: 0 });
+        let peers = start(a.clone(), cfg.clone());
+        connect_peer(a.clone(), peers.clone(), cfg, addr); // the mistake: dialling our own address
+        std::thread::sleep(Duration::from_millis(1500)); // first dial happens, sentinel stops the retry loop
+        submit(&a, &peers, act_add(5)); // broadcast prunes the dropped link's dead senders
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(show_state(&a.lock().unwrap().state().unwrap()), "5", "state undamaged by the self-dial");
+        submit(&a, &peers, act_add(1));
+        std::thread::sleep(Duration::from_millis(1500)); // were the connector still looping, fresh links would appear here
+        submit(&a, &peers, act_add(0));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(a.lock().unwrap().event_count(), 3, "no event duplication or echo loop");
+        assert_eq!(peers.lock().unwrap().len(), 0, "the self-dial connector stopped; all its senders pruned");
     }
 
     #[test]

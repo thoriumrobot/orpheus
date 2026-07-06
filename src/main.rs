@@ -302,10 +302,15 @@ fn cmd_anvil(args: &[String]) {
 /// Slow-when-interpreted programs are compiled automatically on their next run — the
 /// measurement, not a structural guess, is what decides (see rustgen::run_adaptive).
 fn cmd_profile(args: &[String]) {
+    if args.iter().any(|a| a == "--list") {
+        println!("{}", rustgen::profile_list());
+        return;
+    }
     let expr = match args.iter().find(|a| !a.starts_with("--")) {
         Some(e) => e.as_str(),
         None => {
             eprintln!("usage: latte profile \"<expr>\"   (measure both engines; the adaptive policy uses the result)");
+            eprintln!("       latte profile --list       (every measured program, hottest first, with decisions)");
             return;
         }
     };
@@ -622,7 +627,7 @@ fn main() {
   latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
   latte plan [--iters N]             planning calc (Towards a New Socialism)
   latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\"           the code profiler: measure both engines + detect distributable shapes\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--kv-store D] [--kv-listen ADDR|off] [--kv-peer ADDR] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess, /network (ledger listens on 9600; --kv-peer links ledgers)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\" | --list  the code profiler: measure both engines + detect distributable shapes; --list the table\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--kv-store D] [--kv-listen ADDR|off] [--kv-peer ADDR] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess, /network (ledger listens on 9600; --kv-peer links ledgers)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
             );
         }
     }
@@ -667,7 +672,12 @@ fn cmd_gui(args: &[String]) {
         kv_listen.clear();
     }
     match ledger::init(kv_store.as_deref(), &kv_listen, &kv_peers, kv_id) {
-        Ok(desc) => println!("{}", desc),
+        Ok(desc) => {
+            println!("{}", desc);
+            if !kv_listen.is_empty() {
+                println!("  (the ledger port trusts any host that can reach it — LAN/VPN/tunnel it; docs/network-gui.md)");
+            }
+        }
         Err(e) => {
             eprintln!("gui: ledger failed to start: {}", e);
             return;
