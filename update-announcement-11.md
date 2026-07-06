@@ -40,3 +40,20 @@ the retry loops cancelled after), document removal with history preserved,
 and the existing registry-coverage test now enforcing interfaces for
 `Net.connect` and `Note.remove`. The tools-page test also pins the adaptive
 `Latte.eval` to its exact classic output — same values, better engine.
+
+## The audit round, part two
+
+A fresh pass over the new surfaces found four issues, all fixed and tested.
+**`Kv.at` could strand the slider in the past**: it indexed history from the
+beginning, so a fixed 0–200 slider could never reach the present once the
+log outgrew it — the tool now counts BACK from now (0 = present), so any
+slider always reaches the latest state and the recent past.
+**`Net.connect ::1` mangled IPv6**: multi-colon inputs are now refused with
+directions to the explicit per-layer forms, and the adjacent-port assumption
+behind the one-stop derivation is documented. **The editor gossiped a
+retitle event on every title blur** — now only a changed title becomes an
+event. And **typing into a block a peer deleted silently discarded the
+words** (the set landed on a tombstone): the editor now says so and shows
+your text so nothing is lost silently. One suspected issue proved already
+handled: repeated `Code.run` does not churn the library generation, because
+runtime registration skips identical source.

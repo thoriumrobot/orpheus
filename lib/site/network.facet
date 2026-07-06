@@ -90,10 +90,11 @@ public address — the wire is plain TCP.</p>
 <div class="panel">
   <div class="t">History &amp; time travel</div>
   <div class="b">
-    <p class="lede">The event log <b>is</b> the state — so every past state is free. Scrub the
-    slider to replay the shared history event by event; the log shows who did what, in the
-    total order every node agrees on (lamport, then node id).</p>
-    {{ Live.view("Kv.at(k)", [["k", "200", "~", "0", "200", "1"]]) }}
+    <p class="lede">The event log <b>is</b> the state — so every past state is free. The slider
+    counts <b>backwards from now</b> (0 = the present), so it always reaches the latest state
+    however long the log grows; the log shows who did what, in the total order every node
+    agrees on (lamport, then node id).</p>
+    {{ Live.view("Kv.at(k)", [["k", "0", "~", "0", "200", "1"]]) }}
     {{ Live.view("Kv.log(n)", [["n", "12", "~", "3", "50", "1"]]) }}
   </div>
 </div>

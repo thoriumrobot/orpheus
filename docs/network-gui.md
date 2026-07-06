@@ -107,6 +107,15 @@ dial-out only. Convergence is still safe in the Byzantine-free sense — events
 are content-addressed and deduplicated, and a malformed frame drops the
 connection — but *authorization* is the network's job, not the protocol's.
 
+`Net.connect <host>` is the one-stop form: it dials the ledger at
+`host:9600` and the notes node at `host:9601` (or, given `host:port`, the
+notes node at `port+1`). That derivation assumes the peer keeps the two
+ports adjacent — the default; a peer with an unusual layout is reached with
+`Kv.connect` and `Note.connect` and explicit addresses (also the road for
+IPv6 literals, which the one-stop parse deliberately refuses rather than
+mangles). A mistyped one-stop target simply retries forever and shows in the
+peers lists until `Kv.forget` / `Note.forget`.
+
 Two operational notes: `Kv.connect` persists (a restart redials;
 `Kv.forget` undoes it), and a node that accidentally dials its own address
 is detected by id and dropped.

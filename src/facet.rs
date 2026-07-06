@@ -1100,14 +1100,24 @@ fn tool_kv_state(_args: &[Val]) -> Result<Val, String> {
 }
 
 fn tool_kv_at(args: &[Val]) -> Result<Val, String> {
-    let k = arg_num_or(args, 0, u128::MAX) as usize;
-    match crate::ledger::state_at_rows(k) {
+    // k counts BACK from the present (0 = now), so a fixed slider always
+    // reaches the present and the recent past — however long the log grows.
+    let back = arg_num_or(args, 0, 0) as usize;
+    let total = match crate::ledger::state_at_rows(usize::MAX) {
+        Ok((_, t, _)) => t,
+        Err(e) => return Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+    };
+    let at = total.saturating_sub(back);
+    match crate::ledger::state_at_rows(at) {
         Ok((at, total, rows)) => {
             let rows: Vec<Vec<String>> = rows.into_iter().map(|(k, v)| vec![k, v]).collect();
             Ok(Val::Text(format!(
-                "<div class=\"feat\">state as of event {} of {} (event sourcing gives every past state for free)</div>{}",
-                at,
-                total,
+                "<div class=\"feat\">{} (event sourcing gives every past state for free)</div>{}",
+                if back == 0 {
+                    format!("the present — {} event(s) in the log", total)
+                } else {
+                    format!("{} event(s) ago (as of event {} of {})", back, at, total)
+                },
                 html_rows(&["key", "value"], &rows, "(empty at this point in history)")
             )))
         }
@@ -1186,6 +1196,9 @@ fn tool_net_connect(args: &[Val]) -> Result<Val, String> {
     let host = host.trim();
     if host.is_empty() {
         return Err("Net.connect: give the other instance's host (or host:ledger-port)".into());
+    }
+    if host.matches(':').count() > 1 {
+        return Err("Net.connect: give host or host:port (for IPv6 or unusual layouts, use Kv.connect and Note.connect with explicit addresses)".into());
     }
     let (kv_addr, notes_addr) = match host.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => {
@@ -2267,7 +2280,7 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             module: "Kv",
             proc: "at",
             sig: "Kv.at(k)",
-            summary: "TIME TRAVEL: the ledger state as of the first k events — put it on a slider and scrub history",
+            summary: "TIME TRAVEL: the ledger state k events AGO (0 = present) — a fixed slider always reaches now and the recent past",
             handler: tool_kv_at,
         },
         ToolSpec {

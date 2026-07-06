@@ -97,7 +97,7 @@ same registry.</footer>
 (function(){
 'use strict';
 var US='\u001f', RS='\u001e';
-var noteId='', focusedBid=null, dirty={}, atEvent=0, lastLines='', polling=null;
+var noteId='', focusedBid=null, dirty={}, atEvent=0, lastLines='', polling=null, loadedTitle=null;
 
 function $(id){ return document.getElementById(id); }
 function status(t){ $('status').textContent = t; }
@@ -232,7 +232,7 @@ function render(body){
     return;
   }
   var titleLine = lines.shift().split(US);
-  if(document.activeElement !== $('title')) $('title').value = titleLine[1] || '';
+  if(document.activeElement !== $('title')){ $('title').value = titleLine[1] || ''; loadedTitle = titleLine[1] || ''; }
   var seen = {};
   var prev = null; // walk in document order, moving/creating DOM nodes to match
   lines.forEach(function(line){
@@ -292,9 +292,19 @@ function commit(el){
   var bid = el.getAttribute('data-bid');
   if(!dirty[bid]) return;
   delete dirty[bid];
+  // a peer may have deleted this block while you typed: your text would land
+  // on a tombstone (invisible). Say so, and keep the words recoverable.
+  var gone = lastLines && lastLines.split('\n').every(function(l){
+    var p = l.split(US);
+    return p[0] !== bid || p[1] !== '1';
+  });
   var t = el.textContent.split('\n').join(RS);
   api('Note.set ' + q(noteId) + ' ' + q(bid) + ' ' + q(who()) + ' ' + q(t), function(err, body){
-    if(err) status(err); else poll(true);
+    if(err){ status(err); return; }
+    if(gone && el.textContent){
+      status('a peer deleted that block while you typed — your text: “' + el.textContent + '” (add it as a new block if you want it kept)');
+    }
+    poll(true);
   });
 }
 
@@ -325,8 +335,12 @@ function deleteBlock(el){
 }
 
 $('title').addEventListener('blur', function(){
-  if(noteId && !$('title').disabled)
-    api('Note.retitle ' + q(noteId) + ' ' + q($('title').value.trim() || 'untitled'), function(){ refreshIndex(); });
+  var t = $('title').value.trim() || 'untitled';
+  // only a CHANGED title becomes a gossiped event — focus alone is not an edit
+  if(noteId && !$('title').disabled && t !== loadedTitle){
+    loadedTitle = t;
+    api('Note.retitle ' + q(noteId) + ' ' + q(t), function(){ refreshIndex(); });
+  }
 });
 $('title').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); $('title').blur(); } });
 
