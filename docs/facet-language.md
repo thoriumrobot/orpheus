@@ -134,6 +134,18 @@ field list is `[[name, default, …], …]`, and the extra items pick the contro
 | `[name, default, opt1, opt2, …]` | a `<select>` dropdown of the options |
 | `[name, default, "~", min, max, step]` | a range slider |
 
+`Live.form` is the ACTION variant: the same inputs plus a **Go** button, and the expression
+runs only when the button is clicked — never at render time (viewing a page must not perform
+the action), never on keystrokes, and never from the client cache (a second click re-executes).
+It exists for side-effecting tools: `Db.post`, `Db.sync`. After a form action fires, every
+other live widget on the page re-runs with its cache cleared (the `facet-action` event), so a
+board you just posted to updates in place.
+
+The `Db.*` tools surface the PERSISTENT database to pages: `Db.post(board, author, text)`
+appends an entry under a Lamport-pair key, `Db.board(board, n)` renders the newest n, and
+`Db.sync(board, url)` reconciles the table with a peer node (see "Shared state over the
+network" in the-system.md).
+
 `Live.box` shows the result as text (escaped); `Live.view` inserts it as raw markup, so chart
 and HTML tools display live. As the reader edits a control, the widget re-evaluates the
 expression on the server through `POST /api/eval` and swaps in the new result — debounced, with

@@ -221,6 +221,15 @@ impl DbService {
         Ok(())
     }
 
+    /// The live key set of a database, sorted — the board's listing order and the
+    /// sync protocol's diff basis both read through here.
+    pub fn keys(&mut self, name: &str) -> Result<Vec<String>, String> {
+        self.open(name, 2, 0, 256)?;
+        let mut ks: Vec<String> = self.dbs.get(name).ok_or("no such db")?.keys.iter().cloned().collect();
+        ks.sort();
+        Ok(ks)
+    }
+
     /// Append a tombstone for `key` (MVCC keeps the history).
     pub fn delete(&mut self, name: &str, key: &str) -> Result<(), String> {
         self.open(name, 2, 0, 256)?;
@@ -271,6 +280,66 @@ impl DbService {
             let r = me.call("db_get", knot_tuple!(v, cord(&k)))?;
             Ok(crate::serve::render_noun(&r))
         })
+    }
+
+    /// A record as a RE-EVALUABLE Latte expression (noun_to_latte, the same
+    /// serializer the checkpoint trusts) — the sync protocol's wire format, so a
+    /// record survives the round trip to a peer byte-exactly. Errors on a live
+    /// long non-text atom, which has no safe literal form.
+    pub fn rec(&mut self, name: &str, key: &str) -> Result<String, String> {
+        self.open(name, 2, 0, 256)?;
+        let v = self.value_of(name)?;
+        let r = self.call("db_get", knot_tuple!(v, cord(key)))?;
+        // db_get returns [%rec row] (or %absent): serialize the ROW only —
+        // db_put on the receiving side expects the bare field alist
+        let row = match &*r {
+            crate::knot::Knot::Cell(h, t)
+                if matches!(&**h, crate::knot::Knot::Atom(a) if a.as_text().as_deref() == Some("rec")) =>
+            {
+                t.clone()
+            }
+            _ => return Err("no such record".into()),
+        };
+        noun_to_latte(&row).ok_or_else(|| "record has no literal form (long binary atom)".into())
+    }
+
+    /// A record FIELD decoded as text: walk the row's association list for the
+    /// numeric field tag and render the value cord's bytes as UTF-8 — the board's
+    /// reading path (author = field 1, message = field 2), shared with anything
+    /// else that stores text in row fields.
+    pub fn field_text(&mut self, name: &str, key: &str, tag: u128) -> Result<String, String> {
+        self.open(name, 2, 0, 256)?;
+        let v = self.value_of(name)?;
+        let got = self.call("db_get", knot_tuple!(v, cord(key)))?;
+        // db_get returns [%rec row]: unwrap, then walk the [[tag val] …] alist
+        let mut cur = match &*got {
+            crate::knot::Knot::Cell(h, t)
+                if matches!(&**h, crate::knot::Knot::Atom(a) if a.as_text().as_deref() == Some("rec")) =>
+            {
+                t.clone()
+            }
+            _ => return Err("no such record".into()),
+        };
+        loop {
+            match &*cur {
+                crate::knot::Knot::Cell(h, t) => {
+                    if let crate::knot::Knot::Cell(k, val) = &**h {
+                        if let crate::knot::Knot::Atom(a) = &**k {
+                            if a.to_u128() == Some(tag) {
+                                if let crate::knot::Knot::Atom(va) = &**val {
+                                    if let Some(t) = va.as_text() {
+                                        return Ok(t); // a cord: its bytes as UTF-8
+                                    }
+                                }
+                                return Ok(crate::serve::render_noun(val));
+                            }
+                        }
+                    }
+                    cur = t.clone();
+                }
+                _ => return Err(format!("field {} not found", tag)),
+            }
+        }
     }
 
     /// All live rows whose indexed field equals `fv`, rendered as HTML.
@@ -567,10 +636,9 @@ static SVC: OnceLock<Mutex<DbService>> = OnceLock::new();
 /// Collision-free generation numbers for the read cache: every state change of any
 /// database takes the next value, so a (name, gen) pair can never be reused for a
 /// different value — not even across checkpoint's remove-and-replay cycle.
+static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 fn next_gen() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static G: AtomicU64 = AtomicU64::new(1);
-    G.fetch_add(1, Ordering::Relaxed)
+    GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn default_dir() -> PathBuf {
@@ -578,6 +646,14 @@ fn default_dir() -> PathBuf {
 }
 
 /// The shared persistent-database service (created on first use).
+/// The DATA generation: the value of the global write counter, readable without
+/// the service lock. Facet's page and widget memos fold this into their keys, so
+/// a board post (or any persistent write) invalidates every cached page that
+/// might display it — the same discipline lib_generation applies to code.
+pub fn data_generation() -> u64 {
+    GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn service() -> &'static Mutex<DbService> {
     SVC.get_or_init(|| Mutex::new(DbService::new(default_dir()).expect("init db service")))
 }
@@ -613,6 +689,20 @@ pub fn noun_to_latte(n: &N) -> Option<String> {
 /// `latte db <name> <op> [args]` — a persistent database from the shell. The data
 /// lives under ./dbdata (or $ORPHEUS_DB_DIR) and survives between invocations.
 pub fn cli(args: &[String]) {
+    // `latte db sync <url> <table>` — reconcile a table with a peer node over
+    // its /api/db endpoints (src/dbsync.rs). Must run BEFORE taking the local
+    // service lock: sync takes it per-operation itself.
+    if args.first().map(String::as_str) == Some("sync") {
+        if args.len() < 3 {
+            eprintln!("usage: latte db sync http://host:8088 <table>");
+            return;
+        }
+        match crate::dbsync::sync(&args[1], &args[2]) {
+            Ok(report) => println!("{}", report),
+            Err(e) => eprintln!("db sync: {}", e),
+        }
+        return;
+    }
     let svc = service();
     let mut s = svc.lock().unwrap();
     if args.is_empty() || args[0] == "list" {

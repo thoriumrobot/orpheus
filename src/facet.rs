@@ -568,6 +568,23 @@ fn tool_mkt_chart(args: &[Val]) -> Result<Val, String> {
     let tail: Vec<u128> = s[s.len() - n..].iter().map(|&c| (c / 100) as u128).collect();
     Ok(Val::Text(crate::viz::render_chart(kind.trim(), &tail)))
 }
+/// The trading advisor as a page widget — the SAME advice_text the CLI prints
+/// (src/numerics.rs), so the GUI and the terminal can never drift. The market
+/// argument switches between the bond-desk duration model and the TA/vol
+/// engine for any price tape; the report renders preformatted.
+fn tool_trade_advice(args: &[Val]) -> Result<Val, String> {
+    let market = arg_text(args, 0)?.to_lowercase();
+    let account = arg_num_or(args, 1, 10_000) as f64;
+    let report = crate::numerics::advice_text(&market, account, 0.25, None, false, None)
+        .map_err(|e| format!("Trade.advice: {}", e))?;
+    Ok(Val::Text(format!("<pre style=\"margin:0;white-space:pre-wrap;font-size:12px\">{}</pre>",
+        html_escape(&report))))
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 fn tool_mkt_stat(args: &[Val]) -> Result<Val, String> {
     let op = arg_text(args, 0)?;
     let s = mkt_closes();
@@ -786,14 +803,18 @@ function wire(box){var expr=box.getAttribute('data-live-expr'),out=box.querySele
 htm=box.hasAttribute('data-live-html'),\
 ins=box.querySelectorAll('.li'),cache={},timer=null,seq=0,last=null;\
 function set(t){if(htm){out.innerHTML=t;}else{out.textContent=t;}}\
-function run(){var b='expr='+encodeURIComponent(expr);\
+function run(force){var b='expr='+encodeURIComponent(expr);\
 ins.forEach(function(i){b+='&'+encodeURIComponent(i.getAttribute('data-n'))+'='+encodeURIComponent(i.value);});\
-if(b===last)return;last=b;\
-if(cache[b]!==undefined){set(cache[b]);return;}\
+if(!force){if(b===last)return;last=b;\
+if(cache[b]!==undefined){set(cache[b]);return;}}\
 var my=++seq;\
 fetch('/api/eval',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b})\
-.then(function(r){return r.text();}).then(function(t){cache[b]=t;if(my===seq)set(t);});}\
-ins.forEach(function(i){['input','change'].forEach(function(ev){i.addEventListener(ev,function(){if(i.nextElementSibling&&i.nextElementSibling.className==='liv'){i.nextElementSibling.textContent=i.value;}clearTimeout(timer);timer=setTimeout(run,140);});});});}\
+.then(function(r){return r.text();}).then(function(t){if(!force)cache[b]=t;if(my===seq)set(t);\
+if(force){window.dispatchEvent(new Event('facet-action'));}});}\
+var btn=box.querySelector('.lgo');\
+if(btn){btn.addEventListener('click',function(){set('…');run(true);});}\
+else{ins.forEach(function(i){['input','change'].forEach(function(ev){i.addEventListener(ev,function(){if(i.nextElementSibling&&i.nextElementSibling.className==='liv'){i.nextElementSibling.textContent=i.value;}clearTimeout(timer);timer=setTimeout(run,140);});});});\
+window.addEventListener('facet-action',function(){cache={};last=null;run(false);});}}\
 document.querySelectorAll('[data-live-expr]').forEach(wire);})();</script>";
 
 /// `Live.box(expr, [name, default, …])` renders a LIVE, client-updating widget: one text input per
@@ -807,6 +828,14 @@ document.querySelectorAll('[data-live-expr]').forEach(wire);})();</script>";
 /// `[name, default, …]` pairs (text inputs) or structured `[[name, default, opt…], …]` (text inputs
 /// and dropdowns).
 fn build_live_widget(expr: &str, fields_val: &[Val], html_out: bool) -> Result<String, String> {
+    build_live_widget_mode(expr, fields_val, html_out, false)
+}
+
+/// `form = true` is the ACTION widget (`Live.form`): the expression runs ONLY when
+/// its button is clicked — never at render time (a page view must not perform the
+/// action), never on keystrokes, and never from the client cache (a second click
+/// must re-execute). Made for side-effecting tools like Db.post and Db.sync.
+fn build_live_widget_mode(expr: &str, fields_val: &[Val], html_out: bool, form: bool) -> Result<String, String> {
     if fields_val.is_empty() {
         return Err("a live widget needs a non-empty field list".into());
     }
@@ -847,7 +876,9 @@ fn build_live_widget(expr: &str, fields_val: &[Val], html_out: bool) -> Result<S
 
     let seed: Vec<(String, String)> =
         fields.iter().map(|f| (f.name.clone(), f.default.clone())).collect();
-    let initial = eval_live(expr, &seed);
+    // A FORM never evaluates at render time: viewing the page must not perform
+    // the action. Its result area starts as an instruction instead.
+    let initial = if form { String::new() } else { eval_live(expr, &seed) };
 
     let mut controls = String::new();
     for f in &fields {
@@ -894,15 +925,126 @@ fn build_live_widget(expr: &str, fields_val: &[Val], html_out: bool) -> Result<S
     // updates via innerHTML by the data-live-html marker. For a box widget the result is escaped text.
     let (out_html, marker) =
         if html_out { (initial.clone(), " data-live-html=\"1\"") } else { (esc_attr(&initial), "") };
+    // the form's button carries class "lgo": the runtime wires click -> run(force)
+    let button = if form { "<button class=\"lgo\" type=\"button\">Go</button>" } else { "" };
     let widget = format!(
-        "<span class=\"live\" data-live-expr=\"{expr}\"{marker}>{controls} <span class=\"out\">{out}</span></span>",
+        "<span class=\"live\" data-live-expr=\"{expr}\"{marker}>{controls}{button} <span class=\"out\">{out}</span></span>",
         expr = esc_attr(expr),
         marker = marker,
         controls = controls,
+        button = button,
         out = out_html
     );
     // the first live widget on the page also carries the shared runtime
     Ok(format!("{}{}", widget, claim_live_runtime()))
+}
+// ---------------------------------------------------------------------------
+// Db.* — the PERSISTENT, SHARED, NETWORKED state, surfaced to pages.
+//
+// These tools read and write src/dbservice.rs (WAL-backed, survives restarts)
+// through the same service every browser tab, every CLI, and every peer node
+// reaches — which is what makes a Facet page with a Db widget a genuinely
+// multi-user interface: one user's Db.post is in every other user's next
+// render (the data generation keys the page memo, so nothing stale is
+// served). Db.sync reconciles a table with ANOTHER Orpheus system.
+// ---------------------------------------------------------------------------
+
+/// Post an entry to a board table. The key is a LAMPORT PAIR rendered so that
+/// plain string order equals lib/lamport.lat's `lam_lt` total order — millis
+/// since the epoch (zero-padded), then this node's id as the deterministic
+/// tie-break. Keys are unique and records immutable, so boards merge across
+/// nodes as a G-Set: sync in any order, converge to the union.
+fn tool_db_post(args: &[Val]) -> Result<Val, String> {
+    let board = arg_text(args, 0)?;
+    let author = arg_text(args, 1)?;
+    let text = arg_text(args, 2)?;
+    if !board.chars().all(|c| c.is_ascii_alphanumeric()) || board.is_empty() {
+        return Err("Db.post: board name must be alphanumeric".into());
+    }
+    if author.trim().is_empty() || text.trim().is_empty() {
+        return Err("Db.post: need an author and a message".into());
+    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let key = format!("{:016}-{}", ms, crate::dbsync::node_id());
+    // record = [ [1 author] [ [2 text] 0 ] ] — the service's row shape
+    let rec = format!("[ [1 \"{}\"] [ [2 \"{}\"] 0 ] ]", lat_str(&author), lat_str(&text));
+    let svc = crate::dbservice::service();
+    let mut s = svc.lock().unwrap();
+    s.put(&board, &key, &rec).map_err(|e| format!("Db.post: {}", e))?;
+    Ok(Val::Text(format!("<span style=\"color:#7a9\">posted as {} · {}</span>", html_escape(&author), key)))
+}
+
+/// escape a string for inclusion in a Latte string literal
+fn lat_str(s: &str) -> String {
+    s.replace('\\', " ").replace('"', "'").replace('\n', " ")
+}
+
+/// The last `n` entries of a board, newest first, as HTML. Reads through the
+/// same generation-cached service reads every dashboard uses.
+fn tool_db_board(args: &[Val]) -> Result<Val, String> {
+    let board = arg_text(args, 0)?;
+    let n = arg_num_or(args, 1, 20) as usize;
+    if !board.chars().all(|c| c.is_ascii_alphanumeric()) || board.is_empty() {
+        return Err("Db.board: board name must be alphanumeric".into());
+    }
+    let svc = crate::dbservice::service();
+    let mut s = svc.lock().unwrap();
+    let mut keys = s.keys(&board).map_err(|e| format!("Db.board: {}", e))?;
+    keys.reverse(); // Lamport-pair keys sort oldest-first; show newest first
+    let mut out = String::from("<div class=\"board\">");
+    let mut shown = 0usize;
+    for k in keys.iter().take(n) {
+        // fields decoded straight from the row noun (author = 1, message = 2)
+        let author = s.field_text(&board, k, 1).unwrap_or_default();
+        let text = s.field_text(&board, k, 2).unwrap_or_default();
+        let when = k.get(..16).and_then(|t| t.parse::<u64>().ok()).map(fmt_when).unwrap_or_default();
+        let who_node = k.get(17..).unwrap_or("");
+        out.push_str(&format!(
+            "<div style=\"margin:6px 0;padding:6px 8px;background:#22222c;border-radius:4px\">\
+             <b>{}</b> <span style=\"color:#8a8676;font-size:11px\">{} · node {}</span><br>{}</div>",
+            html_escape(&author), when, html_escape(who_node), html_escape(&text)
+        ));
+        shown += 1;
+    }
+    if shown == 0 {
+        out.push_str("<i>no posts yet — be the first</i>");
+    }
+    out.push_str("</div>");
+    Ok(Val::Text(out))
+}
+
+/// Reconcile a board/table with a peer Orpheus node — the page-widget face of
+/// `latte db sync` (src/dbsync.rs; G-Set union, conflicts kept local).
+fn tool_db_sync(args: &[Val]) -> Result<Val, String> {
+    let board = arg_text(args, 0)?;
+    let url = arg_text(args, 1)?;
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Db.sync: peer must be an http(s) URL like http://host:8088".into());
+    }
+    let report = crate::dbsync::sync(&url, &board).map_err(|e| format!("Db.sync: {}", e))?;
+    Ok(Val::Text(format!("<span style=\"color:#7a9\">{}</span>", html_escape(&report))))
+}
+
+fn fmt_when(ms: u64) -> String {
+    let secs = ms / 1000;
+    // days since 1970-01-01 -> the shared civil-date renderer (src/dates.rs,
+    // ordinal 0 = 1970-01-01), plus the time of day
+    let date = crate::dates::ordinal_date((secs / 86_400) as i64);
+    let hh = (secs % 86_400) / 3600;
+    let mm = (secs % 3600) / 60;
+    format!("{} {:02}:{:02} UTC", date, hh, mm)
+}
+
+fn tool_live_form(args: &[Val]) -> Result<Val, String> {
+    let expr = arg_text(args, 0)?;
+    let fields = match args.get(1) {
+        Some(Val::List(vs)) => vs.as_slice(),
+        _ => return Err("Live.form(expr, fields) needs a field list".into()),
+    };
+    Ok(Val::Text(build_live_widget_mode(&expr, fields, true, true)?))
 }
 fn tool_live_box(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
@@ -1122,6 +1264,34 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_latte_eval,
         },
         ToolSpec {
+            module: "Db",
+            proc: "post",
+            sig: "Db.post(board, author, text)",
+            summary: "append a message to a shared persistent board (Lamport-pair key: converges across nodes as a G-Set) — use inside Live.form",
+            handler: tool_db_post,
+        },
+        ToolSpec {
+            module: "Db",
+            proc: "board",
+            sig: "Db.board(board, n)",
+            summary: "the last n posts of a shared board, newest first — persistent (WAL), visible to every user of this node",
+            handler: tool_db_board,
+        },
+        ToolSpec {
+            module: "Db",
+            proc: "sync",
+            sig: "Db.sync(board, url)",
+            summary: "reconcile a board with a peer Orpheus node over http (pull+push union; conflicts kept local) — use inside Live.form",
+            handler: tool_db_sync,
+        },
+        ToolSpec {
+            module: "Live",
+            proc: "form",
+            sig: "Live.form(expr, fields)",
+            summary: "an ACTION widget: inputs + a Go button; expr runs only on click (for Db.post, Db.sync, and other side-effecting tools)",
+            handler: tool_live_form,
+        },
+        ToolSpec {
             module: "Live",
             proc: "box",
             sig: "Live.box(expr, fields)",
@@ -1162,6 +1332,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             sig: "Mkt.span()",
             summary: "the date range and length of the built-in BTC/USD daily close series",
             handler: tool_mkt_span,
+        },
+        ToolSpec {
+            module: "Trade",
+            proc: "advice",
+            sig: "Trade.advice(market, account)",
+            summary: "the full trading-advisor report — bonds (duration model) or any price market (TA + volatility + news), one engine with the CLI",
+            handler: tool_trade_advice,
         },
         ToolSpec {
             module: "Mkt",
@@ -1362,6 +1539,8 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Hash", summary: "SHA3-256 digests and short fingerprints" },
         ModuleSpec { name: "Meta", summary: "the environment describing its own tools" },
         ModuleSpec { name: "Phono", summary: "phonology: inventories, word generation, typology" },
+        ModuleSpec { name: "Trade", summary: "the trading advisor — one engine, every market, switchable live" },
+        ModuleSpec { name: "Db", summary: "shared persistent state: boards, posts, and node-to-node sync" },
     ]
 }
 
@@ -1561,7 +1740,7 @@ fn cached_segments(expr: &str) -> Result<Arc<Vec<Seg>>, String> {
 /// and shared defaults are free; and on a result miss, the *parsed* expression is reused from
 /// `parse_cache`, so a fresh input value pays only for evaluation, never for re-parsing.
 pub fn eval_live(expr: &str, inputs: &[(String, String)]) -> String {
-    let gen = (crate::latte::lib_generation(), today_stamp());
+    let gen = (crate::latte::lib_generation() ^ (crate::dbservice::data_generation() << 32), today_stamp());
     let mut key = String::with_capacity(expr.len() + inputs.len() * 8 + 1);
     key.push_str(expr);
     for (n, v) in inputs {
@@ -1621,7 +1800,7 @@ pub fn render_with(src: &str, params: &[(String, String)]) -> Result<String, Str
     // tool-level special-casing). Repeated visits to a widget-heavy page — the
     // /tools shelf, the /learn tutorials — become a single map lookup.
     let day = today_stamp();
-    let gen = crate::latte::lib_generation();
+    let gen = crate::latte::lib_generation() ^ (crate::dbservice::data_generation() << 32);
     let mut pkey = String::with_capacity(src.len() / 8 + 64);
     pkey.push_str(&crate::sha3::hex(&crate::sha3::sha3_256(src.as_bytes()))[..32]);
     for (k, v) in params {

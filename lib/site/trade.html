@@ -60,6 +60,7 @@
   <div class="col panel">
     <div class="title">Trade advice</div>
     <div class="body">
+      <label>market</label><select id="market"></select>
       <label>account $</label><input id="acct" value="10000" size="8">
       <label>frac. Kelly</label><input id="kelly" value="0.25" size="4">
       <button onclick="advise()">Get advice</button><span id="status"></span>
@@ -81,12 +82,20 @@ function score(){
 }
 function advise(){
   var s=document.getElementById('status'); s.textContent='running model…';
-  var body = 'account=' + document.getElementById('acct').value +
+  var body = 'market=' + document.getElementById('market').value +
+             '\naccount=' + document.getElementById('acct').value +
              '\nkelly=' + document.getElementById('kelly').value +
              (lastPol!==null ? ('\nsentiment=' + lastPol) : '');
   fetch('/api/trade',{method:'POST',headers:{'Content-Type':'text/plain'},body:body})
     .then(function(r){return r.text();}).then(function(h){ document.getElementById('out').innerHTML=h; s.textContent=''; });
 }
-window.addEventListener('load', function(){ score(); advise(); });
+function loadMarkets(){
+  return fetch('/api/markets').then(function(r){return r.json();}).then(function(ms){
+    var sel=document.getElementById('market');
+    ms.forEach(function(m){ var o=document.createElement('option'); o.value=m.sym; o.textContent=m.label; sel.appendChild(o); });
+    sel.addEventListener('change', advise);   // switching markets re-runs the advisor live
+  });
+}
+window.addEventListener('load', function(){ loadMarkets().then(function(){ score(); advise(); }); });
 </script>
 </body></html>

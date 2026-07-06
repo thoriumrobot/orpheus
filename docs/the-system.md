@@ -186,6 +186,26 @@ modules* — heavily-commented Latte libraries, each with an interactive tutoria
 catalog — arms, representation conventions, and the recipe for adding your own — is in
 `docs/interview-techniques.md` (open it here with `System.Edit interview-techniques`).
 
+## Shared state over the network: the Board and db sync
+
+The persistent database is a NETWORK surface. Any browser that reaches a node shares
+its boards through the `/board` page: `Db.post` writes a WAL-backed entry (surviving
+restarts), `Db.board` lists them, and one user's post is in every other user's next
+render — the page memo is keyed by the data generation, so shared pages are never
+stale and never slow. Posts carry Lamport-pair keys (the time, then the node's
+persistent id as the tie-break — the total order of `lib/lamport.lat`), which is what
+lets boards on DIFFERENT systems merge: `Db.sync(board, url)` from the page — or
+`latte db sync http://host:8088 board` from a shell — reconciles two nodes over the
+ordinary `/api/db` endpoints, pulling entries the peer has and pushing entries it
+lacks. Because keys are unique and records immutable, the merge is a G-Set from the
+CRDT playbook (`lib/crdt.lat`): idempotent, order-independent, convergent — sync from
+either side, any number of times, and the boards agree. Records travel as
+re-evaluable Latte expressions (the same serializer the WAL checkpoint trusts), so a
+record survives the trip byte-exactly; a key both sides hold with different records
+is a genuine conflict, kept local and reported honestly. Side-effecting widgets sit
+in `Live.form`: inputs plus a button, and the expression runs ONLY on the click —
+never at render time, never on keystrokes, never from a cache.
+
 ## Tools in pure Latte — Rust is not required
 
 New tools are written, formatted, compiled, run, shared, and persisted without

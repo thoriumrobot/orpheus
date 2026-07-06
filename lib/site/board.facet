@@ -1,0 +1,50 @@
+<!-- The SHARED BOARD: persistent, multi-user, networked state through the GUI.
+     Every element here is the reuse of an existing sophisticated piece:
+       · storage is src/dbservice.rs — the WAL-backed persistent database
+         (posts survive restarts; MVCC history; the generation-cached reads)
+       · post keys are Lamport pairs (lib/lamport.lat's total order), so
+         boards on DIFFERENT NODES merge as a G-Set (lib/crdt.lat's playbook):
+         sync in any order, converge to the union
+       · the widgets are the same Live machinery every tools page uses; the
+         new Live.form variant runs its expression only on the button
+       · the page memo is keyed by the DATA generation, so one user's post is
+         in every other user's very next render — never stale, never slow -->
+<h1>The Board</h1>
+
+<p class="lede">A message board shared by <b>everyone who can reach this node</b> — every
+browser tab, every user on the network, the CLI (<code>latte db board …</code>), and
+<b>other Orpheus systems</b> via sync. Posts are persistent: they live in the write-ahead
+log and survive restarts.</p>
+
+<div class="panel">
+  <div class="t">Post a message</div>
+  <div class="b">
+    <p class="lede">Your post is stamped with a Lamport pair — the time, then this node's
+    id as the tie-break — so posts from different machines interleave in one agreed
+    order when boards merge.</p>
+    {{ Live.form("Db.post(\"board\", author, text)", [["author", "anon"], ["text", "hello, network"]]) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">The board</div>
+  <div class="b">
+    {{ Live.view("Db.board(\"board\", n)", [["n", "20", "~", "5", "50", "5"]]) }}
+  </div>
+</div>
+
+<div class="panel">
+  <div class="t">Connect another system</div>
+  <div class="b">
+    <p class="lede">Point this at a peer's address and the two boards reconcile: entries the
+    peer has are pulled, entries it lacks are pushed — the G-Set union, idempotent and
+    order-independent. Run it from either side, or both; the boards converge. (The same
+    operation from a shell: <code>latte db sync http://host:8088 board</code>.)</p>
+    {{ Live.form("Db.sync(\"board\", url)", [["url", "http://127.0.0.1:8089"]]) }}
+  </div>
+</div>
+
+<p>Under the hood: <a href="/docs#the-system">the persistent database</a> ·
+<a href="/docs#interaction-nets">the engines</a> · the CRDT and Lamport chapters of the
+data-intensive library (<code>lib/crdt.lat</code>, <code>lib/lamport.lat</code>) are the
+semantics this page runs on.</p>

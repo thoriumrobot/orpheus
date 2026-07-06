@@ -171,7 +171,8 @@ result. Nothing here is a recording — drag a slider and the algorithm genuinel
   </div>
 </div>
 
-<p>Deeper: <a href="/tools">every tool as a live widget</a> · <a href="/docs">the documentation
+<p>Deeper: <a href="/tools">every tool as a live widget</a> · <a href="/board">the shared
+board — persistent, multi-user, syncable between systems</a> · <a href="/docs">the documentation
 shelf</a> · <a href="/docs#using-latte-from-the-gui">Using Latte from the GUI</a> — the
 tutorial for <code>eval</code>, <code>def</code>, and module compilation into the running
 image.</p>

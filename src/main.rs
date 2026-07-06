@@ -38,6 +38,7 @@ mod conlang;
 mod sentiment;
 mod game;
 mod dbservice;
+mod dbsync;
 mod httpd;
 mod rustgen;
 mod anvild;

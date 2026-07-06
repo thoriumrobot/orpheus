@@ -386,6 +386,8 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                     .map(|(n, k, w)| format!("{}  ({} keys, {} log entries)", n, k, w))
                     .collect::<Vec<_>>().join("\n")),
                 "get" => s.get(&name, &key),
+                "keys" => s.keys(&name).map(|ks| ks.join("\n")),   // the sync protocol's diff basis
+                "rec" => s.rec(&name, &key),                         // re-evaluable record (sync wire format)
                 "query" => s.query_html(&name, &field),
                 "history" => s.history_html(&name, &key),
                 _ => s.dash_html(&name),
@@ -1051,6 +1053,15 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             simple(200, "application/json; charset=utf-8", out.into_bytes())
         }
         // trading advisor: run the best model + position sizing, return an HTML fragment.
+        // the curated market list — ONE source (marketdata::MARKETS) serving the
+        // trade page's selector, the tools page dropdown, and the docs
+        ("GET", "/api/markets") => {
+            let mut items: Vec<String> = vec!["{\"sym\":\"bonds\",\"label\":\"US Treasuries (duration model)\"}".into()];
+            for (sym, label) in crate::marketdata::MARKETS {
+                items.push(format!("{{\"sym\":\"{}\",\"label\":\"{}\"}}", sym, label));
+            }
+            simple(200, "application/json", format!("[{}]", items.join(",")).into_bytes())
+        }
         ("POST", "/api/trade") => {
             let body = String::from_utf8_lossy(&req.body);
             let mut account = 10_000.0f64;

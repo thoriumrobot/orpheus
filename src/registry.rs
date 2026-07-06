@@ -223,6 +223,21 @@ fn connect(host: &str, port: u16) -> Option<TcpStream> {
 }
 
 /// `GET url` → (status, headers, body).
+/// POST a body to a URL — the write half of the node-to-node client, used by
+/// the db sync protocol to push records to a peer. Same zero-dependency
+/// plumbing as http_get.
+pub fn http_post(url: &str, body: &[u8]) -> Option<(u16, Vec<(String, String)>, Vec<u8>)> {
+    let (host, port, path) = parse_url(url)?;
+    let mut s = connect(&host, port)?;
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        path, host, body.len()
+    );
+    s.write_all(req.as_bytes()).ok()?;
+    s.write_all(body).ok()?;
+    read_response(s)
+}
+
 pub fn http_get(url: &str) -> Option<(u16, Vec<(String, String)>, Vec<u8>)> {
     let (host, port, path) = parse_url(url)?;
     let mut s = connect(&host, port)?;

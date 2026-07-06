@@ -1510,8 +1510,12 @@ pub(crate) fn eval_native_or_interp(expr: &str, libs: &[&str]) -> Result<N, Stri
 /// axis — the same engine, document stream, and overrides that advise the crypto desk) and
 /// sized with volatility-aware fractional Kelly. Reports the model's out-of-sample edge, the
 /// money-supply backdrop, the news lean, and the sized call.
-fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<f64>, news_text: Option<&str>) {
-    println!("trade - bond-market advisor: the monetary-policy duration model + the money-supply regime\n");
+/// The bond-market advisory report as text — ONE implementation serving the CLI,
+/// the Facet `Trade.advice` tool, and anything else that needs it.
+pub fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<f64>, news_text: Option<&str>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "trade - bond-market advisor: the monetary-policy duration model + the money-supply regime\n");
     let libs = latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
     // Train once and read the live regime in a single evaluation:
@@ -1529,11 +1533,11 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
         ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ])";
     let vals = match eval_native_or_interp(expr, &refs) {
         Ok(n) => flat_atoms(&n),
-        Err(e) => { eprintln!("  bond model error: {}", e); return; }
+        Err(e) => { let _ = writeln!(out, "  bond model error: {}", e); return out; }
     };
     if vals.len() < 17 {
-        eprintln!("  bond model produced an unexpected result");
-        return;
+        let _ = writeln!(out, "  bond model produced an unexpected result");
+        return out;
     }
     let (train, test, base) = (vals[0] as f64 / 10.0, vals[1] as f64 / 10.0, vals[2] as f64 / 10.0);
     let signal = vals[3]; // 1 = model expects bond prices UP next month (bullish), 0 = down
@@ -1542,17 +1546,17 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
     let edge = test - base;
     let has_edge = test > base;
 
-    println!("  market            : US Treasuries (10y constant maturity)");
-    println!("  -- model edge (lib/finbond.lat, trained through the db->tensor bridge) --");
-    println!("    features          : level, slope, curvature, yield-momentum, M2-growth,");
-    println!("                        carry+roll-down, forward-rate momentum, M2 acceleration,");
-    println!("                        the Cochrane-Piazzesi forward-rate tent, the Cieslak-Povala cycle");
+    let _ = writeln!(out, "  market            : US Treasuries (10y constant maturity)");
+    let _ = writeln!(out, "  -- model edge (lib/finbond.lat, trained through the db->tensor bridge) --");
+    let _ = writeln!(out, "    features          : level, slope, curvature, yield-momentum, M2-growth,");
+    let _ = writeln!(out, "                        carry+roll-down, forward-rate momentum, M2 acceleration,");
+    let _ = writeln!(out, "                        the Cochrane-Piazzesi forward-rate tent, the Cieslak-Povala cycle");
     if has_edge {
-        println!("    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  (+{:.1} pts — a real edge)", test, base, edge);
+        let _ = writeln!(out, "    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  (+{:.1} pts — a real edge)", test, base, edge);
     } else {
-        println!("    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  — NO EDGE; the advisor says so", test, base);
+        let _ = writeln!(out, "    directional acc.  : {:.1}% out-of-sample vs {:.1}% baseline  — NO EDGE; the advisor says so", test, base);
     }
-    println!("    train accuracy    : {:.1}%", train);
+    let _ = writeln!(out, "    train accuracy    : {:.1}%", train);
     // -- WHY: the latest month's logit, decomposed per factor (w·x, std units) --
     const FACTORS: [&str; 10] = [
         "curve level", "curve slope", "curvature", "yield momentum", "M2 growth",
@@ -1566,16 +1570,16 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
         })
         .collect();
     let total: f64 = drv.iter().map(|(_, c)| c.abs()).sum::<f64>().max(1.0);
-    println!("    top drivers now   : {}   (shares of the top-3 pull; sign = direction)",
+    let _ = writeln!(out, "    top drivers now   : {}   (shares of the top-3 pull; sign = direction)",
         drv.iter()
             .map(|(idx, c)| format!("{} {}{:.0}%", FACTORS.get(*idx).unwrap_or(&"?"),
                 if *c >= 0.0 { "+" } else { "-" }, c.abs() * 100.0 / total))
             .collect::<Vec<_>>()
             .join("  ·  "));
-    println!("  -- monetary regime (lib/finmoney.lat) --");
-    println!("    US M2 YoY growth  : {:.2}%", us_m2);
-    println!("    cross-bank average: {:.2}%   ({} of 23 central banks easing above average)", avg, neasing);
-    println!("    rising money supply is historically bullish for bond prices (yields fall)");
+    let _ = writeln!(out, "  -- monetary regime (lib/finmoney.lat) --");
+    let _ = writeln!(out, "    US M2 YoY growth  : {:.2}%", us_m2);
+    let _ = writeln!(out, "    cross-bank average: {:.2}%   ({} of 23 central banks easing above average)", avg, neasing);
+    let _ = writeln!(out, "    rising money supply is historically bullish for bond prices (yields fall)");
 
     // -- NEWS, scored FOR BONDS: dovish = bullish, risk-off = a Treasury bid ----------
     // The same sentiment engine and the same news/ document stream the crypto advisor
@@ -1591,19 +1595,19 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
         (None, None) => 0.0,
     };
     let used_sentiment = sentiment_override.unwrap_or(blended);
-    println!("  -- news sentiment, scored for BONDS (hawk/dove axis; risk-off = Treasury bid) --");
+    let _ = writeln!(out, "  -- news sentiment, scored for BONDS (hawk/dove axis; risk-off = Treasury bid) --");
     if let Some((rows, agg)) = &docs_pair {
-        println!("    news/ documents   : {} scored, recency-weighted aggregate {:+.2}", rows.len(), agg);
+        let _ = writeln!(out, "    news/ documents   : {} scored, recency-weighted aggregate {:+.2}", rows.len(), agg);
         for r in rows.iter().take(3) {
-            println!("      {:>10}  {:+.2}  {}", r.date, r.polarity, r.name);
+            let _ = writeln!(out, "      {:>10}  {:+.2}  {}", r.date, r.polarity, r.name);
         }
     } else {
-        println!("    news/ documents   : none (drop reports in news/ to feed the advisor)");
+        let _ = writeln!(out, "    news/ documents   : none (drop reports in news/ to feed the advisor)");
     }
     if let Some(d) = direct {
-        println!("    --news document   : {:+.2}", d);
+        let _ = writeln!(out, "    --news document   : {:+.2}", d);
     }
-    println!("    sentiment used    : {:+.2}{}", used_sentiment,
+    let _ = writeln!(out, "    sentiment used    : {:+.2}{}", used_sentiment,
         if sentiment_override.is_some() { "  (overridden via --sentiment)" } else { "" });
 
     // -- the COMBINED lean: the trained model carries 60%, bond-scored news 40% -------
@@ -1626,21 +1630,128 @@ fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<
                else if !(long || bearish) { format!("FLAT — model and news offset (combined {:+.2})", combined) }
                else if long { format!("LONG duration (combined {:+.2}: model {}, news {:+.2})", combined, if signal == 1 { "up" } else { "down" }, used_sentiment) }
                else { format!("SHORT/underweight duration (combined {:+.2})", combined) };
-    println!("  -- the call --");
-    println!("    model lean        : {}", lean);
-    println!("    Kelly (binary)    : {:+.3}   x{:.2} fractional  x{:.2} vol-target ({:.0}% budget / {:.1}% realized)",
+    let _ = writeln!(out, "  -- the call --");
+    let _ = writeln!(out, "    model lean        : {}", lean);
+    let _ = writeln!(out, "    Kelly (binary)    : {:+.3}   x{:.2} fractional  x{:.2} vol-target ({:.0}% budget / {:.1}% realized)",
         kelly_full, kelly_frac, vol_scale, target_vol, ann_vol);
     if has_edge && kelly_used > 0.0 {
-        println!("\n  >> ADVICE: tilt duration {} — notional ~ ${:.0} of a ${:.0} account",
+        let _ = writeln!(out, "\n  >> ADVICE: tilt duration {} — notional ~ ${:.0} of a ${:.0} account",
             if long { "LONG" } else { "SHORT" }, account * kelly_used, account);
     } else {
-        println!("\n  >> ADVICE: stand aside on duration — no reliable edge right now");
+        let _ = writeln!(out, "\n  >> ADVICE: stand aside on duration — no reliable edge right now");
     }
-    println!("\n  Rationale: a logistic model over the settled bond-return-forecasting factors");
-    println!("  (curve level/slope/curvature, momentum, carry+roll-down, forward-rate momentum,");
-    println!("  the Cochrane-Piazzesi tent, the Cieslak-Povala cycle) and the monetary regime");
-    println!("  (money-supply growth & acceleration), fused with news scored on the hawk/dove");
-    println!("  axis, sized by volatility-aware fractional Kelly. Research demo, NOT financial advice.");
+    let _ = writeln!(out, "\n  Rationale: a logistic model over the settled bond-return-forecasting factors");
+    let _ = writeln!(out, "  (curve level/slope/curvature, momentum, carry+roll-down, forward-rate momentum,");
+    let _ = writeln!(out, "  the Cochrane-Piazzesi tent, the Cieslak-Povala cycle) and the monetary regime");
+    let _ = writeln!(out, "  (money-supply growth & acceleration), fused with news scored on the hawk/dove");
+    let _ = writeln!(out, "  axis, sized by volatility-aware fractional Kelly. Research demo, NOT financial advice.");
+    out
+}
+
+/// Render a price-market TradeAdvice as the advisory report text — the single
+/// presentation layer shared by the CLI and the Facet tool.
+pub fn render_market_advice(a: &TradeAdvice) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+            let _ = writeln!(out, "  market            : {}   last close ${:.0}", a.market, a.last_price);
+            let _ = writeln!(out, "  data              : {}  ({} .. {})", a.data_note, a.span.0, a.span.1);
+            let _ = writeln!(out, "  -- technical analysis (lib/ta.lat, computed on Loom) --");
+            for r in &a.ta_rows {
+                let v = match r.vote { 1 => "+1 bullish", -1 => "-1 bearish", _ => " 0 neutral" };
+                let what = match r.name.as_str() {
+                    "trend" => format!("price vs SMA50      {:+8.2}%", r.value),
+                    "mom"   => format!("10-day momentum     {:+8.2}%", r.value),
+                    "rsi"   => format!("RSI(14)             {:8.1}", r.value),
+                    "macd"  => format!("MACD(12,26,9) hist  {:+8.3}%", r.value),
+                    "boll"  => format!("Bollinger %B(20,2)  {:8.0}", r.value),
+                    _ => format!("{} {:.3}", r.name, r.value),
+                };
+                let _ = writeln!(out, "    {}   -> {}", what, v);
+            }
+            let _ = writeln!(out, "    composite TA score: {:+}  (of -5..+5)  ->  signal {:+.2}", a.ta_score, a.ta_signal);
+            let _ = writeln!(out, "  -- news sentiment (Loughran-McDonald, lib/sentiment.lat) --");
+            for r in a.news.iter().take(6) {
+                let _ = writeln!(out, "    {} [{:+.2}] {} — {}", r.date, r.polarity, r.source, truncate(&r.headline, 76));
+            }
+            if a.news.len() > 6 {
+                let _ = writeln!(out, "    … and {} more headlines", a.news.len() - 6);
+            }
+            let _ = writeln!(out, "    recency-weighted sentiment: {:+.2}{}", a.news_sentiment,
+                if a.sentiment != Some(a.news_sentiment) { "  (overridden by --sentiment)" } else { "" });
+            if let Some(ds) = a.docs_sentiment {
+                let _ = writeln!(out, "  -- the DOCUMENT advice stream (news/ — whole reports, scored sentence-by-sentence) --");
+                for d in a.docs.iter().take(5) {
+                    let ev: String = d.evidence.chars().take(70).collect();
+                    let _ = writeln!(out, "    {} [{:+.2} w{:.2}] {} — \"{}{}\"", d.date, d.polarity, d.weight, d.name, ev,
+                        if d.evidence.chars().count() > 70 { "…" } else { "" });
+                }
+                if a.docs.len() > 5 {
+                    let _ = writeln!(out, "    … and {} more documents", a.docs.len() - 5);
+                }
+                let _ = writeln!(out, "    document stream aggregate: {:+.2}  (blended 40% with headlines 60%)", ds);
+            }
+            let _ = writeln!(out, "  -- the combined signal --------------------");
+            let _ = writeln!(out, "  combined lean     : {:+.2}   (= 0.6*TA {:+.2} + 0.4*news {:+.2}) -> {}",
+                a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction);
+            let _ = writeln!(out, "  realized vol/day  : {:.2}%   target {:.2}%   predicted regime: {}-vol", a.realized_vol, a.target_vol, a.vol_regime);
+            if let Some(h) = a.har_vol {
+                let _ = writeln!(out, "  HAR-RV forecast   : {:.2}%/day next-day vol  (daily/weekly/monthly regression, R²={:.2}) — drives the sizing", h, a.har_r2);
+                if let Some((hr, er, pr)) = a.vol_comparison {
+                    let _ = writeln!(out, "    vs baselines (out-of-sample R², same test window): HAR {:+.3} · EWMA λ=0.94 {:+.3} · persistence {:+.3}{}",
+                        hr, er, pr,
+                        if hr > er && hr > pr { "  — HAR earns its place" } else { "  — a baseline matches HAR here; the forecast is held humbly" });
+                }
+            }
+            let _ = writeln!(out, "  90% next-day band : ±{:.2}%  (split-conformal quantile of the trailing year — distribution-free)", a.band90);
+            let _ = writeln!(out, "  -- model reliability ----------------------");
+            let _ = writeln!(out, "  momentum hit rate : {:.1}%  (out-of-sample)", a.dir_hitrate);
+            if a.model_acc > a.model_base {
+                let _ = writeln!(out, "  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  (+{:.1} pts — a real edge)", a.model_acc, a.model_base, a.model_acc - a.model_base);
+            } else {
+                let _ = writeln!(out, "  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  — NO EDGE on this market", a.model_acc, a.model_base);
+            }
+            let _ = writeln!(out, "  -- position sizing ------------------------");
+            let _ = writeln!(out, "  Kelly (binary)    : {:+.3}", a.kelly_full);
+            match a.kelly_mv {
+                Some(k) => { let _ = writeln!(out, "  Kelly (mu/sigma^2) : {:+.3}   (out-of-sample; the advisor sizes on the smaller)", k); }
+                None => { let _ = writeln!(out, "  Kelly (mu/sigma^2) : n/a (test slice too short)"); }
+            }
+            let _ = writeln!(out, "  Kelly (applied)   : {:.3}   (fractional, of the smaller estimate)", a.kelly_used);
+            let _ = writeln!(out, "\n  >> ADVICE: {}", a.action);
+            if a.exposure > 0.0 {
+                let _ = writeln!(out, "            notional ~ ${:.0} of a ${:.0} account", a.dollars, a.account);
+            }
+            let _ = writeln!(out, "\n  Rationale: five classical indicators vote in Latte (ta.lat) and real, dated");
+            let _ = writeln!(out, "  headlines are scored in Latte (sentiment.lat); the leans are fused 60/40 and");
+            let _ = writeln!(out, "  position size is risk-controlled by HAR-RV volatility targeting");
+            let _ = writeln!(out, "  with fractional Kelly. `--live` refreshes prices from Coin Metrics; `--news F`");
+            let _ = writeln!(out, "  supplies today's headlines. Research demo, NOT financial advice.");
+            out
+}
+
+/// THE advisor entry point: one function, every market. Routes Treasuries to the
+/// duration model and everything with a price tape to the TA/vol engine, and
+/// returns the full report as text. The CLI prints it; the Facet `Trade.advice`
+/// tool serves it to the GUI; both stay in lockstep by construction.
+pub fn advice_text(
+    market: &str,
+    account: f64,
+    kelly: f64,
+    sentiment: Option<f64>,
+    live: bool,
+    news_text: Option<&str>,
+) -> Result<String, String> {
+    if matches!(market,
+        "bond" | "bonds" | "treasury" | "treasuries" | "ust" | "10y" | "tnote" | "tlt" | "rates" | "duration") {
+        let mut s = String::from("trade - bond-market advisor: the monetary-policy duration model + the money-supply regime\n\n");
+        s.push_str(&trade_advice_bonds(account, kelly, sentiment, news_text));
+        return Ok(s);
+    }
+    let a = trade_advice_market(market, account, kelly, sentiment, live, news_text)?;
+    let mut s = String::from("trade - advisor: technical analysis + news sentiment + the volatility model\n\n");
+    s.push_str(&render_market_advice(&a));
+    Ok(s)
 }
 
 pub fn cmd_trade(args: &[String]) {
@@ -1669,91 +1780,9 @@ pub fn cmd_trade(args: &[String]) {
         }
         i += 1;
     }
-    // The bond market is a different animal — no daily TA tape, but a monetary-policy
-    // regime and a duration model. Route Treasuries to the dedicated bond advisor.
-    if matches!(market.as_str(),
-        "bond" | "bonds" | "treasury" | "treasuries" | "ust" | "10y" | "tnote" | "tlt" | "rates" | "duration") {
-        trade_advice_bonds(account, kelly, sentiment, news_text.as_deref());
-        return;
-    }
-    println!("trade - advisor: technical analysis + news sentiment + the volatility model\n");
-    match trade_advice_market(&market, account, kelly, sentiment, live, news_text.as_deref()) {
-        Ok(a) => {
-            println!("  market            : {}   last close ${:.0}", a.market, a.last_price);
-            println!("  data              : {}  ({} .. {})", a.data_note, a.span.0, a.span.1);
-            println!("  -- technical analysis (lib/ta.lat, computed on Loom) --");
-            for r in &a.ta_rows {
-                let v = match r.vote { 1 => "+1 bullish", -1 => "-1 bearish", _ => " 0 neutral" };
-                let what = match r.name.as_str() {
-                    "trend" => format!("price vs SMA50      {:+8.2}%", r.value),
-                    "mom"   => format!("10-day momentum     {:+8.2}%", r.value),
-                    "rsi"   => format!("RSI(14)             {:8.1}", r.value),
-                    "macd"  => format!("MACD(12,26,9) hist  {:+8.3}%", r.value),
-                    "boll"  => format!("Bollinger %B(20,2)  {:8.0}", r.value),
-                    _ => format!("{} {:.3}", r.name, r.value),
-                };
-                println!("    {}   -> {}", what, v);
-            }
-            println!("    composite TA score: {:+}  (of -5..+5)  ->  signal {:+.2}", a.ta_score, a.ta_signal);
-            println!("  -- news sentiment (Loughran-McDonald, lib/sentiment.lat) --");
-            for r in a.news.iter().take(6) {
-                println!("    {} [{:+.2}] {} — {}", r.date, r.polarity, r.source, truncate(&r.headline, 76));
-            }
-            if a.news.len() > 6 {
-                println!("    … and {} more headlines", a.news.len() - 6);
-            }
-            println!("    recency-weighted sentiment: {:+.2}{}", a.news_sentiment,
-                if a.sentiment != Some(a.news_sentiment) { "  (overridden by --sentiment)" } else { "" });
-            if let Some(ds) = a.docs_sentiment {
-                println!("  -- the DOCUMENT advice stream (news/ — whole reports, scored sentence-by-sentence) --");
-                for d in a.docs.iter().take(5) {
-                    let ev: String = d.evidence.chars().take(70).collect();
-                    println!("    {} [{:+.2} w{:.2}] {} — \"{}{}\"", d.date, d.polarity, d.weight, d.name, ev,
-                        if d.evidence.chars().count() > 70 { "…" } else { "" });
-                }
-                if a.docs.len() > 5 {
-                    println!("    … and {} more documents", a.docs.len() - 5);
-                }
-                println!("    document stream aggregate: {:+.2}  (blended 40% with headlines 60%)", ds);
-            }
-            println!("  -- the combined signal --------------------");
-            println!("  combined lean     : {:+.2}   (= 0.6*TA {:+.2} + 0.4*news {:+.2}) -> {}",
-                a.combined, a.ta_signal, a.sentiment.unwrap_or(0.0), a.direction);
-            println!("  realized vol/day  : {:.2}%   target {:.2}%   predicted regime: {}-vol", a.realized_vol, a.target_vol, a.vol_regime);
-            if let Some(h) = a.har_vol {
-                println!("  HAR-RV forecast   : {:.2}%/day next-day vol  (daily/weekly/monthly regression, R²={:.2}) — drives the sizing", h, a.har_r2);
-                if let Some((hr, er, pr)) = a.vol_comparison {
-                    println!("    vs baselines (out-of-sample R², same test window): HAR {:+.3} · EWMA λ=0.94 {:+.3} · persistence {:+.3}{}",
-                        hr, er, pr,
-                        if hr > er && hr > pr { "  — HAR earns its place" } else { "  — a baseline matches HAR here; the forecast is held humbly" });
-                }
-            }
-            println!("  90% next-day band : ±{:.2}%  (split-conformal quantile of the trailing year — distribution-free)", a.band90);
-            println!("  -- model reliability ----------------------");
-            println!("  momentum hit rate : {:.1}%  (out-of-sample)", a.dir_hitrate);
-            if a.model_acc > a.model_base {
-                println!("  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  (+{:.1} pts — a real edge)", a.model_acc, a.model_base, a.model_acc - a.model_base);
-            } else {
-                println!("  volatility model  : {:.1}% test accuracy vs {:.1}% baseline  — NO EDGE on this market", a.model_acc, a.model_base);
-            }
-            println!("  -- position sizing ------------------------");
-            println!("  Kelly (binary)    : {:+.3}", a.kelly_full);
-            match a.kelly_mv {
-                Some(k) => println!("  Kelly (mu/sigma^2) : {:+.3}   (out-of-sample; the advisor sizes on the smaller)", k),
-                None => println!("  Kelly (mu/sigma^2) : n/a (test slice too short)"),
-            }
-            println!("  Kelly (applied)   : {:.3}   (fractional, of the smaller estimate)", a.kelly_used);
-            println!("\n  >> ADVICE: {}", a.action);
-            if a.exposure > 0.0 {
-                println!("            notional ~ ${:.0} of a ${:.0} account", a.dollars, a.account);
-            }
-            println!("\n  Rationale: five classical indicators vote in Latte (ta.lat) and real, dated");
-            println!("  headlines are scored in Latte (sentiment.lat); the leans are fused 60/40 and");
-            println!("  position size is risk-controlled by HAR-RV volatility targeting");
-            println!("  with fractional Kelly. `--live` refreshes prices from Coin Metrics; `--news F`");
-            println!("  supplies today's headlines. Research demo, NOT financial advice.");
-        }
-        Err(e) => println!("  error: {}", e),
+    match advice_text(&market, account, kelly, sentiment, live, news_text.as_deref()) {
+        Ok(report) => print!("{}", report),
+        Err(e) => eprintln!("  advisor: {}", e),
     }
 }
 

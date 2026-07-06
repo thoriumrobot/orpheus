@@ -192,6 +192,18 @@ deterministic per request.</p>
   </div>
 </div>
 
+<!-- ===================== Trade ===================== -->
+<div class="panel">
+  <div class="t">Trade — the advisor, switchable between markets live</div>
+  <div class="b">
+    <p class="lede">The full advisory report — the very function the CLI prints (<code>latte
+    trade</code>): US Treasuries route to the duration model (69.6% out-of-sample edge, named
+    factor drivers), any price tape to the TA/volatility/news engine. Pick a market; the
+    report re-runs.</p>
+    {{ Live.view("Trade.advice(market, 10000)", [["market", "bonds", "bonds", "btc", "eth", "ltc", "xrp", "ada", "doge", "sol"]]) }}
+  </div>
+</div>
+
 <!-- ===================== Mkt ===================== -->
 <div class="panel">
   <div class="t">Mkt — market-data lab <span class="sig">span · stat · series · chart · vol · advice</span></div>
@@ -338,6 +350,19 @@ deterministic per request.</p>
   </div>
 </div>
 
+<!-- ===================== Db ===================== -->
+<div class="panel">
+  <div class="t">Db — shared persistent state (the <a href="/board">Board</a> lives on these)</div>
+  <div class="b">
+    <p class="lede">The write-ahead-logged database, as page widgets: post (Lamport-pair key),
+    list (newest first), and reconcile with a peer node (G-Set union). Side-effecting tools
+    sit in <code>Live.form</code> — they run only when clicked.</p>
+    {{ Live.form("Db.post(\"board\", author, text)", [["author", "anon"], ["text", "hello from the tools page"]]) }}
+    {{ Live.view("Db.board(\"board\", n)", [["n", "5", "~", "3", "30", "1"]]) }}
+    {{ Live.form("Db.sync(\"board\", url)", [["url", "http://127.0.0.1:8089"]]) }}
+  </div>
+</div>
+
 <!-- ===================== Live ===================== -->
 <div class="panel">
   <div class="t">Live — client-updating widgets <span class="sig">box(expr, [name, default…])</span></div>
@@ -352,7 +377,8 @@ deterministic per request.</p>
 
     <div class="tool">
       <div class="lbl"><code>Live.box</code> composing modules — wrap a Latte result in Txt</div>
-      {{ Live.box("Txt.cap(Txt.join(Txt.words(Latte.eval(expr)), \"-\"))", ["expr", "(range 5)"]) }}
+      {{ Live.form("Latte.eval(expr)", [["expr", "(sum (range 101))"]]) }}
+    {{ Live.box("Txt.cap(Txt.join(Txt.words(Latte.eval(expr)), \"-\"))", ["expr", "(range 5)"]) }}
     </div>
 
     <p class="lede" style="margin-top:.9rem">A field can also be a <b>dropdown</b> of curated
