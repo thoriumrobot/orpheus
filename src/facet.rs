@@ -1842,6 +1842,86 @@ fn tool_note_forget(args: &[Val]) -> Result<Val, String> {
     crate::notes::forget(&addr).map(|m| ok_note(&m))
 }
 
+// ---------------------------------------------------------------------------
+// Lang.* — COLLABORATIVE CONLANGING: a shared language document (kind s)
+// carries sound-change rules and a lexicon; SCArs (src/sca.rs) evolves the
+// converged lexicon through the converged rules. Rules are lines containing
+// `>`; every other non-empty line is a lexicon entry "word gloss…". Two
+// people grow the lexicon while a third refines the sound laws — one
+// converged language.
+// ---------------------------------------------------------------------------
+
+fn lang_parts(text: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let mut rules = Vec::new();
+    let mut words = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("::") {
+            continue;
+        }
+        if line.contains('>') {
+            rules.push(line.to_string());
+        } else {
+            let mut it = line.splitn(2, char::is_whitespace);
+            let w = it.next().unwrap_or("").to_string();
+            let gloss = it.next().unwrap_or("").trim().to_string();
+            if !w.is_empty() {
+                words.push((w, gloss));
+            }
+        }
+    }
+    (rules, words)
+}
+
+fn tool_lang_evolve(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let (rules, words) = lang_parts(&doc_text(&id)?);
+    if rules.is_empty() {
+        return Err("no sound-change rules in the document yet — add lines like  k > g / _a  (any line containing `>` is a rule, applied in document order)".into());
+    }
+    if words.is_empty() {
+        return Err("no lexicon yet — add lines like  kasa house  (word, then an optional gloss)".into());
+    }
+    let mut rows = Vec::new();
+    for (w, gloss) in &words {
+        let out = crate::sca::run_sca(w, &rules)?;
+        rows.push(vec![w.clone(), format!("→ {}", out), gloss.clone()]);
+    }
+    Ok(Val::Text(format!(
+        "<div class=\"feat\">{} rule(s) applied in document order to {} lexicon entr{} — the CONVERGED language, evolved (SCArs)</div>{}",
+        rules.len(),
+        words.len(),
+        if words.len() == 1 { "y" } else { "ies" },
+        html_rows(&["proto-form", "evolved", "gloss"], &rows, "")
+    )))
+}
+
+fn tool_lang_trace(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let word = arg_text(args, 1)?;
+    let word = word.trim();
+    if word.is_empty() {
+        return Err("Lang.trace: give a word to derive".into());
+    }
+    let (rules, _) = lang_parts(&doc_text(&id)?);
+    if rules.is_empty() {
+        return Err("no sound-change rules in the document yet".into());
+    }
+    let mut path = vec![word.to_string()];
+    let mut acc: Vec<String> = Vec::new();
+    for r in &rules {
+        acc.push(r.clone());
+        let step = crate::sca::run_sca(word, &acc)?;
+        if &step != path.last().unwrap() {
+            path.push(step);
+        }
+    }
+    Ok(Val::Text(format!(
+        "<code>{}</code> <span class=\"feat\">— the derivation through the shared rules, in document order</span>",
+        html_escape(&path.join(" → "))
+    )))
+}
+
 fn tool_live_watch(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
     let fields: &[Val] = match args.get(1) {
@@ -2372,6 +2452,20 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_code_load,
         },
         ToolSpec {
+            module: "Lang",
+            proc: "evolve",
+            sig: "Lang.evolve(id)",
+            summary: "evolve the SHARED language: the converged sound-change rules (lines with `>`, in document order) applied to the converged lexicon — collaborative conlanging on SCArs",
+            handler: tool_lang_evolve,
+        },
+        ToolSpec {
+            module: "Lang",
+            proc: "trace",
+            sig: "Lang.trace(id, word)",
+            summary: "derive one word step by step through the shared document's rules",
+            handler: tool_lang_trace,
+        },
+        ToolSpec {
             module: "Code",
             proc: "run",
             sig: "Code.run(id, expr)",
@@ -2620,6 +2714,7 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Plan", summary: "collaborative economic planning: the TNS planner solved on a shared, converged spec" },
         ModuleSpec { name: "Acplan", summary: "collaborative accountable planning: quadratic ballots gathered across instances" },
         ModuleSpec { name: "Code", summary: "collaborative code: shared Latte modules, compile-checked, loaded live, run anywhere" },
+        ModuleSpec { name: "Lang", summary: "collaborative conlanging: a shared rules+lexicon document, evolved by SCArs" },
     ]
 }
 
@@ -3310,6 +3405,26 @@ mod tests {
         refs.push("sharedlib");
         let v = crate::latte::run_with_libs("(twice 21)", &refs).unwrap();
         assert_eq!(crate::net::show_state(&v), "42");
+
+        // collaborative conlanging: one contributor writes the sound laws,
+        // another grows the lexicon; evolve runs on the converged language
+        let sid = crate::notes::create_kind("s", "old tongue").unwrap();
+        crate::notes::append_block(&sid, "ada", "k > g / _a").unwrap();
+        crate::notes::append_block(&sid, "ada", "a > o").unwrap();
+        crate::notes::append_block(&sid, "bob", "kasa house").unwrap();
+        crate::notes::append_block(&sid, "bob", "taka roof").unwrap();
+        let out = tool_lang_evolve(&[Val::Text(sid.clone())]).unwrap().to_text();
+        assert!(out.contains("goso"), "kasa evolves to goso: {}", out);
+        assert!(out.contains("togo"), "taka evolves to togo: {}", out);
+        assert!(out.contains("house") && out.contains("roof"), "glosses kept: {}", out);
+        let out = tool_lang_trace(&[Val::Text(sid.clone()), Val::Text("kasa".into())]).unwrap().to_text();
+        assert!(out.contains("kasa → gasa → goso"), "stepwise derivation: {}", out);
+        // rule ORDER is the document order: tombstoning a rule changes the language
+        let (_, blocks) = crate::notes::read_note(&sid, 0).unwrap().unwrap();
+        let first_rule = blocks.iter().find(|b| b.text.contains('>')).unwrap().bid.clone();
+        crate::notes::del_block(&sid, &first_rule).unwrap();
+        let out = tool_lang_evolve(&[Val::Text(sid)]).unwrap().to_text();
+        assert!(out.contains("→ koso"), "without k>g, kasa evolves to koso: {}", out);
     }
 
     #[test]

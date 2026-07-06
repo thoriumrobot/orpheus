@@ -89,6 +89,16 @@ converged copy — shared source, live everywhere. (Loading is deliberately
 per-instance and explicit: editing never executes anything; a person decides
 when their instance adopts the code.)
 
+**Collaborative conlanging (kind s).** A language document carries a
+conlang's whole definition: lines containing `>` are SCArs sound-change
+rules, applied in *document order* — reorder the blocks and you reorder the
+phonology; every other line is a lexicon entry (`kasa house`). One person
+refines the sound laws while another grows the lexicon, each from their own
+instance; `Lang.evolve(id)` runs the converged rules over the converged
+lexicon and `Lang.trace(id, word)` derives one word step by step. Because
+rules are ordinary blocks, tombstoning one changes the language — and the
+history slider replays its whole evolution.
+
 The trust consequence is worth stating: a code document is *source your
 peers can edit* — load only what you have read, from peers you chose
 (the same trusted-peers model as every port, docs/network-gui.md).
@@ -129,3 +139,19 @@ typing in the *same* paragraph concurrently keep the later version, not a
 character-merge); the console surface's quote grammar has no escape, so the
 editor transmits `"` as `″`; and removed notes (`Note.rmnote` has no tool —
 deliberately) would need the same tombstone treatment blocks get.
+
+
+## Which modules got collaboration, and which didn't (the survey)
+
+Surveyed for collaborative benefit: the planners (**done** — plan and
+ballot kinds), Latte modules (**done** — code kind), SCArs (**done** — the
+language kind), the **drawing editor** (would genuinely benefit — the block
+model fits one-shape-per-block and the SVG renderer exists, but the editor's
+own selection/undo model needs real surgery to speak in shape events; the
+design is: kind `d`, blocks holding gfx shape lines, a render action, and a
+pointer-event canvas emitting `Note.after`/`Note.set` per shape — left as
+documented future work rather than a half-measure), the **market lab**
+(analyzes a fixed offline series; a shared watchlist would have nothing
+live to watch — skipped), and **chess and the Board** (already networked by
+their own means). Shared ML datasets already exist on the ledger
+(`Net.trainLedger`, docs/network-gui.md).

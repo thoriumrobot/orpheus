@@ -49,7 +49,8 @@
 <p class="sub">Write together — every block is a durable, gossiped event; connected instances
 converge on one document. Enter = new block · Backspace on an empty block deletes it.
 Kinds: <b>note</b> prose · <b>plan</b> an economy spec the planner solves ·
-<b>votes</b> quadratic ballots for the accountable planner · <b>code</b> a live Latte module.</p>
+<b>votes</b> quadratic ballots for the accountable planner · <b>code</b> a live Latte module ·
+<b>language</b> a conlang's rules and lexicon, evolved by SCArs.</p>
 
 <div class="bar">
   <label>I am <input id="who" size="9" placeholder="name"></label>
@@ -61,6 +62,7 @@ Kinds: <b>note</b> prose · <b>plan</b> an economy spec the planner solves ·
     <option value="p">plan</option>
     <option value="v">votes</option>
     <option value="c">code</option>
+    <option value="s">language</option>
   </select>
   <button onclick="createNote()">＋ Create</button>
   <button onclick="connectPeer()" title="dial another instance's notes port (9601 by default) — documents reconcile automatically">⇄ Connect peer…</button>
@@ -151,7 +153,7 @@ function connectPeer(){
 }
 
 // ------------------------------ the document --------------------------------
-function kindOf(id){ return {n:'note', p:'plan', v:'votes', c:'code'}[(id||'n')[0]] || 'note'; }
+function kindOf(id){ return {n:'note', p:'plan', v:'votes', c:'code', s:'language'}[(id||'n')[0]] || 'note'; }
 
 // the kind-specific action panel: the shared document put to WORK — solve the
 // converged plan, compute the accountable plan from everyone's ballots, or
@@ -172,6 +174,11 @@ function kindPanel(id){
       + '<label>credits <input id="v_budget" size="3" value="36"></label>'
       + '<button onclick="act(\'Acplan.solve \'+q(noteId)+\' \'+($(\'v_iters\').value||40)+\' \'+($(\'v_money\').value||36400)+\' \'+($(\'v_budget\').value||36))">⚖ Accountable plan</button>'
       + '<span class="hint">one ballot per block: <b>ada: 0 0 2 4</b> — four vote counts over iron·coal·corn·bread; n votes cost n² of your credits. Add YOUR line from YOUR instance; the plan is computed from everyone\'s converged ballots</span>';
+  } else if(k === 'language'){
+    bar.innerHTML = '<button onclick="act(\'Lang.evolve \'+q(noteId))">⟶ Evolve lexicon</button>'
+      + '<input id="s_word" size="10" placeholder="kasa">'
+      + '<button onclick="act(\'Lang.trace \'+q(noteId)+\' \'+q($(\'s_word\').value||\'kasa\'))">Trace word</button>'
+      + '<span class="hint">lines with <b>&gt;</b> are sound-change rules (applied top to bottom): <b>k &gt; g / _a</b>; other lines are lexicon entries: <b>kasa house</b>. Grow the lexicon from one instance while a peer refines the sound laws — evolve runs on the converged language</span>';
   } else if(k === 'code'){
     bar.innerHTML = '<input id="c_expr" size="22" placeholder="(myarm 21)">'
       + '<button onclick="act(\'Code.run \'+q(noteId)+\' \'+q($(\'c_expr\').value))">▶ Run</button>'

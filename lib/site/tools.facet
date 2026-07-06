@@ -395,7 +395,7 @@ deterministic per request.</p>
     X" holds its place even when X is deleted concurrently. The same tools work from the
     <a href="/notes">/notes editor</a>, these widgets, and the System console.</p>
     {{ Live.view("Note.info()", [["_", "0"]]) }}
-    {{ Live.form("Note.create(title, kind)", [["title", "meeting minutes"], ["kind", "n", "n", "p", "v", "c"]]) }}
+    {{ Live.form("Note.create(title, kind)", [["title", "meeting minutes"], ["kind", "n", "n", "p", "v", "c", "s"]]) }}
     {{ Live.watch("Note.list()", [], 5) }}
     {{ Live.box("Note.index()", [["_", "0"]]) }}
     {{ Live.view("Note.read(id)", [["id", ""]]) }}
@@ -451,6 +451,22 @@ deterministic per request.</p>
     {{ Live.form("Code.check(id)", [["id", ""]]) }}
     {{ Live.form("Code.load(id)", [["id", ""]]) }}
     {{ Live.form("Code.run(id, expr)", [["id", ""], ["expr", "(myarm 21)"]]) }}
+  </div>
+</div>
+
+<!-- ===================== Lang (collaborative) ===================== -->
+<div class="panel">
+  <div class="t">Lang — collaborative conlanging (a shared language, evolved by SCArs)</div>
+  <div class="b">
+    <p class="lede">A <b>language</b> document (kind s) carries a conlang's whole definition:
+    lines containing <code>&gt;</code> are sound-change rules (applied in document order —
+    reorder the blocks, reorder the phonology); every other line is a lexicon entry,
+    <code>kasa house</code>. Two people grow the lexicon while a third refines the sound laws;
+    <code>Lang.evolve</code> runs the converged rules over the converged lexicon, and
+    <code>Lang.trace</code> derives one word step by step. The <a href="/notes">editor</a> shows
+    both as buttons on language documents.</p>
+    {{ Live.form("Lang.evolve(id)", [["id", ""]]) }}
+    {{ Live.form("Lang.trace(id, word)", [["id", ""], ["word", "kasa"]]) }}
   </div>
 </div>
 

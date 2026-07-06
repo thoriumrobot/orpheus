@@ -172,7 +172,8 @@ fn submit(h: &NotesHost, action: N) {
 /// Document KINDS ride the one agent as id prefixes — the same blocks,
 /// anchors, and tombstones carry prose, economy specs, ballots, and code:
 ///   n = note · p = economic plan spec · v = quadratic-vote ballots · c = code
-pub const KINDS: &[(&str, &str)] = &[("n", "note"), ("p", "plan"), ("v", "votes"), ("c", "code")];
+pub const KINDS: &[(&str, &str)] =
+    &[("n", "note"), ("p", "plan"), ("v", "votes"), ("c", "code"), ("s", "language")];
 
 /// Create a document of the given kind; returns its id ("KLAM-NODEHEX").
 pub fn create_kind(kind: &str, title: &str) -> Result<String, String> {

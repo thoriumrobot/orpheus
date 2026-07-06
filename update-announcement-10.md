@@ -56,3 +56,18 @@ registry (`Plan.solve`, `Acplan.solve`, `Code.check/load/run`,
 tools page and the System console. Tests cover the whole loop: spec blocks
 → planner report, converged ballots → accountable plan with the quadratic
 budget enforced, and a shared module compiled, loaded, and computing.
+
+## And the survey round: collaborative conlanging
+
+A look across the remaining modules found one more natural fit: **SCArs**.
+A language document (kind s) carries a conlang whole — sound-change rules
+as blocks (document order IS rule order), lexicon entries alongside — so
+one person refines the phonology while another grows the vocabulary, each
+from their own instance. `Lang.evolve` runs the converged rules over the
+converged lexicon; `Lang.trace` derives a word step by step; tombstoning a
+rule block changes the language, and the history slider replays its whole
+evolution. Verified live across two instances (A wrote `k > g / _a` and
+`a > o`, B added `kasa house` and `taka roof`; both saw kasa → goso).
+The drawing editor was surveyed and deliberately deferred with a written
+design; the market lab and the already-networked chess/Board were ruled
+out on their merits — the reasoning is in docs/collaborative-notes.md.
