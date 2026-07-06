@@ -206,6 +206,42 @@ native acceleration that is **audited** against the pure interpreter.
 ./demo.sh ; ./kv_demo.sh ; ./internet_demo.sh ; ./persist_demo.sh ; ./sca_demo.sh
 ```
 
+## Distributed execution — connected instances share the work
+
+The gossip layer makes connected instances agree on *state*; the distribution
+layer (`src/dist.rs` + `lib/dist.lat`) makes them share *work*. Latte programs
+are pure, so a task computes the same noun on any instance — remote execution
+is an **audited acceleration of a pure meaning** (the jet principle, across
+machines). Start a worker anywhere, register it, and distribution becomes the
+**default**:
+
+```sh
+latte worker --listen 0.0.0.0:9700          # on each helper machine
+latte workers add 192.168.1.20:9700         # on the coordinator; `latte workers` lists + liveness
+
+latte eval "(dmap (fn [x] -> (mul x x)) [ 1 [ 2 [ 3 [ 4 0 ] ] ] ])"
+# dist: map over 4 elements → 2 chunk(s) across 2 worker(s)
+```
+
+The **code profiler detects the distributable shapes** — `(dmap f xs)` (the
+distributable map, meaning exactly `map`), `(map f xs)`, and
+`(predict_all w b xs)` (ML batch prediction) — and `latte profile` reports the
+decision. `dmap` distributes whenever workers exist; a plain `map` distributes
+once its *measured* interpreter time crosses the distribution threshold
+(`ORPHEUS_DIST_NS`, default 25 ms) — the same measurement-beats-guesswork
+policy as the compile decision. Chunks from failed workers re-run locally, so
+the answer is always complete and always correct (`ORPHEUS_DIST_AUDIT=1`
+verifies against the interpreter; `--no-dist` / `ORPHEUS_DIST=0` opts out).
+
+**Distributed training** uses cycles of local SGD + FedAvg consolidation
+(McMahan et al. 2017): with workers connected, `latte ml linear` shards the
+data, each worker trains on its shard, and the models are consolidated with
+`(fedavg models sizes)` — a shard-size-weighted average computed *in Latte* —
+then redistributed for the next round. The full-data MSE improves round over
+round, and **only the final consolidated model is committed to the persistent
+log** (one kv `%put` event under `--store DIR`); the intermediate cycles never
+touch it. See `docs/distributed-execution.md`.
+
 ## Mocha — the application environment
 
 Mocha runs higher-level **apps written in Latte** on the same persistent, distributed

@@ -18,6 +18,7 @@ mod fmt;
 mod latte;
 mod agent;
 mod net;
+mod dist;
 mod store;
 mod sca;
 mod facet;
@@ -434,6 +435,8 @@ fn main() {
         "cli" | "console" | "--cli" => cmd_cli(),
         "cache" => cmd_cache(&args[1..]),
         "profile" => cmd_profile(&args[1..]),
+        "worker" | "dist-worker" => cmd_worker(&args[1..]),
+        "workers" => cmd_workers(&args[1..]),
         "anvil" => cmd_anvil(&args[1..]),
         "net" => cmd_net(&args[1..]),
         "node" => cmd_node(&args[1..]),
@@ -618,7 +621,7 @@ fn main() {
   latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
   latte plan [--iters N]             planning calc (Towards a New Socialism)
   latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\"           the code profiler: measure both engines, auto-compile what pays\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\"           the code profiler: measure both engines + detect distributable shapes\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          Loughran-McDonald news sentiment score\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess (--peer links machines)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
             );
         }
     }
@@ -872,6 +875,68 @@ fn cmd_agent() {
     println!("agent content-address (CID): {}", a.cid_hex());
 }
 
+
+/// `latte worker [--listen ADDR]` — serve evaluation tasks to connected
+/// Orpheus instances. A worker is a full instance: tasks evaluate with every
+/// library in scope on the adaptive engine.
+fn cmd_worker(args: &[String]) {
+    let mut listen = "0.0.0.0:9700".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--listen" && i + 1 < args.len() {
+            listen = args[i + 1].clone();
+            i += 1;
+        }
+        i += 1;
+    }
+    println!("Orpheus worker: serving evaluation tasks on {}", listen);
+    println!("register on the coordinating instance:  latte workers add HOST:{}", listen.rsplit(':').next().unwrap_or("9700"));
+    if let Err(e) = dist::serve(&listen, true) {
+        eprintln!("worker: bind {} failed: {}", listen, e);
+    }
+}
+
+/// `latte workers [list|add ADDR|rm ADDR|clear]` — manage the worker
+/// registry. Once workers are registered, distribution is the DEFAULT: the
+/// adaptive engine splits distributable programs across them automatically.
+fn cmd_workers(args: &[String]) {
+    match args.first().map(|s| s.as_str()) {
+        None | Some("list") => {
+            let ws = dist::workers();
+            if ws.is_empty() {
+                println!("no workers connected — distribution stays local.");
+                println!("start one:      latte worker --listen 0.0.0.0:9700   (on another machine or shell)");
+                println!("register it:    latte workers add HOST:9700");
+                println!("or set          ORPHEUS_WORKERS=HOST:9700,HOST2:9700");
+                return;
+            }
+            println!("connected workers (distribution is ON by default for distributable programs):");
+            for w in ws {
+                println!("  {}  {}", w, if dist::worker_alive(&w) { "alive" } else { "UNREACHABLE (chunks will fall back locally)" });
+            }
+        }
+        Some("add") => match args.get(1) {
+            Some(a) => match dist::workers_add(a) {
+                Ok(()) => println!("added {} — the adaptive engine now distributes eligible work to it by default", a),
+                Err(e) => eprintln!("workers add: {}", e),
+            },
+            None => eprintln!("usage: latte workers add HOST:PORT"),
+        },
+        Some("rm") => match args.get(1) {
+            Some(a) => match dist::workers_remove(a) {
+                Ok(()) => println!("removed {}", a),
+                Err(e) => eprintln!("workers rm: {}", e),
+            },
+            None => eprintln!("usage: latte workers rm HOST:PORT"),
+        },
+        Some("clear") => match dist::workers_clear() {
+            Ok(()) => println!("worker registry cleared — evaluation stays local"),
+            Err(e) => eprintln!("workers clear: {}", e),
+        },
+        Some(x) => eprintln!("workers: unknown subcommand '{}' (list | add ADDR | rm ADDR | clear)", x),
+    }
+}
+
 fn cmd_eval(args: &[String]) {
     let mut libs: Vec<String> = latte::all_libs();
     let mut rest: Vec<String> = Vec::new();
@@ -879,6 +944,7 @@ fn cmd_eval(args: &[String]) {
     let mut force_net = false;
     let mut force_rebuild = false;
     let mut explain = false;
+    let mut no_dist = false;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--lib" {
@@ -906,6 +972,8 @@ fn cmd_eval(args: &[String]) {
             force_net = true;
         } else if args[i] == "--rebuild" {
             force_rebuild = true;
+        } else if args[i] == "--no-dist" {
+            no_dist = true;
         } else if args[i] == "--explain" || args[i] == "--why" {
             explain = true;
         } else {
@@ -930,6 +998,20 @@ fn cmd_eval(args: &[String]) {
             Err(e) => eprintln!("net error: {}", e),
         }
         return;
+    }
+    // Distribution decision first (the default once workers are connected):
+    // a distributable shape — explicit `dmap`, or a `map`/`predict_all` the
+    // profiler has measured past the distribution threshold — is split across
+    // the connected Orpheus instances; anything else stays local. `--no-dist`
+    // (or ORPHEUS_DIST=0) opts out.
+    if !force_interp && !no_dist {
+        if let Some(r) = dist::maybe_distribute(&src, &refs) {
+            match r {
+                Ok(v) => println!("{}", net::show_state(&v)),
+                Err(e) => eprintln!("error: {}", e),
+            }
+            return;
+        }
     }
     // The optimizing compiler (Anvil) is the default engine. Policy, in order:
     //   1. binary already cached  → run it in-process (fast, no rustc);

@@ -773,6 +773,8 @@ pub const TRACE_LAT: &str = include_str!("../lib/trace.lat");
 pub const GFX_LAT: &str = include_str!("../lib/gfx.lat");
 /// A data-parallel GPU compute library, via `import gpu`.
 pub const GPU_LAT: &str = include_str!("../lib/gpu.lat");
+/// Distributed execution across connected instances (dmap, shard, FedAvg), via `import dist`.
+pub const DIST_LAT: &str = include_str!("../lib/dist.lat");
 /// Financial sentiment scoring helpers (Loughran-McDonald polarity), via `import sentiment`.
 pub const SENTIMENT_LAT: &str = include_str!("../lib/sentiment.lat");
 /// Data visualization layout, linkable via `import plot`.
@@ -896,6 +898,7 @@ fn builtin_lib(name: &str) -> Option<&'static str> {
         "trace" => Some(TRACE_LAT),
         "gfx" => Some(GFX_LAT),
         "gpu" => Some(GPU_LAT),
+        "dist" => Some(DIST_LAT),
         "sentiment" => Some(SENTIMENT_LAT),
         "plot" => Some(PLOT_LAT),
         "vec" => Some(VEC_LAT),
@@ -1068,7 +1071,7 @@ pub fn all_libs() -> Vec<String> {
         // Link order resolves name collisions later-wins. algoviz IMPORTS gfx, so it must
         // sit before the fin* libraries: appended at the end it would re-merge gfx's arms
         // last, and gfx's `demo` would shadow finbond's `demo` (breaking `report`).
-        "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "algoviz", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
+        "std", "mold", "mocha", "plan", "num", "dist", "stats", "tensor", "ml", "nn", "fin", "ta", "gfx", "algoviz", "gpu", "sentiment", "plot", "vec", "ui", "lexis", "trace", "chess", "chessml", "xiangqi", "xiangqiml",
         "tool",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
         "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "finbond", "finmoney", "lab", "scatok", "scaparse", "scapros", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",
@@ -1164,7 +1167,7 @@ pub fn store_package(src: &str) -> Result<std::path::PathBuf, String> {
 /// The fixed set of built-in library names (sorted) — for listing the system's own modules.
 pub fn builtin_lib_names() -> Vec<String> {
     let mut v: Vec<String> = [
-        "std", "mold", "mocha", "plan", "num", "stats", "tensor", "ml", "plot", "vec", "chess", "chessml",
+        "std", "mold", "mocha", "plan", "num", "dist", "stats", "tensor", "ml", "plot", "vec", "chess", "chessml",
         "xiangqi", "xiangqiml", "tool", "algoviz",
         "dhash", "bloom", "lsm", "btree", "vclock", "crdt", "lamport", "chash", "quorum", "wire", "mapred", "merkle",
         "mvcc", "hll", "cms", "stream", "raft", "db", "lookup", "acplan", "symbols", "findb", "finbond", "finmoney", "lab", "scatok", "scaparse", "scapros", "algo", "dsa", "wgraph", "numth", "bits", "strings", "grid", "design", "trees", "dp", "intervals", "search", "graphs", "backtrack", "greedy",

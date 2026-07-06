@@ -69,13 +69,46 @@ pub fn cmd_ml(args: &[String]) {
         .map(|s| s.as_str())
         .unwrap_or("linear");
     let mut iters: u64 = if model == "linear" { 5000 } else { 20 };
+    let mut rounds: u64 = 4;
+    let mut local_iters: Option<u64> = None;
+    let mut store: Option<String> = None;
+    let mut force_dist = false;
+    let mut no_dist = false;
     let mut i = 0;
     while i < args.len() {
         if (args[i] == "--iters" || args[i] == "--epochs") && i + 1 < args.len() {
             iters = args[i + 1].parse().unwrap_or(iters);
             i += 1;
+        } else if args[i] == "--rounds" && i + 1 < args.len() {
+            rounds = args[i + 1].parse().unwrap_or(rounds);
+            i += 1;
+        } else if args[i] == "--local-iters" && i + 1 < args.len() {
+            local_iters = args[i + 1].parse().ok();
+            i += 1;
+        } else if args[i] == "--store" && i + 1 < args.len() {
+            store = Some(args[i + 1].clone());
+            i += 1;
+        } else if args[i] == "--dist" {
+            force_dist = true;
+        } else if args[i] == "--no-dist" {
+            no_dist = true;
         }
         i += 1;
+    }
+    // Distributed training is the DEFAULT for the linear model once workers
+    // are connected (latte worker / latte workers add): rounds of local SGD
+    // on each worker's shard, consolidated by FedAvg in Latte, and only the
+    // final consolidated model committed to the persistent log (--store DIR).
+    // `--no-dist` (or ORPHEUS_DIST=0) keeps the classic single-machine run;
+    // `--dist` runs the round/consolidation cycle even with no workers (each
+    // shard then trains locally).
+    if model == "linear" && !no_dist && std::env::var("ORPHEUS_DIST").ok().as_deref() != Some("0") {
+        let workers = crate::dist::workers();
+        if force_dist || !workers.is_empty() {
+            let e = local_iters.unwrap_or_else(|| (iters / rounds.max(1)).max(1));
+            crate::dist::cmd_ml_fedavg(&workers, rounds, e, store.as_deref());
+            return;
+        }
     }
     let libs = ["std", "num", "tensor", "ml"];
     let nats = |n: &N| -> String {

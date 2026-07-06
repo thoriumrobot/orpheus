@@ -1461,6 +1461,7 @@ pub struct Profile {
     pub interp_ns: u64, // latest measured interpreter wall time
     pub native_ns: u64, // latest measured native wall time (0 = never measured)
     pub runs: u64,      // interpreter runs recorded
+    pub dist: bool,     // profiler detected a distributable (data-parallel) shape
 }
 
 pub fn profile_threshold_ns() -> u64 {
@@ -1490,6 +1491,8 @@ fn profile_load() -> std::collections::HashMap<String, Profile> {
                         interp_ns: i.parse().unwrap_or(0),
                         native_ns: n.parse().unwrap_or(0),
                         runs: r.parse().unwrap_or(0),
+                        // 5th column (older stores lack it): distributable flag
+                        dist: it.next().map(|d| d == "1").unwrap_or(false),
                     },
                 );
             }
@@ -1524,7 +1527,14 @@ fn profile_store(m: &std::collections::HashMap<String, Profile>) {
     let _ = std::fs::create_dir_all(cache_dir());
     let mut s = String::new();
     for (k, p) in m {
-        s.push_str(&format!("{}\t{}\t{}\t{}\n", k, p.interp_ns, p.native_ns, p.runs));
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            k,
+            p.interp_ns,
+            p.native_ns,
+            p.runs,
+            if p.dist { 1 } else { 0 }
+        ));
     }
     let p = profile_path();
     let tmp = p.with_file_name(format!("profile-{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
@@ -1572,6 +1582,18 @@ pub fn profile_record_native(expr: &str, libs: &[&str], ns: u64) {
     let e = m.entry(key).or_default();
     e.native_ns = if e.native_ns == 0 { ns } else { (e.native_ns * 3 + ns) / 4 };
     profile_store(&m);
+}
+
+/// Record that the profiler detected a distributable (data-parallel) shape in
+/// this program — the adaptive engine's distribution decision reads it back.
+pub fn profile_record_dist(expr: &str, libs: &[&str]) {
+    let key = profile_key(expr, libs);
+    let mut m = profile_load();
+    let e = m.entry(key).or_default();
+    if !e.dist {
+        e.dist = true;
+        profile_store(&m);
+    }
 }
 
 /// `latte profile "<expr>"` — run the program on BOTH engines, measure, persist,
@@ -1637,13 +1659,24 @@ pub fn profile_report(expr: &str, libs: &[&str]) -> Result<String, String> {
             threshold as f64 / 1e6
         )
     };
+    // Distribution: the profiler also detects data-parallel shapes — the
+    // measured time then drives the DEFAULT distribute-or-stay-local decision
+    // exactly as it drives compile-or-interpret (src/dist.rs).
+    let dist_lines = match crate::dist::profile_note(expr, libs, interp_ns) {
+        Some(note) => {
+            profile_record_dist(expr, libs);
+            format!("\n{}", note)
+        }
+        None => String::new(),
+    };
     Ok(format!(
-        "profile: {}\n  interpreter {:>10.3} ms (expression; scope baseline {:.3} ms subtracted)\n{}\n  adaptive decision: {}\n  (persisted — the adaptive engine uses this measurement from now on)",
+        "profile: {}\n  interpreter {:>10.3} ms (expression; scope baseline {:.3} ms subtracted)\n{}\n  adaptive decision: {}{}\n  (persisted — the adaptive engine uses this measurement from now on)",
         expr,
         interp_ns as f64 / 1e6,
         base_ns as f64 / 1e6,
         native_line,
-        decision
+        decision,
+        dist_lines
     ))
 }
 
@@ -2344,6 +2377,15 @@ pub fn run_native_cached(expr: &str, libs: &[&str]) -> Option<crate::knot::N> {
 /// This centralizes the native-first policy that `latte eval`, the SCA engine, and the GUI console
 /// each used to hand-roll.
 pub fn run_adaptive(expr: &str, libs: &[&str]) -> Result<crate::knot::N, String> {
+    // Distribution decision FIRST: when workers are connected and the program
+    // has a distributable shape (explicit `dmap`, or a `map`/`predict_all`
+    // the profiler has measured past the distribution threshold), the work is
+    // split across the connected instances by default. `maybe_distribute`
+    // returns None to mean "stay local" — the common case costs one string
+    // prefix check.
+    if let Some(r) = crate::dist::maybe_distribute(expr, libs) {
+        return r;
+    }
     let t_nat = std::time::Instant::now();
     if let Some(n) = run_native_cached(expr, libs) {
         let ns = t_nat.elapsed().as_nanos() as u64;
