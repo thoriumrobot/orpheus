@@ -284,6 +284,15 @@ the whole history sits on a slider. The agent is pure Latte
 into the page live without touching the block you are typing in. See
 `docs/collaborative-notes.md`.
 
+**Collaborative planning and code.** The same shared documents carry an
+economy spec the Cockshott–Cottrell planner solves on the converged text
+(`Plan.solve`), a quadratic-ballot sheet the accountable planner computes
+from — each participant votes from their own instance, the demand column is
+the tallied electorate (`Acplan.solve`) — and live Latte modules: several
+people edit one `core`, and `Code.load` compiles the converged source into
+the running system, its arms callable everywhere (the Oberon move, on a
+document your peers are editing). See `docs/collaborative-notes.md`.
+
 **All of it has a GUI.** `latte gui` hosts a **ledger** — a persistent,
 gossiped kv node on the same layer as `latte node` (listening on `:9600` by
 default) — and the `/network` page is its interactive interface: connect

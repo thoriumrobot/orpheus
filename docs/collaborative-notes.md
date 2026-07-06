@@ -54,6 +54,45 @@ top of that total order, three modelling choices preserve *intention*:
   holding its position, so "insert after X" survives X's concurrent
   deletion in place instead of falling to the end of the document.
 
+## Beyond prose: plans, ballots, and code
+
+The block model carries more than notes — a document's **kind** (its id
+prefix, chosen at creation) tells the editor what the converged text is for,
+and a matching action panel puts it to work:
+
+**Collaborative economic planning (kind p).** One spec line per block —
+`sector steel l=0.4 steel=0.2`, `demand steel=1.0`, optional `market …` /
+`labour …` — edited concurrently by every connected instance.
+`Plan.solve(id, iters)` runs the Cockshott–Cottrell planner
+(docs/planning.md) on the converged spec: labour values, gross outputs,
+market steering, the lot. Two people own two sectors; the plan is solved on
+the whole.
+
+**Collaborative ACCOUNTABLE planning (kind v).** A ballot sheet: one
+quadratic ballot per participant per line — `ada: 0 0 2 4` over
+iron·coal·corn·bread, where casting n votes on a good costs n² of your
+credits (36 by default), so intensity is priced and no bloc dominates
+cheaply. Each participant adds *their* line from *their* instance; the
+sheet converges by gossip, and `Acplan.solve(id, iters, money, budget)`
+computes vote → final demand → Leontief targets → labour values → voucher
+prices (docs/accountable-planning.md) from the whole electorate. The demand
+column is literally the tallied votes — planning that originates with the
+people, gathered over the network.
+
+**Collaborative code (kind c).** A shared Latte module — `import std`,
+`core name`, one arm per block, `end`. `Code.check(id)` compiles the
+converged source; `Code.run(id, expr)` evaluates an expression with its arms
+in scope; and `Code.load(id)` is **the Oberon move on a shared document**:
+the module is compiled and loaded live into this instance, its arms callable
+from the console, pages, and other code. Each instance loads its own
+converged copy — shared source, live everywhere. (Loading is deliberately
+per-instance and explicit: editing never executes anything; a person decides
+when their instance adopts the code.)
+
+The trust consequence is worth stating: a code document is *source your
+peers can edit* — load only what you have read, from peers you chose
+(the same trusted-peers model as every port, docs/network-gui.md).
+
 ## Three surfaces, one registry
 
 The editor is a thin client over the same `Note.*` tools that appear on

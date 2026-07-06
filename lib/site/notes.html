@@ -12,7 +12,7 @@
          lib/notes.lat); this file is only hands and eyes -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Notes — collaborative editor</title>
+<title>Shared documents — collaborative editor</title>
 <style>
   :root { --paper:#fbf8f3; --rule:#8e8a7a; --title:#cfcaba; --ink:#1a1320; --accent:#5a1530; }
   body { font-family: Georgia, 'Times New Roman', serif; max-width:46rem; margin:2.2rem auto; padding:0 1rem; line-height:1.6; color:var(--ink); background:var(--paper); }
@@ -35,20 +35,33 @@
   #status { color:#8a8064; font-size:.8rem; margin-top:.5rem; min-height:1.1em; }
   #hist { width:100%; accent-color:var(--accent); }
   .histnote { color:#8a6d3b; font-size:.85rem; }
+  #doc.mono .blk { font-family:'DejaVu Sans Mono', ui-monospace, monospace; font-size:.88rem; }
+  #kindbar { display:none; }
+  #kindbar .hint { color:#8a6d3b; font-size:.82rem; font-style:italic; flex-basis:100%; }
+  #result { border:1px dashed var(--rule); border-radius:4px; background:#fffdf8; padding:.6rem .8rem;
+            margin-top:.6rem; font-size:.9rem; display:none; overflow-x:auto; }
+  #result pre { white-space:pre-wrap; margin:0; font-size:.82rem; }
   footer { margin-top:1.6rem; color:#998; font-size:.82rem; border-top:1px solid #e4dccc; padding-top:.7rem; }
   footer a { color:var(--accent); }
 </style>
 
-<h1>Notes</h1>
+<h1>Shared documents</h1>
 <p class="sub">Write together — every block is a durable, gossiped event; connected instances
-converge on one document. Enter = new block · Backspace on an empty block deletes it ·
-click anywhere and type.</p>
+converge on one document. Enter = new block · Backspace on an empty block deletes it.
+Kinds: <b>note</b> prose · <b>plan</b> an economy spec the planner solves ·
+<b>votes</b> quadratic ballots for the accountable planner · <b>code</b> a live Latte module.</p>
 
 <div class="bar">
   <label>I am <input id="who" size="9" placeholder="name"></label>
   <select id="pick" title="open a note"></select>
   <button onclick="openPicked()">Open</button>
-  <input id="newtitle" size="16" placeholder="new note title">
+  <input id="newtitle" size="14" placeholder="new title">
+  <select id="newkind" title="document kind">
+    <option value="n">note</option>
+    <option value="p">plan</option>
+    <option value="v">votes</option>
+    <option value="c">code</option>
+  </select>
   <button onclick="createNote()">＋ Create</button>
   <button onclick="connectPeer()" title="dial another instance's notes port (9601 by default) — documents reconcile automatically">⇄ Connect peer…</button>
 </div>
@@ -67,6 +80,8 @@ click anywhere and type.</p>
   <button onclick="addBlock()">＋ block</button>
   <button onclick="toggleHistory()" id="histbtn">⌛ history</button>
 </div>
+<div class="bar" id="kindbar"></div>
+<div id="result"></div>
 <div id="status"></div>
 
 <footer>The agent is pure Latte (lib/notes.lat); merging is the event log's total order plus
@@ -112,7 +127,7 @@ function refreshIndex(cb){
       if(!line) return;
       var p = line.split(US);
       var o = document.createElement('option');
-      o.value = p[0]; o.textContent = p[1] + ' (' + p[2] + ')';
+      o.value = p[0]; o.textContent = '[' + kindOf(p[0]) + '] ' + p[1] + ' (' + p[2] + ')';
       pick.appendChild(o);
     });
     if(had) pick.value = had;
@@ -122,9 +137,9 @@ function refreshIndex(cb){
 function openPicked(){ if($('pick').value) open($('pick').value); }
 function createNote(){
   var t = $('newtitle').value.trim() || 'untitled';
-  api('Note.create ' + q(t), function(err, body){
+  api('Note.create ' + q(t) + ' ' + $('newkind').value, function(err, body){
     if(err){ status(err); return; }
-    var m = body.match(/created note (\S+)/);
+    var m = body.match(/created \S+ (\S+)/);
     $('newtitle').value = '';
     refreshIndex(function(){ if(m){ $('pick').value = m[1]; open(m[1]); } });
   });
@@ -136,10 +151,54 @@ function connectPeer(){
 }
 
 // ------------------------------ the document --------------------------------
+function kindOf(id){ return {n:'note', p:'plan', v:'votes', c:'code'}[(id||'n')[0]] || 'note'; }
+
+// the kind-specific action panel: the shared document put to WORK — solve the
+// converged plan, compute the accountable plan from everyone's ballots, or
+// compile/load/run the shared module. All through the same tool registry.
+function kindPanel(id){
+  var k = kindOf(id), bar = $('kindbar');
+  $('doc').classList.toggle('mono', k !== 'note');
+  $('result').style.display = 'none';
+  if(k === 'note'){ bar.style.display = 'none'; bar.innerHTML=''; return; }
+  bar.style.display = 'flex';
+  if(k === 'plan'){
+    bar.innerHTML = '<label>iterations <input id="p_iters" size="4" value="60"></label>'
+      + '<button onclick="act(\'Plan.solve \'+q(noteId)+\' \'+($(\'p_iters\').value||60))">⚙ Solve plan</button>'
+      + '<span class="hint">one spec line per block: <b>sector steel l=0.4 steel=0.2 grain=0.1</b> · <b>demand steel=1.0 grain=2.0</b> · optional <b>market …</b> / <b>labour …</b> — everyone edits, the planner runs on the converged spec</span>';
+  } else if(k === 'votes'){
+    bar.innerHTML = '<label>iters <input id="v_iters" size="3" value="40"></label>'
+      + '<label>money <input id="v_money" size="6" value="36400"></label>'
+      + '<label>credits <input id="v_budget" size="3" value="36"></label>'
+      + '<button onclick="act(\'Acplan.solve \'+q(noteId)+\' \'+($(\'v_iters\').value||40)+\' \'+($(\'v_money\').value||36400)+\' \'+($(\'v_budget\').value||36))">⚖ Accountable plan</button>'
+      + '<span class="hint">one ballot per block: <b>ada: 0 0 2 4</b> — four vote counts over iron·coal·corn·bread; n votes cost n² of your credits. Add YOUR line from YOUR instance; the plan is computed from everyone\'s converged ballots</span>';
+  } else if(k === 'code'){
+    bar.innerHTML = '<input id="c_expr" size="22" placeholder="(myarm 21)">'
+      + '<button onclick="act(\'Code.run \'+q(noteId)+\' \'+q($(\'c_expr\').value))">▶ Run</button>'
+      + '<button onclick="act(\'Code.check \'+q(noteId))">✓ Check</button>'
+      + '<button onclick="act(\'Code.load \'+q(noteId))">⟲ Load module</button>'
+      + '<span class="hint">a shared Latte module (<b>core name … end</b>, one arm per block works well). Check compiles it; Load makes its arms live on THIS instance; Run loads then evaluates the expression with the arms in scope</span>';
+  }
+}
+
+function act(cmd){
+  var r = $('result');
+  r.style.display = 'block';
+  r.innerHTML = '<span style="color:#8a8064">working…</span>';
+  api(cmd, function(err, body){
+    if(err){ r.textContent = err; return; }
+    var pre = document.createElement('pre');
+    pre.textContent = body;
+    r.innerHTML = '';
+    r.appendChild(pre);
+  });
+}
+
 function open(id){
   noteId = id; atEvent = 0; lastLines = ''; dirty = {};
   $('histbar').style.display = 'none';
   $('title').disabled = false;
+  kindPanel(id);
   poll(true);
   if(polling) clearInterval(polling);
   polling = setInterval(function(){ poll(false); }, 2500);

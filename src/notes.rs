@@ -169,18 +169,45 @@ fn submit(h: &NotesHost, action: N) {
     net::submit(&h.node, &h.peers, action);
 }
 
-/// Create a note; returns its generated id ("nLAM-NODEHEX").
-pub fn create(title: &str) -> Result<String, String> {
+/// Document KINDS ride the one agent as id prefixes — the same blocks,
+/// anchors, and tombstones carry prose, economy specs, ballots, and code:
+///   n = note · p = economic plan spec · v = quadratic-vote ballots · c = code
+pub const KINDS: &[(&str, &str)] = &[("n", "note"), ("p", "plan"), ("v", "votes"), ("c", "code")];
+
+/// Create a document of the given kind; returns its id ("KLAM-NODEHEX").
+pub fn create_kind(kind: &str, title: &str) -> Result<String, String> {
     let h = require()?;
     if title.trim().is_empty() {
-        return Err("Note.create: give the note a title".into());
+        return Err("give the document a title".into());
+    }
+    let k = kind.trim();
+    if !KINDS.iter().any(|(p, _)| *p == k) {
+        return Err(format!("unknown document kind '{}' (n=note, p=plan, v=votes, c=code)", k));
     }
     let id = {
         let n = h.node.lock().unwrap();
-        format!("n{}-{:x}", n.lamport + 1, n.id)
+        format!("{}{}-{:x}", k, n.lamport + 1, n.id)
     };
     submit(h, cell(cord("mknote"), cell(cord(&id), cord(title.trim()))));
     Ok(id)
+}
+
+/// Create a plain note (kind "n").
+pub fn create(title: &str) -> Result<String, String> {
+    create_kind("n", title)
+}
+
+/// The document's LIVE text: blocks in order, joined by newlines — what the
+/// planners parse and the code tools compile. Tombstones excluded.
+pub fn assemble(id: &str) -> Result<Option<String>, String> {
+    Ok(read_note(id, 0)?.map(|(_, blocks)| {
+        blocks
+            .into_iter()
+            .filter(|b| b.alive)
+            .map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }))
 }
 
 pub fn retitle(id: &str, title: &str) -> Result<(), String> {
@@ -553,5 +580,13 @@ mod tests {
         assert!(notes.iter().any(|(nid, t, live)| nid == &id && t == "minutes, v2" && *live == 4));
         let bid = parse_bid(&b1).unwrap();
         assert_eq!(bid_string(&bid), b1);
+        // kinds ride the id prefix; assemble joins the live blocks
+        let pid = create_kind("p", "two-sector economy").unwrap();
+        assert!(pid.starts_with('p'));
+        append_block(&pid, "ada", "sector steel l=0.4 steel=0.2").unwrap();
+        append_block(&pid, "bob", "demand steel=1.0").unwrap();
+        let text = assemble(&pid).unwrap().unwrap();
+        assert_eq!(text, "sector steel l=0.4 steel=0.2\ndemand steel=1.0");
+        assert!(create_kind("x", "nope").is_err());
     }
 }

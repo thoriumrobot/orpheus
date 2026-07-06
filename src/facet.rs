@@ -1520,8 +1520,199 @@ fn tool_note_index(_args: &[Val]) -> Result<Val, String> {
 
 fn tool_note_create(args: &[Val]) -> Result<Val, String> {
     let title = arg_text(args, 0)?;
-    let id = crate::notes::create(&title)?;
-    Ok(ok_note(&format!("created note {} — \"{}\" (open it in the /notes editor, or Note.read {})", id, title.trim(), id)))
+    let kind = args.get(1).map(|v| v.to_text()).unwrap_or_default();
+    let kind = if kind.trim().is_empty() { "n" } else { kind.trim() };
+    let id = crate::notes::create_kind(kind, &title)?;
+    Ok(ok_note(&format!("created {} {} — \"{}\" (open it in the /notes editor)",
+        crate::notes::KINDS.iter().find(|(p, _)| *p == kind).map(|(_, n)| *n).unwrap_or("document"),
+        id, title.trim())))
+}
+
+// ---------------------------------------------------------------------------
+// COLLABORATIVE PLANNING & CODE — the block documents put to work. A plan
+// spec, a ballot sheet, or a Latte module edited concurrently by several
+// instances converges by the notes machinery; these tools run the EXISTING
+// computational cores on the converged text: the economic planner
+// (src/plan.rs + lib/plan.lat), the accountable planner (lib/acplan.lat —
+// quadratic vote → Leontief targets → vouchers), and the live module system
+// (latte::compile_and_register — the Oberon move, on a shared document).
+// ---------------------------------------------------------------------------
+
+fn doc_text(id: &str) -> Result<String, String> {
+    match crate::notes::assemble(id.trim())? {
+        Some(t) => Ok(t),
+        None => Err(format!("no document '{}' — create one in the /notes editor", id.trim())),
+    }
+}
+
+fn tool_plan_solve(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let iters = arg_num_or(args, 1, 60).clamp(5, 400) as u64;
+    let spec = doc_text(&id)?;
+    let eco = crate::plan::parse_economy(&spec)
+        .map_err(|e| format!("the shared spec does not parse: {} (lines like: sector steel l=0.4 steel=0.2 / demand steel=1.0)", e))?;
+    let report = crate::plan::plan_report_custom(&eco, iters)?;
+    Ok(Val::Text(format!(
+        "<div class=\"feat\">the Cockshott–Cottrell planner, run on the CONVERGED shared spec ({} iterations)</div><pre style=\"white-space:pre-wrap\">{}</pre>",
+        iters,
+        html_escape(&report)
+    )))
+}
+
+/// One ballot per line: "name: iron coal corn bread" (the name is optional) —
+/// four vote counts for the four goods of the acplan sample technology.
+fn parse_ballots(text: &str) -> Result<(Vec<String>, Vec<Vec<u128>>), String> {
+    let mut names = Vec::new();
+    let mut ballots = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("::") {
+            continue;
+        }
+        let (name, nums) = match line.split_once(':') {
+            Some((n, r)) => (n.trim().to_string(), r),
+            None => (format!("citizen {}", i + 1), line),
+        };
+        let votes: Vec<u128> = nums
+            .split([' ', ',', '\t'])
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| p.trim().parse::<u128>())
+            .collect::<Result<_, _>>()
+            .map_err(|_| format!("ballot line {} ('{}') — votes must be whole numbers", i + 1, line))?;
+        if votes.len() != 4 {
+            return Err(format!(
+                "ballot line {} ('{}') has {} vote(s); the sample technology has 4 goods: iron coal corn bread",
+                i + 1, line, votes.len()
+            ));
+        }
+        names.push(name);
+        ballots.push(votes);
+    }
+    if ballots.is_empty() {
+        return Err("no ballots yet — each participant adds one line: name: iron coal corn bread (e.g. ada: 0 0 2 4)".into());
+    }
+    Ok((names, ballots))
+}
+
+fn tool_acplan_solve(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let iters = arg_num_or(args, 1, 40).clamp(5, 200);
+    let money = arg_num_or(args, 2, 36400);
+    let budget = arg_num_or(args, 3, 36);
+    let (names, ballots) = parse_ballots(&doc_text(&id)?)?;
+    // the quadratic budget makes intensity cost: casting n votes costs n²
+    let mut over = Vec::new();
+    for (n, b) in names.iter().zip(ballots.iter()) {
+        let cost: u128 = b.iter().map(|v| v * v).sum();
+        if cost > budget {
+            over.push(format!("{} spent {} of {} credits", n, cost, budget));
+        }
+    }
+    if !over.is_empty() {
+        return Err(format!("quadratic budget exceeded — {} (trim the ballot: n votes cost n²)", over.join("; ")));
+    }
+    let ballots_noun = crate::dist::from_vec(
+        &ballots
+            .iter()
+            .map(|b| crate::dist::from_vec(&b.iter().map(|v| crate::knot::num(*v)).collect::<Vec<_>>()))
+            .collect::<Vec<_>>(),
+    );
+    let expr = format!(
+        "(ap_dash {} {} {})",
+        crate::dist::noun_literal(&ballots_noun).ok_or("ballots too large")?,
+        iters,
+        money
+    );
+    let libs_owned = crate::latte::all_libs();
+    let libs: Vec<&str> = libs_owned.iter().map(|x| x.as_str()).collect();
+    let out = crate::latte::run_with_libs(&expr, &libs)?;
+    // ap_dash returns [%html text]
+    let html = out
+        .as_cell()
+        .and_then(|(_, t)| t.as_atom().and_then(|a| a.as_cord()))
+        .ok_or("acplan returned an unexpected shape")?;
+    Ok(Val::Text(format!(
+        "<div class=\"feat\">{} ballot(s) from the shared sheet — quadratic vote → demand → Leontief targets → vouchers (lib/acplan.lat)</div>{}",
+        names.len(),
+        html
+    )))
+}
+
+fn tool_code_check(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let src = doc_text(&id)?;
+    if src.lines().any(|l| l.trim_start().starts_with("core ")) {
+        match crate::latte::compile_module(&src) {
+            // axes count includes imported arms; report the module's OWN
+            Ok((_, axes)) => {
+                let own = src
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim_start();
+                        !t.starts_with("::")
+                            && t.contains(" = fn ")
+                    })
+                    .count();
+                Ok(ok_note(&format!(
+                    "module compiles — {} arm(s){}",
+                    if own > 0 { own } else { axes.len() },
+                    if own > 0 { format!(" (+{} imported in scope)", axes.len().saturating_sub(own)) } else { String::new() }
+                )))
+            }
+            Err(e) => Err(format!("does not compile: {}", e)),
+        }
+    } else {
+        let ast = crate::latte::parse(&src).map_err(|e| format!("parse error: {}", e))?;
+        match crate::check::check(&ast) {
+            Ok(ty) => Ok(ok_note(&format!("expression checks: {}", ty.show()))),
+            Err(e) => Ok(Val::Text(format!("<span class=\"feat\">{}</span>", html_escape(&e)))),
+        }
+    }
+}
+
+fn tool_code_load(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let src = doc_text(&id)?;
+    let msg = crate::latte::compile_and_register(&src)?;
+    Ok(ok_note(&format!(
+        "{} — the SHARED module is now live on THIS instance (peers load their converged copy the same way)",
+        msg
+    )))
+}
+
+fn tool_code_run(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let expr = args.get(1).map(|v| v.to_text()).unwrap_or_default();
+    let expr = expr.trim();
+    let src = doc_text(&id)?;
+    let libs_owned = crate::latte::all_libs();
+    let mut libs: Vec<String> = libs_owned.clone();
+    let run_expr: String;
+    if src.lines().any(|l| l.trim_start().starts_with("core ")) {
+        // a module document: load it (compile-checked), then run the probe
+        // expression with the module's arms in scope
+        crate::latte::compile_and_register(&src)?;
+        if expr.is_empty() {
+            return Ok(ok_note("module loaded — give an expression to run (its arms are in scope), e.g. (myarm 21)"));
+        }
+        if let Some(name) = src
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("core ").map(|n| n.trim().to_string()))
+        {
+            if !libs.iter().any(|x| *x == name) {
+                libs.push(name);
+            }
+        }
+        run_expr = expr.to_string();
+    } else if expr.is_empty() {
+        // an expression document: the converged text IS the program
+        run_expr = src;
+    } else {
+        return Err("this document is not a `core NAME` module — leave expr blank to run the document itself".into());
+    }
+    let refs: Vec<&str> = libs.iter().map(|x| x.as_str()).collect();
+    let v = crate::latte::run_with_libs(&run_expr, &refs)?;
+    Ok(Val::Text(format!("<code>{}</code>", html_escape(&crate::net::show_state(&v)))))
 }
 
 fn note_html(id: &str, at: usize) -> Result<String, String> {
@@ -2071,8 +2262,8 @@ pub fn tool_specs() -> &'static [ToolSpec] {
         ToolSpec {
             module: "Note",
             proc: "create",
-            sig: "Note.create(title)",
-            summary: "make a shared note (a durable, gossiped event; the id comes back) — use inside Live.form",
+            sig: "Note.create(title, kind)",
+            summary: "make a shared document (kind: n note, p plan spec, v ballots, c code; the id comes back) — use inside Live.form",
             handler: tool_note_create,
         },
         ToolSpec {
@@ -2151,6 +2342,41 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             sig: "Note.forget(addr)",
             summary: "undo a Note.connect — use inside Live.form",
             handler: tool_note_forget,
+        },
+        ToolSpec {
+            module: "Plan",
+            proc: "solve",
+            sig: "Plan.solve(id, iters)",
+            summary: "run the Cockshott–Cottrell economic planner (lib/plan.lat) on a SHARED spec document — sectors and demand edited concurrently by every connected instance, solved on the converged text",
+            handler: tool_plan_solve,
+        },
+        ToolSpec {
+            module: "Acplan",
+            proc: "solve",
+            sig: "Acplan.solve(id, iters, money, budget)",
+            summary: "ACCOUNTABLE planning on a shared ballot sheet: one quadratic ballot per participant per line (name: iron coal corn bread), converged by gossip, then vote → demand → Leontief targets → vouchers (lib/acplan.lat)",
+            handler: tool_acplan_solve,
+        },
+        ToolSpec {
+            module: "Code",
+            proc: "check",
+            sig: "Code.check(id)",
+            summary: "compile-check a shared code document: a `core NAME` module compiles whole; a bare expression is typechecked",
+            handler: tool_code_check,
+        },
+        ToolSpec {
+            module: "Code",
+            proc: "load",
+            sig: "Code.load(id)",
+            summary: "the Oberon move on a SHARED document: compile the converged module and load it live into this instance — its arms become callable everywhere — use inside Live.form",
+            handler: tool_code_load,
+        },
+        ToolSpec {
+            module: "Code",
+            proc: "run",
+            sig: "Code.run(id, expr)",
+            summary: "run a shared code document: a module is loaded and `expr` evaluated with its arms in scope; an expression document runs as-is (expr blank) — use inside Live.form",
+            handler: tool_code_run,
         },
         ToolSpec {
             module: "Viz",
@@ -2390,7 +2616,10 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Db", summary: "shared persistent state: boards, posts, and node-to-node sync" },
         ModuleSpec { name: "Kv", summary: "the ledger: the event-sourced, gossiped key-value node this GUI hosts" },
         ModuleSpec { name: "Net", summary: "distributed execution: workers, distribution-aware eval, FedAvg training, persisted models" },
-        ModuleSpec { name: "Note", summary: "collaborative notes: shared block documents that merge concurrent edits (the /notes editor)" },
+        ModuleSpec { name: "Note", summary: "collaborative documents: shared block sequences that merge concurrent edits (the /notes editor)" },
+        ModuleSpec { name: "Plan", summary: "collaborative economic planning: the TNS planner solved on a shared, converged spec" },
+        ModuleSpec { name: "Acplan", summary: "collaborative accountable planning: quadratic ballots gathered across instances" },
+        ModuleSpec { name: "Code", summary: "collaborative code: shared Latte modules, compile-checked, loaded live, run anywhere" },
     ]
 }
 
@@ -3027,6 +3256,60 @@ mod tests {
         assert!(html.contains(r#"data-live-every="60""#), "period clamps to 60s");
         // non-watch widgets still demand fields
         assert!(render(r#"{{ Live.box("Kv.info()", []) }}"#).is_err());
+    }
+
+    #[test]
+    fn shared_documents_drive_planner_ballots_and_live_code() {
+        // the block documents put to work: a plan spec, a ballot sheet, and a
+        // Latte module — each edited as a shared document, each consumed by
+        // an existing computational core
+        let _g = crate::notes::test_guard();
+        crate::notes::init(None, "", &[], Some(13)).unwrap();
+
+        // collaborative economic planning: spec lines as blocks
+        let pid = crate::notes::create_kind("p", "two-sector economy").unwrap();
+        crate::notes::append_block(&pid, "ada", "sector steel l=0.4 steel=0.2 grain=0.1").unwrap();
+        crate::notes::append_block(&pid, "bob", "sector grain l=0.3 steel=0.5 grain=0.1").unwrap();
+        crate::notes::append_block(&pid, "ada", "demand steel=0.5 grain=1.0").unwrap();
+        let out = tool_plan_solve(&[Val::Text(pid.clone()), Val::Num(60)]).unwrap().to_text();
+        assert!(out.contains("labour values"), "planner report expected: {}", out);
+        assert!(out.contains("steel"), "{}", out);
+        // a bad spec reports the parse problem, not a panic
+        let bad = crate::notes::create_kind("p", "broken").unwrap();
+        crate::notes::append_block(&bad, "x", "sector??").unwrap();
+        assert!(tool_plan_solve(&[Val::Text(bad)]).is_err());
+
+        // collaborative accountable planning: one quadratic ballot per line
+        let vid = crate::notes::create_kind("v", "spring vote").unwrap();
+        crate::notes::append_block(&vid, "ada", "ada: 0 0 2 4").unwrap();
+        crate::notes::append_block(&vid, "bob", "bob: 0 0 3 3").unwrap();
+        crate::notes::append_block(&vid, "eve", "eve: 1 0 1 5").unwrap();
+        let out = tool_acplan_solve(&[Val::Text(vid.clone())]).unwrap().to_text();
+        assert!(out.contains("Accountable plan"), "{}", out);
+        assert!(out.contains("3 ballot(s)"), "{}", out);
+        // the quadratic budget binds: 6 votes on one good cost 36 < 6²+1
+        let over = crate::notes::create_kind("v", "greedy").unwrap();
+        crate::notes::append_block(&over, "mal", "mal: 0 0 1 6").unwrap();
+        assert!(tool_acplan_solve(&[Val::Text(over)]).is_err(), "37 credits must exceed the 36 budget");
+
+        // collaborative code: a shared module, checked, loaded live, and run
+        let cid = crate::notes::create_kind("c", "shared library").unwrap();
+        crate::notes::append_block(&cid, "ada", "import std").unwrap();
+        crate::notes::append_block(&cid, "ada", "core sharedlib").unwrap();
+        crate::notes::append_block(&cid, "bob", "  twice = fn [x] -> (mul x 2)").unwrap();
+        crate::notes::append_block(&cid, "ada", "  quad = fn [x] -> (twice (twice x))").unwrap();
+        crate::notes::append_block(&cid, "bob", "end").unwrap();
+        let out = tool_code_check(&[Val::Text(cid.clone())]).unwrap().to_text();
+        assert!(out.contains("2 arm(s)"), "{}", out);
+        let out = tool_code_run(&[Val::Text(cid.clone()), Val::Text("(quad 10)".into())]).unwrap().to_text();
+        assert!(out.contains("40"), "the shared module's arms compute: {}", out);
+        // once loaded, the module is live in the whole system
+        tool_code_load(&[Val::Text(cid)]).unwrap();
+        let refs_owned = crate::latte::all_libs();
+        let mut refs: Vec<&str> = refs_owned.iter().map(|s| s.as_str()).collect();
+        refs.push("sharedlib");
+        let v = crate::latte::run_with_libs("(twice 21)", &refs).unwrap();
+        assert_eq!(crate::net::show_state(&v), "42");
     }
 
     #[test]

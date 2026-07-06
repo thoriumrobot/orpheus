@@ -395,7 +395,7 @@ deterministic per request.</p>
     X" holds its place even when X is deleted concurrently. The same tools work from the
     <a href="/notes">/notes editor</a>, these widgets, and the System console.</p>
     {{ Live.view("Note.info()", [["_", "0"]]) }}
-    {{ Live.form("Note.create(title)", [["title", "meeting minutes"]]) }}
+    {{ Live.form("Note.create(title, kind)", [["title", "meeting minutes"], ["kind", "n", "n", "p", "v", "c"]]) }}
     {{ Live.watch("Note.list()", [], 5) }}
     {{ Live.box("Note.index()", [["_", "0"]]) }}
     {{ Live.view("Note.read(id)", [["id", ""]]) }}
@@ -408,6 +408,49 @@ deterministic per request.</p>
     {{ Live.view("Note.history(id, k)", [["id", ""], ["k", "1", "~", "1", "100", "1"]]) }}
     {{ Live.form("Note.connect(addr)", [["addr", "203.0.113.7:9601"]]) }}
     {{ Live.form("Note.forget(addr)", [["addr", "203.0.113.7:9601"]]) }}
+  </div>
+</div>
+
+<!-- ===================== Plan (collaborative) ===================== -->
+<div class="panel">
+  <div class="t">Plan — collaborative economic planning (a shared spec, solved on the converged text)</div>
+  <div class="b">
+    <p class="lede">A <b>plan</b> document (kind p) holds an economy spec — one line per block:
+    <code>sector steel l=0.4 steel=0.2</code>, <code>demand steel=1.0</code>, optional
+    <code>market …</code> / <code>labour …</code> — edited concurrently by every connected
+    instance. <code>Plan.solve</code> runs the Cockshott–Cottrell planner (lib/plan.lat) on the
+    converged spec; the <a href="/notes">editor</a> shows a Solve button on plan documents.</p>
+    {{ Live.form("Plan.solve(id, iters)", [["id", ""], ["iters", "60"]]) }}
+  </div>
+</div>
+
+<!-- ===================== Acplan (collaborative) ===================== -->
+<div class="panel">
+  <div class="t">Acplan — collaborative ACCOUNTABLE planning (everyone's ballots, one plan)</div>
+  <div class="b">
+    <p class="lede">A <b>votes</b> document (kind v) is a ballot sheet: one quadratic ballot per
+    participant per line — <code>ada: 0 0 2 4</code> over iron·coal·corn·bread; casting n votes
+    on a good costs n² of your credits, so intensity is priced and no bloc dominates cheaply.
+    Each participant adds THEIR line from THEIR instance; the sheet converges by gossip and
+    <code>Acplan.solve</code> computes vote → demand → Leontief targets → labour values →
+    vouchers (lib/acplan.lat) from the whole electorate.</p>
+    {{ Live.form("Acplan.solve(id, iters, money, budget)", [["id", ""], ["iters", "40"], ["money", "36400"], ["budget", "36"]]) }}
+  </div>
+</div>
+
+<!-- ===================== Code (collaborative) ===================== -->
+<div class="panel">
+  <div class="t">Code — collaborative live modules (the Oberon move, on a shared document)</div>
+  <div class="b">
+    <p class="lede">A <b>code</b> document (kind c) is a Latte module several people edit at
+    once (one arm per block works well). <code>Code.check</code> compiles the converged source;
+    <code>Code.load</code> loads it LIVE into this instance — its arms become callable from the
+    console, pages, and other code; <code>Code.run</code> loads and evaluates an expression with
+    the arms in scope. Each instance loads its own converged copy — shared source, live
+    everywhere.</p>
+    {{ Live.form("Code.check(id)", [["id", ""]]) }}
+    {{ Live.form("Code.load(id)", [["id", ""]]) }}
+    {{ Live.form("Code.run(id, expr)", [["id", ""], ["expr", "(myarm 21)"]]) }}
   </div>
 </div>
 
