@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ligos — Sauleis Bazdā &rarr; Mazdō-yō Heardō̃</title>
 <style>
   @font-face { font-family:'Ligos'; src:url('/fonts/ligos-regular.woff2') format('woff2'); font-weight:400; font-style:normal; font-display:swap; }

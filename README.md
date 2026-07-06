@@ -190,6 +190,37 @@ has zero external crates and no platform-specific code, so the same sources buil
 See `DISTRIBUTION.md`. (The Windows `.exe` is produced by that pipeline; this build
 environment has the mingw cross-linker but cannot fetch the Windows `std`.)
 
+## Android — the whole system in your pocket
+
+The same zero-dependency sources build for Android, and a phone is a **full
+peer**: the Latte language, interpreter + JIT, the GUI (served to the phone's
+own browser), persistent gossiped nodes, and distributed execution — a phone
+can be a worker for a PC, coordinate work running on PCs, or both at once.
+
+```sh
+# on the phone (Termux, from F-Droid):
+pkg install rust binutils && ./build-android.sh    # native on-device build
+latte gui                                          # → http://127.0.0.1:8088 in Chrome
+
+# or sideload a fully static aarch64 binary built on a PC:
+./build-android.sh --static                        # -Z build-std cross build
+adb push target-static/aarch64-unknown-linux-gnu/release/latte /data/local/tmp/
+```
+
+The System GUI adapts to touch: **long-press a command line to run it** (the
+middle-click of phones), **▶ Run** in the header for the caret line, pointer-
+gesture drags for separators and title bars (hold a title bar to lift a
+viewer into move mode), and a stacked single-column layout on narrow screens.
+Without a rustc on the device, the native engine stands down cleanly and the
+interpreter + JIT answer everything — same results, reported honestly by
+`latte profile`.
+
+PC↔phone connectivity is exercised by `xarch_test.sh`: an x86-64 instance and
+the aarch64 Android build (under `qemu-aarch64`, no rustc, isolated HOME)
+drive each other in all four directions — worker tasks both ways, gossip
+converging to the **same content id** across architectures, and one FedAvg
+model trained with shards on both CPUs at once. See `docs/android.md`.
+
 ## Connecting machines, persistence, jets
 
 Each node keeps an append-only, content-addressed event log; state is the deterministic

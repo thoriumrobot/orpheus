@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tools — the Orpheus environment</title>
 <style>
   :root { --paper:#fbf8f3; --rule:#8e8a7a; --title:#cfcaba; --ink:#1a1320; --accent:#5a1530; --heart:#8a1538; }

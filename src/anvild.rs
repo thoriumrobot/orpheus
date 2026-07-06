@@ -116,6 +116,9 @@ pub fn ping() -> bool {
 /// daemon was reachable and accepted the request. Non-blocking: the build proceeds in the daemon
 /// after this returns, so the caller never waits on `rustc`.
 pub fn warm_bg(expr: &str, libs: &[&str]) -> bool {
+    if !crate::rustgen::rustc_available() {
+        return false; // no toolchain on this device: nothing a daemon could build
+    }
     matches!(request("WARMBG", &encode_warm(expr, libs)), Some((st, _)) if st == "OK")
 }
 

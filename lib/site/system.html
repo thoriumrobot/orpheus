@@ -121,11 +121,30 @@
  .panelbody button{font:13px inherit;border:1px solid var(--rule);border-radius:3px;background:var(--btn);cursor:pointer;padding:5px 13px}
  .panelbody button:hover{background:#fff;box-shadow:0 1px 2px #0002}
  .foot{font-size:11px;color:var(--dim);padding:3px 9px;border-top:1px solid #c4bfae;background:#efece1}
+ /* ---- touch & small screens (Android phones): the same tiled system ---- */
+ .tsep,.vsep,.menu{touch-action:none}   /* separator/title drags are pointer gestures, not scrolls */
+ @media (max-width:720px){
+   header{padding:6px 8px;gap:6px}
+   header>span{display:none}                        /* the long intro yields to the link bar */
+   header .links{overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch;max-width:100%;scrollbar-width:none}
+   header .links::-webkit-scrollbar{display:none}
+   #screen{flex-direction:column;height:calc(100vh - 36px);height:calc(100dvh - 36px)}
+   .track{min-width:0;width:100%;min-height:90px}
+   .tsep{cursor:row-resize}
+   .tsep::after{left:0;right:0;top:2px;bottom:auto;width:auto;height:3px}
+ }
+ @media (pointer:coarse){
+   body{font-size:14px}
+   .tsep,.vsep{flex-basis:14px}                     /* fatter grab bars for fingers */
+   .menu .cmd{padding:3px 10px}
+   header .links a{padding:5px 7px;margin-left:6px}
+ }
 </style></head>
 <body>
 <header>
-  <span><b>ORPHEUS</b> — the system is its texts: <b>middle-click</b> any command line to run it (or caret + Ctrl/⌘+Enter); objects embed where you run them; drag a title bar to resize, middle inter-click while dragging to move the viewer.</span>
+  <span><b>ORPHEUS</b> — the system is its texts: <b>middle-click</b> any command line to run it (or caret + Ctrl/⌘+Enter; on touch, <b>long-press</b> the line or use ▶ Run); objects embed where you run them; drag a title bar to resize, middle inter-click while dragging to move the viewer.</span>
   <span class="links">
+    <a href="#" onclick="runMarked();return false" title="run the selection / caret line of the marked viewer (touch: long-press any command line)" style="font-weight:700;color:#ffe9a8">▶ Run</a>
     <a href="#" onclick="exec('System.OpenTrack');return false" title="add a column (System.OpenTrack)">⊞ Track</a>
     <a href="#" onclick="exec('System.CloseTrack');return false" title="remove a column (System.CloseTrack)">⊟</a>
     <a href="#" onclick="exec('System.Def');return false" title="look up a function's definition — double-click its name (or drag to select it), then click (System.Def)">≡ Def</a>
@@ -192,6 +211,10 @@
    ============================================================================ */
 
 var viewers = [], marked = null, uid = 0;
+// A coarse pointer (finger) has no middle button: LONG-PRESS becomes the
+// execute gesture. Android fires `contextmenu` on long-press, so on touch
+// devices that event runs the pressed line instead of opening a menu.
+var COARSE = window.matchMedia ? matchMedia('(pointer: coarse)').matches : false;
 function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -266,16 +289,22 @@ function closeTrackCol(tr){
 
 /* ---- resizable layout ----------------------------------------------------- */
 function dragSep(sep, prevEl, nextEl, horizontal){
-  sep.addEventListener('mousedown', function(e){
+  // pointer events, so the same drag works with a mouse and a finger
+  sep.addEventListener('pointerdown', function(e){
+    if(e.pointerType==='mouse' && e.button!==0) return;
     e.preventDefault();
+    // track separators flip axis when the screen stacks (the phone layout)
+    var horiz = sep.classList.contains('tsep')
+      ? getComputedStyle(document.getElementById('screen')).flexDirection!=='column'
+      : horizontal;
     document.body.classList.add('sepdrag');   // page-viewer iframes must not eat the drag
-    var p0 = horizontal ? prevEl.offsetWidth  : prevEl.offsetHeight;
-    var n0 = horizontal ? nextEl.offsetWidth  : nextEl.offsetHeight;
-    var start = horizontal ? e.clientX : e.clientY;
+    var p0 = horiz ? prevEl.offsetWidth  : prevEl.offsetHeight;
+    var n0 = horiz ? nextEl.offsetWidth  : nextEl.offsetHeight;
+    var start = horiz ? e.clientX : e.clientY;
     var g0 = parseFloat(prevEl.style.flexGrow || getComputedStyle(prevEl).flexGrow || 1);
     var gn0 = parseFloat(nextEl.style.flexGrow || getComputedStyle(nextEl).flexGrow || 1);
     function move(ev){
-      var d = (horizontal ? ev.clientX : ev.clientY) - start;
+      var d = (horiz ? ev.clientX : ev.clientY) - start;
       var p = Math.max(48, p0 + d), n = Math.max(48, n0 - d);
       var total = g0 + gn0, px = p0 + n0;
       prevEl.style.flexGrow = (total * p / px).toFixed(4);
@@ -283,10 +312,12 @@ function dragSep(sep, prevEl, nextEl, horizontal){
     }
     function up(){
       document.body.classList.remove('sepdrag');
-      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
     }
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   });
 }
 function relayout(tr){
@@ -316,13 +347,17 @@ function prevViewerBox(box){
 }
 function flexOf(elm){ return parseFloat(elm.style.flexGrow || getComputedStyle(elm).flexGrow || 1); }
 function wireBarDrag(menu, v){
-  menu.addEventListener('mousedown', function(e){
-    if(e.button!==0) return;
+  menu.addEventListener('pointerdown', function(e){
+    if(e.pointerType==='mouse' && e.button!==0) return;
     if(e.target.closest && e.target.closest('.cmd')) return;  // menu commands keep their click
     e.preventDefault(); mark(v);
     document.body.classList.add('sepdrag');   // page-viewer iframes must not eat the drag
     var srcTrack = v.box.parentElement;
-    var startY = e.clientY, mode = e.altKey ? 'move' : 'resize';
+    var startX = e.clientX, startY = e.clientY, mode = e.altKey ? 'move' : 'resize';
+    // touch has no middle button and no Alt: HOLDING the title bar (~0.6 s
+    // without dragging) lifts the viewer into move mode instead
+    var moved = false;
+    var lp = (e.pointerType!=='mouse') ? setTimeout(function(){ if(!moved && mode!=='move') enterMove(); }, 600) : 0;
     var prevBox = prevViewerBox(v.box);
     var p0 = prevBox ? prevBox.offsetHeight : 0, n0 = v.box.offsetHeight;
     var g0 = prevBox ? flexOf(prevBox) : 0, gn0 = flexOf(v.box);
@@ -349,6 +384,10 @@ function wireBarDrag(menu, v){
       return {track: tr, before: before};
     }
     function move(ev){
+      if(!moved && (Math.abs(ev.clientX-startX)>8 || Math.abs(ev.clientY-startY)>8)){
+        moved = true;
+        if(lp){ clearTimeout(lp); lp = 0; }
+      }
       if(mode==='resize'){
         var over = dropSpot(ev.clientX, ev.clientY).track;
         if(over !== srcTrack){ enterMove(); }            // dragged sideways: lift it
@@ -367,6 +406,7 @@ function wireBarDrag(menu, v){
       }
     }
     function interclick(ev){ if(ev.button===1){ ev.preventDefault(); if(mode!=='move') enterMove(); } }
+    // (touch reaches move mode by the long hold above)
     function cancel(){
       if(prevBox) prevBox.style.flexGrow = gs0;
       v.box.style.flexGrow = gn0s;
@@ -374,13 +414,15 @@ function wireBarDrag(menu, v){
     }
     function key(ev){ if(ev.key==='Escape') cancel(); }
     function cleanup(){
+      if(lp){ clearTimeout(lp); lp = 0; }
       dropline.remove();
       v.box.classList.remove('lifting');
       document.body.classList.remove('movedrag');
       document.body.classList.remove('sepdrag');
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      window.removeEventListener('mousedown', interclick);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      window.removeEventListener('pointerdown', interclick);
       window.removeEventListener('keydown', key);
     }
     function up(ev){
@@ -394,9 +436,10 @@ function wireBarDrag(menu, v){
       }
       cleanup();
     }
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    window.addEventListener('mousedown', interclick);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    window.addEventListener('pointerdown', interclick);
     window.addEventListener('keydown', key);
   });
 }
@@ -477,6 +520,10 @@ function wireFrame(ta, v){
   ta.addEventListener('auxclick', function(e){
     if(e.button===1){ e.preventDefault(); execText(v, lineAtPoint(ta, e.clientY)); }
   });
+  ta.addEventListener('contextmenu', function(e){ // touch: long-press a line runs it (the middle-click of phones)
+    if(!COARSE) return;
+    e.preventDefault(); execText(v, lineAtPoint(ta, e.clientY));
+  });
   ta.addEventListener('keydown', function(e){
     if(e.key==='Enter' && (e.ctrlKey||e.metaKey)){
       e.preventDefault();
@@ -527,6 +574,11 @@ function wireRichText(rt, v){
     e.preventDefault();
     var node = lineNodeAt(rt, e.target);
     if(node) runTextLine(v, node);
+  });
+  rt.addEventListener('contextmenu', function(e){ // touch: long-press a line runs it
+    if(!COARSE) return;
+    var node = lineNodeAt(rt, e.target);
+    if(node){ e.preventDefault(); runTextLine(v, node); }
   });
   rt.addEventListener('keydown', function(e){
     if(e.key==='Enter' && (e.ctrlKey||e.metaKey)){
@@ -781,6 +833,11 @@ function wireRichLog(rl, v){
     var ln = e.target.closest ? e.target.closest('.ln') : null;
     if(ln){ e.preventDefault(); execText(v, ln.textContent.replace(/^[\u25B8! ] ?/,'')); }
   });
+  rl.addEventListener('contextmenu', function(e){ // touch: long-press a log line re-runs it
+    if(!COARSE) return;
+    var ln = e.target.closest ? e.target.closest('.ln') : null;
+    if(ln){ e.preventDefault(); execText(v, ln.textContent.replace(/^[\u25B8! ] ?/,'')); }
+  });
 }
 function logView(){ return viewers.find(function(v){return v.kind==='log';}); }
 function logLine(s, cls){
@@ -802,6 +859,32 @@ function logObj(html){
 }
 function clearLog(){ logView().rich.innerHTML=''; }
 
+/* header \u25b6 Run: execute the selection / caret line of the marked viewer —
+   the keyboardless, touch-friendly form of Ctrl/\u2318+Enter */
+function runMarked(){
+  var v = marked || viewers.find(function(x){ return x.textarea || x.rich; });
+  if(!v){ logOut('open a text viewer first', true); return; }
+  if(v.textarea){
+    var ta = v.textarea;
+    var sel = ta.value.substring(ta.selectionStart, ta.selectionEnd).trim();
+    execText(v, sel || caretLine(ta));
+    return;
+  }
+  if(v.rich){
+    var s = window.getSelection(), node = s && s.anchorNode;
+    if(node){
+      if(node.nodeType===3) node = node.parentNode;
+      var line = node;
+      while(line && line.parentNode!==v.rich) line = line.parentNode;
+      if(line){
+        if(v.kind==='log'){ execText(v, line.textContent.replace(/^[\u25B8! ] ?/,'')); }
+        else runTextLine(v, line);
+        return;
+      }
+    }
+  }
+  logOut('put the caret on a command line in the marked viewer, then \u25b6 Run', true);
+}
 function mark(v){
   marked=v;
   viewers.forEach(function(x){ x.box.classList.toggle('marked', x===v); x.star.textContent=(x===v?'\u2737':''); });

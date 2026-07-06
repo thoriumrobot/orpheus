@@ -9,6 +9,27 @@
          new Live.form variant runs its expression only on the button
        · the page memo is keyed by the DATA generation, so one user's post is
          in every other user's very next render — never stale, never slow -->
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Board — shared, persistent, networked</title>
+<style>
+  :root { --paper:#fbf8f3; --rule:#8e8a7a; --title:#cfcaba; --ink:#1a1320; --accent:#5a1530; --heart:#8a1538; }
+  body { font-family:'Ligos', Georgia, 'Times New Roman', serif; max-width:48rem; margin:3rem auto; padding:0 1rem; line-height:1.6; color:var(--ink); background:var(--paper); }
+  h1 { font-variant:small-caps; letter-spacing:.03em; color:var(--accent); font-size:2.4rem; margin-bottom:0; }
+  .panel { background:var(--paper); border:1.5px solid var(--rule); border-radius:4px; margin:1.4rem 0; box-shadow:0 1px 4px #0001; }
+  .panel > .t { background:var(--title); border-bottom:1.5px solid var(--rule); padding:5px 11px; font-weight:700; font-variant:small-caps; letter-spacing:.04em; color:var(--accent); border-radius:4px 4px 0 0; }
+  .panel > .b { padding:11px 13px; }
+  .lede { margin:.1rem 0 .8rem; color:#473b4a; }
+  table { border-collapse:collapse; width:100%; margin:.4rem 0; }
+  td, th { border-bottom:1px solid #e4dccc; padding:.32rem .6rem; text-align:left; vertical-align:top; }
+  th { color:var(--accent); font-variant:small-caps; letter-spacing:.03em; }
+  code { background:#efe9dd; padding:0 .3rem; border-radius:3px; font-family:'DejaVu Sans Mono', ui-monospace, monospace; font-size:.92em; }
+  .live { display:inline-flex; gap:.4rem; align-items:baseline; flex-wrap:wrap; }
+  .live input.li, .live select.li { font-family:inherit; font-size:.95rem; padding:.2rem .45rem; border:1px solid var(--rule); border-radius:3px; background:#fff; color:var(--ink); }
+  .live input[type=range].li { padding:0; vertical-align:middle; accent-color:var(--accent); }
+  .live .liv { font-variant-numeric:tabular-nums; color:var(--accent); min-width:2.4em; display:inline-block; font-size:.9rem; }
+</style>
 <h1>The Board</h1>
 
 <p class="lede">A message board shared by <b>everyone who can reach this node</b> — every

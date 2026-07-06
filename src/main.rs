@@ -728,9 +728,14 @@ fn build_chess_node(listen: &str, peers: &[String], store: Option<&str>) -> Opti
     Some(serve::Chess::new(node, peers_handle, q))
 }
 
-/// True if we appear to be inside a graphical desktop session (X11 or Wayland).
+/// True if we appear to be inside a graphical desktop session (X11 or Wayland),
+/// or on Android (Termux exposes no DISPLAY, but termux-open-url / `am start`
+/// hand the URL to the system browser).
 fn desktop_session_present() -> bool {
-    std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("TERMUX_VERSION").is_some()
+        || std::env::var_os("ANDROID_ROOT").is_some()
 }
 
 /// Open `url` in a window. Prefers a chromeless "app mode" window from a Chromium-class
@@ -763,6 +768,18 @@ fn open_in_window(url: &str) {
         return;
     }
     if Command::new("gio").arg("open").arg(url).spawn().is_ok() {
+        return;
+    }
+    // Android: Termux's opener, then the bare activity manager (adb shells)
+    if Command::new("termux-open-url").arg(url).spawn().is_ok() {
+        return;
+    }
+    if Command::new("am")
+        .args(["start", "-a", "android.intent.action.VIEW", "-d"])
+        .arg(url)
+        .spawn()
+        .is_ok()
+    {
         return;
     }
     eprintln!("(no browser found to open {} — open it manually)", url);

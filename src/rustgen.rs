@@ -1382,6 +1382,9 @@ pub fn build_log_tail(max_bytes: usize) -> String {
 /// `Err(reason)` explaining why it would run on the interpreter instead (e.g. an unsupported
 /// construct or an arity error). Fast — this is the `compile_to_rust` front-end, no `rustc`.
 pub fn native_check(expr: &str, libs: &[&str]) -> Result<(), String> {
+    if !rustc_available() {
+        return Err("no rustc on this device (the interpreter + JIT is the engine; cached binaries still run)".into());
+    }
     compile_to_rust(expr, libs).map(|_| ())
 }
 
@@ -1639,7 +1642,14 @@ pub fn profile_report(expr: &str, libs: &[&str]) -> Result<String, String> {
                     warm_ns as f64 / 1e6
                 ), warm_ns)
             }
-            None => ("  native      — (outside the native subset; interpreter is the engine)".into(), 0),
+            None => (
+                if rustc_available() {
+                    "  native      — (outside the native subset; interpreter is the engine)".into()
+                } else {
+                    "  native      — (no rustc on this device; the interpreter + JIT is the engine)".to_string()
+                },
+                0,
+            ),
         }
     };
     let threshold = profile_threshold_ns();
@@ -1732,6 +1742,24 @@ fn sanitize_component(s: &str) -> String {
 /// A stable identity for the local toolchain — `rustc` release plus host target triple — derived
 /// once from `rustc -vV`. Compiled binaries are only portable between hosts that share this id, so
 /// the shared store namespaces every artifact under it; a host never pulls a binary it can't run.
+/// Is a `rustc` on PATH? Probed once per process. On devices without a
+/// toolchain — an Android phone running a sideloaded binary, a stripped
+/// container — the native engine stands down cleanly: already-cached binaries
+/// still run, new builds are skipped without an error per call, and the
+/// interpreter + JIT (pure Rust closures, any CPU) answer everything.
+pub fn rustc_available() -> bool {
+    static AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAIL.get_or_init(|| {
+        std::process::Command::new("rustc")
+            .arg("-vV")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
 /// (Builds use `opt-level=N` with no `target-cpu=native`, so codegen stays portable across CPUs of
 /// the same triple.)
 pub fn toolchain_id() -> &'static str {
@@ -1929,6 +1957,9 @@ pub fn run_native_noun_opts(expr: &str, libs: &[&str], force_rebuild: bool) -> O
     let _ = std::fs::create_dir_all(&dir);
     let bin = dir.join(format!("e{}{}", &key[..32], BIN_EXT));
     if force_rebuild || !bin.exists() {
+        if !rustc_available() {
+            return None; // no toolchain on this device: interpreter+JIT answer
+        }
         let src = compile_to_rust(expr, libs).ok()?;
         if !build_native(&src, &bin, force_rebuild) {
             return None;
@@ -2185,6 +2216,9 @@ fn spawn_detached_warm(expr: &str) {
     // matter what code path it takes — the marker travels in its environment.
     if std::env::var_os("ORPHEUS_NO_SPAWN").is_some() {
         return;
+    }
+    if !rustc_available() {
+        return; // no toolchain on this device: a warm build could never land
     }
     static INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let inflight = INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
@@ -2521,7 +2555,13 @@ pub fn cache_dir() -> std::path::PathBuf {
         }
     } else if let Ok(h) = std::env::var("HOME") {
         if !h.is_empty() {
-            return PathBuf::from(h).join(".cache").join("orpheus").join("anvil");
+            let p = PathBuf::from(h).join(".cache").join("orpheus").join("anvil");
+            // On a bare Android shell (adb) HOME is `/` and not writable —
+            // prove the directory can exist before adopting it, else fall
+            // through to the temp dir so caches and the worker registry work.
+            if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+                return p;
+            }
         }
     }
     std::env::temp_dir().join("orpheus-anvil")
