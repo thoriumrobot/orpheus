@@ -32,42 +32,69 @@
 //! says). `newswire::score_wire` does the weighted fusion, with the final ratio computed on
 //! Loom (lib/sentiment.lat `wagg`), keeping the language in the loop.
 
-/// One event class: tag, aggregation-impact multiplier, half-life in days, patterns.
-/// Patterns are lowercase substrings; a match anywhere in the lowercased text tags the item.
+/// One event class: tag, aggregation-impact multiplier, half-life in days, patterns —
+/// and the CAUSAL TRANSMISSION coefficients: how strongly this kind of story impinges
+/// on each market CLASS, whether or not the asset is named. A Fed decision moves bonds
+/// mechanically and crypto through the liquidity/risk-appetite channel; an exchange
+/// hack is a crypto story that the duration desk can ignore; a Treasury auction is the
+/// reverse. Patterns are lowercase substrings; a match anywhere in the lowercased text
+/// tags the item.
 pub struct EventClass {
     pub tag: &'static str,
     pub impact: f64,
     pub half_life_days: f64,
+    pub crypto: f64, // transmission into crypto markets (0..1)
+    pub bonds: f64,  // transmission into the rates/duration market (0..1)
     pub patterns: &'static [&'static str],
 }
 
 /// The taxonomy. Impact and half-life encode the event-factor finding that narrative types
-/// differ in both magnitude and persistence. Values are documented judgments, not fits:
-/// security incidents and fund flows hit hardest; policy/regulation persists longest;
-/// leverage/liquidation stories are violent but stale by the next session; retail buzz is
-/// discounted (impact 0.6) and decays in hours.
+/// differ in both magnitude and persistence. The transmission columns encode the CAUSAL
+/// CHANNELS the macro-finance literature documents: policy rates and inflation data move
+/// bonds directly (the affine term-structure tradition) and risk assets through discount
+/// rates and liquidity; Treasury supply and deficits are a bond story with a debasement
+/// echo in crypto; banking stress bids Treasuries (flight to quality) while crypto trades
+/// both the risk-off and the "not a bank" narrative; geopolitics is a safe-haven bid and
+/// a risk-off hit; crypto-native events (hacks, ETF flows, protocol tech, retail buzz)
+/// barely touch duration. Values are documented judgments, not fits.
 pub const EVENTS: &[EventClass] = &[
-    EventClass { tag: "etf-flow", impact: 1.30, half_life_days: 2.0,
+    EventClass { tag: "etf-flow", impact: 1.30, half_life_days: 2.0, crypto: 0.90, bonds: 0.10,
         patterns: &["etf", "inflow", "outflow", "fund flow", "ibit", "gbtc", "spot fund"] },
-    EventClass { tag: "regulation", impact: 1.20, half_life_days: 7.0,
+    EventClass { tag: "regulation", impact: 1.20, half_life_days: 7.0, crypto: 0.50, bonds: 0.10,
         patterns: &["sec ", "regulat", "lawsuit", "court", " ban ", "banned", "approval",
                     "approve", "license", "mica", "cftc", "legal", "compliance", "sanction"] },
-    EventClass { tag: "hack", impact: 1.40, half_life_days: 5.0,
+    EventClass { tag: "hack", impact: 1.40, half_life_days: 5.0, crypto: 0.85, bonds: 0.05,
         patterns: &["hack", "exploit", "breach", "stolen", "theft", "drained", "vulnerabilit"] },
-    EventClass { tag: "macro-rates", impact: 1.10, half_life_days: 3.0,
-        patterns: &["fed ", "fomc", "rate cut", "rate hike", "inflation", "cpi", "payroll",
-                    "treasury", "yields", "powell", "recession", "jobs report", "dovish", "hawkish"] },
-    EventClass { tag: "adoption", impact: 1.15, half_life_days: 7.0,
+    EventClass { tag: "macro-rates", impact: 1.10, half_life_days: 3.0, crypto: 0.70, bonds: 1.00,
+        patterns: &["fed ", "fomc", "rate cut", "rate hike", "interest rate", "inflation",
+                    "cpi", "pce", "payroll", "yields", "powell", "recession", "jobs report",
+                    "dovish", "hawkish", "central bank", "monetary policy", "rate decision"] },
+    EventClass { tag: "fiscal-supply", impact: 1.10, half_life_days: 5.0, crypto: 0.35, bonds: 1.00,
+        patterns: &["treasury auction", "auction", "issuance", "deficit", "debt ceiling",
+                    "downgrade", "fiscal", "government shutdown", "debt limit", "refunding",
+                    "sovereign debt", "credit rating"] },
+    EventClass { tag: "banking-credit", impact: 1.25, half_life_days: 4.0, crypto: 0.55, bonds: 0.85,
+        patterns: &["bank failure", "bank run", "bailout", "credit crunch", "credit stress",
+                    "contagion", "insolven", "systemic", "lender of last resort", "deposit flight"] },
+    EventClass { tag: "fx-liquidity", impact: 1.05, half_life_days: 3.0, crypto: 0.75, bonds: 0.70,
+        patterns: &["dollar index", "dxy", "quantitative easing", "quantitative tightening",
+                    "qe ", " qt ", "balance sheet", "money supply", "m2 ", "liquidity injection",
+                    "reverse repo", "stablecoin"] },
+    EventClass { tag: "equity-risk", impact: 1.10, half_life_days: 1.5, crypto: 0.65, bonds: 0.60,
+        patterns: &["stocks plunge", "stocks rally", "s&p", "nasdaq", "vix", "risk-off",
+                    "risk appetite", "equity selloff", "stock market crash", "wall street"] },
+    EventClass { tag: "adoption", impact: 1.15, half_life_days: 7.0, crypto: 0.70, bonds: 0.05,
         patterns: &["adopt", "institutional", "blackrock", "fidelity", "acquires", "accumul",
                     "strategy buys", "partnership", "integrat", "payment", "reserve"] },
-    EventClass { tag: "tech", impact: 0.90, half_life_days: 7.0,
+    EventClass { tag: "tech", impact: 0.90, half_life_days: 7.0, crypto: 0.60, bonds: 0.00,
         patterns: &["upgrade", "hard fork", "halving", "protocol", "mainnet", "lightning", "scaling"] },
-    EventClass { tag: "market-structure", impact: 1.20, half_life_days: 1.0,
+    EventClass { tag: "market-structure", impact: 1.20, half_life_days: 1.0, crypto: 0.70, bonds: 0.25,
         patterns: &["liquidat", "leverage", "margin call", "futures", "open interest",
                     "short squeeze", "funding rate", "whale"] },
-    EventClass { tag: "geopolitics", impact: 1.00, half_life_days: 2.0,
-        patterns: &["war", "military", "strike", "geopolit", "conflict", "ceasefire", "drone"] },
-    EventClass { tag: "retail-buzz", impact: 0.60, half_life_days: 0.5,
+    EventClass { tag: "geopolitics", impact: 1.00, half_life_days: 2.0, crypto: 0.60, bonds: 0.75,
+        patterns: &[" war ", " wars ", "warfare", "wartime", "warplane", "military", "strike",
+                    "geopolit", "conflict", "ceasefire", "drone", "invasion", "missile"] },
+    EventClass { tag: "retail-buzz", impact: 0.60, half_life_days: 0.5, crypto: 0.50, bonds: 0.00,
         patterns: &["moon", "hodl", "fomo", "diamond hands", "pump", "meme", "lambo", "ath "] },
 ];
 
@@ -87,6 +114,33 @@ pub fn classify(text: &str, default_hl: f64) -> (Vec<&'static str>, f64, f64) {
         }
     }
     (tags, impact.unwrap_or(1.0), hl)
+}
+
+/// The market CLASSES the transmission map speaks about.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MarketClass {
+    Crypto,
+    Bonds,
+}
+
+/// The causal transmission of a text into a market class: the maximum transmission
+/// coefficient over the event classes the text matches (0.0 when no event matches —
+/// causal routing only speaks when a recognized narrative type is present; direct
+/// asset mentions are the caller's job). This is what lets "Fed holds rates steady"
+/// reach the bitcoin advisor and "Treasury auction tails badly" reach the bond desk
+/// without either headline naming the asset.
+pub fn causal(text: &str, class: MarketClass) -> f64 {
+    let low = format!(" {} ", text.to_lowercase());
+    let mut t = 0.0f64;
+    for ev in EVENTS {
+        if ev.patterns.iter().any(|p| low.contains(p)) {
+            t = t.max(match class {
+                MarketClass::Crypto => ev.crypto,
+                MarketClass::Bonds => ev.bonds,
+            });
+        }
+    }
+    t
 }
 
 // ===========================================================================
@@ -304,6 +358,42 @@ mod tests {
         assert!(tags.contains(&"hack"));
         assert!((impact - 1.40).abs() < 1e-9);
         assert!((hl - 5.0).abs() < 1e-9, "a hack outlives social chatter's half-day default");
+    }
+
+    #[test]
+    fn causal_transmission_routes_without_naming_the_asset() {
+        use MarketClass::*;
+        // a Fed decision names neither asset: mechanical for bonds, liquidity channel for crypto
+        let fed = "Fed holds rates steady, signals patience on inflation";
+        assert!((causal(fed, Bonds) - 1.0).abs() < 1e-9);
+        assert!((causal(fed, Crypto) - 0.7).abs() < 1e-9);
+        // Treasury supply is a bond story with only a debasement echo in crypto
+        let auction = "Weak treasury auction sends a warning on deficit financing";
+        assert!((causal(auction, Bonds) - 1.0).abs() < 1e-9);
+        assert!(causal(auction, Crypto) < 0.5);
+        // an exchange hack is crypto-only; the duration desk drops it
+        let hack = "Major exchange hacked, $40M drained";
+        assert!(causal(hack, Crypto) > 0.8);
+        assert!(causal(hack, Bonds) < 0.1);
+        // banking stress: flight-to-quality bid for bonds, mixed-but-real crypto channel
+        let bank = "Regional bank failure sparks contagion fears";
+        assert!(causal(bank, Bonds) > 0.8);
+        assert!(causal(bank, Crypto) > 0.5);
+        // geopolitics reaches both: safe haven vs risk-off
+        let war = "Drone strikes escalate the conflict overnight";
+        assert!(causal(war, Bonds) > 0.7 && causal(war, Crypto) > 0.5);
+        // no recognized narrative: causal routing stays silent
+        assert_eq!(causal("local team wins the cup", Bonds), 0.0);
+        assert_eq!(causal("local team wins the cup", Crypto), 0.0);
+    }
+
+    #[test]
+    fn crypto_native_events_do_not_reach_the_bond_desk() {
+        use MarketClass::*;
+        for text in ["protocol upgrade ships on mainnet", "diamond hands, to the moon"] {
+            assert!(causal(text, Bonds) < 0.05, "{:?} leaked to bonds", text);
+            assert!(causal(text, Crypto) > 0.4);
+        }
     }
 
     #[test]

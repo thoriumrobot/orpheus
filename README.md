@@ -496,7 +496,10 @@ TA composite (60%) with **event-aware news sentiment** (40%) — fed by the NEWS
 engagement, relevance, event impact, and recency, scored by the trained classifier +
 LM lexicon and, once `latte news train` has enough wire history, Ke–Kelly–Xiu's
 return-supervised **SESTM** (docs/newswire.md) — sized by fractional Kelly × volatility
-targeting. `lib/nn.lat` now spans the
+targeting. News routes CAUSALLY (an event-transmission map: Fed decisions and Treasury
+auctions reach the bond desk without saying "bond"; hacks and moon-posts never do), and
+the models' VALUES stay fresh on the same TTL discipline — including live FRED Treasury
+yields + M2 for `latte trade --market bonds` (`latte fetch --bonds`). `lib/nn.lat` now spans the
 modern architectures — sigmoid/softmax/layernorm/conv1d, single-head **self-attention**,
 and seeded **transformer blocks** — all as composable data. Charts embed into GUI-written
 reports as ```` ```chart ```` blocks.

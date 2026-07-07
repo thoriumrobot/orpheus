@@ -54,8 +54,11 @@
 :: enough observations for a walk-forward split.  This is a TEACHING/DEMO series
 :: that reproduces the documented shape of the cycle — NOT a verified tick series.
 :: The live, full-resolution source is FRED: DGS2 / DGS5 / DGS10 (daily yields)
-:: and M2SL (money stock); a `fetch`-style refresh would splice those on top, the
+:: and M2SL (money stock) — and the host NOW FETCHES IT (src/marketdata.rs,
+:: `bond_series`: keyless fredgraph CSVs, month-ended, M2 as YoY growth, cached
+:: with a six-hour TTL) and calls the `_on` arms below with the live series, the
 :: way lib/fin.lat splices live Coin Metrics BTC data over its embedded fallback.
+:: The anchors remain the no-network fallback, so the model always runs.
 :: ===========================================================================
 import std
 import num
@@ -201,8 +204,11 @@ core finbond
   ::   xs = feature rows, ys = 1 if NEXT month's bond return > 0 else 0,
   ::   r1 = that next-month bond return (%), for the equity curve.
   :: returns [ xs [ ys [ r1 0 ] ] ].
-  build = fn [_] ->
-    let v2 = (y2 0) in let v5 = (y5 0) in let v10 = (y10 0) in let vm = (m2 0) in
+  :: `_on` variants take the four series as ARGUMENTS — the host fetches fresh
+  :: FRED yields/M2 (src/marketdata.rs bond_series) and calls these with live
+  :: data, so predictions run on TODAY'S curve; the plain arms delegate to the
+  :: embedded teaching anchors, so everything that always worked still does.
+  build_on = fn [v2 v5 v10 vm] ->
     let vtr = (trend v10) in
     let n = (len v10) in
     loop with [t = 3, fx = 0, fy = 0, fr = 0] :
@@ -213,6 +219,7 @@ core finbond
         let y  = if (nlt [0 0] rn) then 1 else 0 in
         again(+(t), [ x fx ], [ y fy ], [ rn fr ])
     end
+  build = fn [_] -> (build_on (y2 0) (y5 0) (y10 0) (m2 0))
 
   :: ---- the end-to-end pipeline --------------------------------------------
   :: standardize on the TRAIN rows only, fit the logistic model (fin.lr_train),
@@ -257,8 +264,8 @@ core finbond
   :: per-factor contributions wᵢ·xᵢ (standardized units, signed fixed-point).
   :: Returns a 0-terminated list of [factor-index contribution], largest
   :: absolute contribution first — the advisor prints the top of it with names.
-  bdrivers = fn [iters split] ->
-    let ds = (build 0) in
+  bdrivers_on = fn [v2 v5 v10 vm iters split] ->
+    let ds = (build_on v2 v5 v10 vm) in
     let xraw = (head ds) in
     let ys   = (head (tail ds)) in
     let stats = (colstats (transpose (take split xraw))) in
@@ -272,6 +279,7 @@ core finbond
                                [ [ k (nmul (head pw) (head px)) ] acc ])
                   end in
     (sortby (fn [a b] -> (gte (tail (tail a)) (tail (tail b)))) contrib)
+  bdrivers = fn [iters split] -> (bdrivers_on (y2 0) (y5 0) (y10 0) (m2 0) iters split)
 
   :: ---- ablation: the SAME model WITHOUT the money-supply block ----------
   :: identical pipeline but the feature row drops the two money features
@@ -330,16 +338,17 @@ core finbond
   :: sample std of the r1 series × √12 (3.4641 in fixed-point). The advisor
   :: uses it for volatility-aware Kelly sizing, the same discipline the
   :: crypto advisor gets from its HAR-RV model.
-  bvol = fn [_] ->
-    let r1 = (head (tail (tail (build 0)))) in
+  bvol_on = fn [v2 v5 v10 vm] ->
+    let r1 = (head (tail (tail (build_on v2 v5 v10 vm)))) in
     (ndiv (nmul (st_stds r1) (nint 34641)) (nint 10000))
+  bvol = fn [_] -> (bvol_on (y2 0) (y5 0) (y10 0) (m2 0))
 
   :: ---- ADVISORY: edge + the model's CURRENT directional call -----------------
   :: Train once (train-only standardization), then ALSO predict the most recent month's
   :: direction out of sample — the live lean.  Returns [ train test baseline signal ],
   :: signal = 1 if the model expects the bond price UP next (yields down), else 0.
-  badvice = fn [iters split] ->
-    let ds = (build 0) in
+  badvice_on = fn [v2 v5 v10 vm iters split] ->
+    let ds = (build_on v2 v5 v10 vm) in
     let xraw = (head ds), ys = (head (tail ds)), n = (len (head ds)) in
     let stats = (colstats (transpose (take split xraw))) in
     let xs = (map (fn [r] -> (zrow stats r)) xraw) in
@@ -349,6 +358,7 @@ core finbond
     [ (lr_acc w b (drop split xs) (drop split ys))
     [ (base_acc (drop split ys))
     [ (lr_pred w b (nth xs (sub n 1))) 0 ] ] ] ]
+  badvice = fn [iters split] -> (badvice_on (y2 0) (y5 0) (y10 0) (m2 0) iters split)
   breport = fn [_] -> (badvice 4000 150)
 
   :: ---- BOND-DESK TEXT-FRAME FRONT END — [%html cord] -----------------------

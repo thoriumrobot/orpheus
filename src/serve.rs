@@ -1373,7 +1373,8 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
         ("GET", "/api/news") => {
             let market = query_param(&req.query, "market").unwrap_or_else(|| "btc".into());
             let force = req.query.split('&').any(|p| p == "fresh=1");
-            let (press, pagg, social, sagg, note) = crate::newswire::market_wire(&market, force, false);
+            let bond = market == "bonds"; // the duration desk's polarity axis
+            let (press, pagg, social, sagg, note) = crate::newswire::market_wire(&market, force, bond);
             let mut json = String::from("{");
             let item_json = |r: &crate::newswire::ScoredItem, kind: &str| {
                 let labels: Vec<String> = r.labels.iter().map(|l| format!("\"{}\"", l)).collect();

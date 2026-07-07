@@ -58,8 +58,8 @@ weight = trust x engagement x relevance x event-impact x 0.5^(age / half-life)
 - **engagement** — social items scale by `1 + ln(1+upvotes)/8`, capped at 2: a
   thousand-upvote thread is real evidence of attention, but virality cannot do more than
   double a post, so the crowd never swamps the press.
-- **relevance** — direct mention of the market 1.0; macro context (Fed, CPI, ETF, …) 0.6;
-  anything else drops.
+- **relevance** — CAUSAL, not lexical (see the next section): direct mention 1.0, the
+  asset class 0.8, a sibling coin 0.4, else the event-transmission map; below 0.2 drops.
 - **event impact and half-life** — see below.
 - **recency** — press headlines decay with the advisor's long-standing 3-day half-life;
   social chatter with HALF A DAY (buzz goes stale an order of magnitude faster than
@@ -74,6 +74,59 @@ Inside the advisors the news leg is composed **press 60% · documents 25% · soc
 The bond advisor reads the same wire through the hawk/dove bond scorer (risk-off inverts,
 `macro-rates` stories matter most) at wire 45% / documents 25%, with a fresh `--news`
 document at 60% when supplied.
+
+## Causal routing: the transmission map
+
+"Relevant to a market" does not mean "contains the market's name". A Fed decision
+never says *bitcoin*; a Treasury auction never says *bond*; both move their markets
+anyway, through channels macro-finance has documented for decades. Every event class
+in the taxonomy therefore carries two TRANSMISSION coefficients — how strongly that
+kind of story impinges on **crypto** and on the **rates/duration** market:
+
+| event class      | crypto | bonds | the channel |
+|------------------|-------:|------:|-------------|
+| macro-rates      | 0.70   | 1.00  | policy rates: mechanical for duration, discount-rate/liquidity for risk assets |
+| fiscal-supply    | 0.35   | 1.00  | auctions, deficits, issuance: a bond story with a debasement echo in crypto |
+| banking-credit   | 0.55   | 0.85  | flight to quality bids Treasuries; crypto trades risk-off *and* "not a bank" |
+| fx-liquidity     | 0.75   | 0.70  | dollar, QE/QT, money supply: the shared liquidity tide |
+| equity-risk      | 0.65   | 0.60  | risk appetite moves both, in opposite directions |
+| geopolitics      | 0.60   | 0.75  | safe-haven bid vs risk-off hit |
+| etf-flow         | 0.90   | 0.10  | fund flows are the marginal crypto buyer |
+| hack             | 0.85   | 0.05  | crypto-native; the duration desk drops it |
+| regulation       | 0.50   | 0.10  | crypto-legal narrative |
+| adoption         | 0.70   | 0.05  | crypto-native |
+| market-structure | 0.70   | 0.25  | liquidations/leverage, mostly crypto plumbing |
+| tech             | 0.60   | 0.00  | protocol stories |
+| retail-buzz      | 0.50   | 0.00  | moon-boys do not move Treasuries |
+
+An item's relevance to a market is the STRONGEST of: the asset named (1.0), its
+sector named (crypto-wide terms, 0.8, for crypto markets), a sibling coin named
+(0.4 — diluted evidence), or the transmission of any matched event class. Anything
+under 0.2 never reaches the advisor. So `latte news pulse --market bonds` shows the
+auction, the bank failure, the FOMC decision, and the risk-off tape — scored on the
+hawk/dove bond axis (risk-off = Treasury bid) — while the ETF flows, the exchange
+hack, and the moon posts stay on the crypto desk. Patterns are word-bounded where
+substrings would lie ("war" must not fire on *warning*, "defi" not on *deficit*).
+
+## The VALUES wire: fresh numbers for the models
+
+Sentiment is half the input; the models also need fresh PRICES. The same TTL
+discipline now covers the numbers (`ORPHEUS_DATA_AUTO=0` disables; six-hour TTL —
+the series are daily):
+
+- **Crypto** — any consumer of the cached Coin Metrics series (`latte trade`, `ta`,
+  `chart`, the GUI) refreshes it automatically when it is older than the TTL; the
+  embedded series remains the floor. `--live` still forces.
+- **Bonds** — the model's data source finally goes live, exactly as finbond.lat's
+  header always promised: FRED's keyless CSV endpoints for **DGS2 / DGS5 / DGS10**
+  (daily constant-maturity Treasury yields, downsampled to month-end) and **M2SL**
+  (money stock, turned into year-over-year growth), aligned monthly from 2007-01
+  and cached (`latte fetch --bonds` forces; the TTL refreshes it otherwise). The
+  host passes the four series to the model's `_on` arms (`badvice_on`,
+  `bdrivers_on`, `bvol_on` — the embedded arms delegate to the same code), so
+  `latte trade --market bonds` trains on and PREDICTS FROM today's actual curve.
+  The report's `data:` line says which series served. No cache, no network? The
+  embedded teaching anchors keep the model running, and the report says so.
 
 ## Past plain sentiment: events + SESTM
 
@@ -115,7 +168,8 @@ Everything that read news before now reads the wire, weights included:
 - `latte trade [--market SYM]` — the press leg is the live wire when it has relevant
   items (an explicit `--news FILE` still outranks it; the embedded corpus is the fallback),
   and a SOCIAL PULSE block appears when the wire has social items.
-- `latte trade --market bonds` — the wire scored on the hawk/dove axis.
+- `latte trade --market bonds` — the wire routed through the BONDS causal universe and
+  scored on the hawk/dove axis, the model trained on live FRED yields when cached.
 - `GET /api/news[?market=SYM][&fresh=1]` — the scored wire as JSON (kind, labels, weight,
   press/social/combined aggregates), embedded-corpus fallback so it always answers.
 - `POST /api/trade` (the `/trade` GUI page) — renders the wire's press table, the wire

@@ -86,6 +86,13 @@ pub fn default_sources() -> Vec<Source> {
         s("bitcoinmagazine", Kind::Press, Format::Rss, 0.80, "btc", "https://bitcoinmagazine.com/feed"),
         s("cryptoslate", Kind::Press, Format::Rss, 0.75, "*", "https://cryptoslate.com/feed"),
         s("newsbtc", Kind::Press, Format::Rss, 0.70, "*", "https://www.newsbtc.com/feed"),
+        // the macro/rates channel: the Fed's own press feed and a broad economy desk —
+        // this is where the bond advisor's causal stories (and crypto's liquidity
+        // stories) come from, since crypto outlets rarely cover an auction
+        s("federalreserve", Kind::Press, Format::Rss, 0.95, "*",
+          "https://www.federalreserve.gov/feeds/press_all.xml"),
+        s("cnbc-economy", Kind::Press, Format::Rss, 0.80, "*",
+          "https://www.cnbc.com/id/20910258/device/rss/rss.html"),
         s("r/Bitcoin", Kind::Social, Format::RedditJson, 0.50, "btc",
           "https://www.reddit.com/r/Bitcoin/new.json?limit=40"),
         s("r/CryptoCurrency", Kind::Social, Format::RedditJson, 0.50, "*",
@@ -615,28 +622,72 @@ pub fn ensure_fresh(ttl_secs: i64, force: bool) -> String {
 fn market_terms(market: &str) -> Vec<&'static str> {
     match market {
         "btc" => vec!["bitcoin", "btc"],
-        "eth" => vec!["ethereum", " eth"],
+        "eth" => vec!["ethereum", " eth "],
         "ltc" => vec!["litecoin"],
         "xrp" => vec!["xrp", "ripple"],
-        "ada" => vec!["cardano", " ada"],
+        "ada" => vec!["cardano", " ada "],
         "doge" => vec!["dogecoin", "doge"],
-        "sol" => vec!["solana", " sol"],
+        "sol" => vec!["solana", " sol "],
+        "bonds" => vec!["treasur", "bond ", "bonds", "t-note", "t-bill", "10-year", "2-year",
+                        "fixed income", "duration", "yield curve", "gilt", "bund"],
         _ => vec![],
     }
 }
 
-/// Macro context relevant to every risk asset (relevance 0.6).
-const MACRO_TERMS: &[&str] = &["fed ", "fomc", "rate", "inflation", "cpi", "recession", "crypto", "treasury", "etf"];
+/// Which transmission column a market reads.
+fn market_class(market: &str) -> crate::events::MarketClass {
+    match market {
+        "bonds" => crate::events::MarketClass::Bonds,
+        _ => crate::events::MarketClass::Crypto,
+    }
+}
 
+/// Sector terms: not this asset by name, but its asset class — crypto-wide news impinges
+/// on every crypto market (BTC is ~half the asset class and correlations are high).
+const CRYPTO_SECTOR: &[&str] = &["crypto", "blockchain", "digital asset", "altcoin", "defi ",
+                                 "stablecoin", "token", "web3", "mining", "miner"];
+
+/// Below this, an item does not reach a market's advisor at all.
+const RELEVANCE_FLOOR: f64 = 0.2;
+
+/// The relevance of a headline to a market — CAUSAL, not lexical. The question is not
+/// "does the text say bitcoin/bond" but "does this kind of story move that market", and
+/// it is answered in tiers, taking the strongest:
+///   1.0  the asset is named (market_terms)
+///   0.8  its sector is (crypto-wide news for a crypto market)
+///   0.4  a sibling asset is named (cross-crypto spillover: correlations are high, but a
+///        story about one coin is diluted evidence about another)
+///   else the EVENT TRANSMISSION map (events::causal): a Fed decision reaches bonds at
+///        1.0 and crypto at 0.7 without naming either; a Treasury auction reaches bonds;
+///        an exchange hack reaches crypto and not the duration desk. Zero when no
+///        recognized narrative is present.
+/// Anything under RELEVANCE_FLOOR drops.
 fn relevance(headline: &str, market: &str) -> f64 {
     let low = format!(" {} ", headline.to_lowercase());
     if market_terms(market).iter().any(|t| low.contains(t)) {
         return 1.0;
     }
-    if MACRO_TERMS.iter().any(|t| low.contains(t)) {
-        return 0.6;
+    let class = market_class(market);
+    let mut r = crate::events::causal(headline, class);
+    if class == crate::events::MarketClass::Crypto {
+        if CRYPTO_SECTOR.iter().any(|t| low.contains(t)) {
+            r = r.max(0.8);
+        } else {
+            // sibling-coin spillover: another crypto named, this one not
+            const SIBLINGS: &[&str] = &["btc", "eth", "ltc", "xrp", "ada", "doge", "sol"];
+            let named_other = SIBLINGS.iter().any(|s| {
+                *s != market && market_terms(s).iter().any(|t| low.contains(t))
+            });
+            if named_other {
+                r = r.max(0.4);
+            }
+        }
     }
-    0.0
+    if r < RELEVANCE_FLOOR {
+        0.0
+    } else {
+        r
+    }
 }
 
 /// One scored wire item as a consumer sees it.
@@ -853,18 +904,23 @@ fn train_report(market: &str) {
 
 /// `latte news [pulse]` — the wire, scored for a market, with the evidence shown.
 fn pulse_report(market: &str, force: bool) {
-    let (press, pagg, social, sagg, note) = market_wire(market, force, false);
+    let bond = market == "bonds"; // the duration desk scores on the hawk/dove axis
+    let (press, pagg, social, sagg, note) = market_wire(market, force, bond);
     println!("newswire — {} ({})\n", market, note);
     if press.is_empty() && social.is_empty() {
         println!("  the wire has nothing relevant yet — `latte news fetch` to pull the sources,");
         println!("  or check `latte news sources`. The advisors fall back to the embedded corpus.");
         return;
     }
-    let model = events::Sestm::load(&events::model_path(market));
-    match &model {
-        Some(m) if m.trained_on >= events::MIN_TRAIN =>
-            println!("  scoring: 0.5*SESTM (trained on {} items) + 0.5*(classifier+lexicon), event-conditioned", m.trained_on),
-        _ => println!("  scoring: trained classifier + LM lexicon, event-conditioned (SESTM not trained yet — `latte news train`)"),
+    if bond {
+        println!("  scoring: hawk/dove bond axis (risk-off = Treasury bid), event-conditioned");
+    } else {
+        let model = events::Sestm::load(&events::model_path(market));
+        match &model {
+            Some(m) if m.trained_on >= events::MIN_TRAIN =>
+                println!("  scoring: 0.5*SESTM (trained on {} items) + 0.5*(classifier+lexicon), event-conditioned", m.trained_on),
+            _ => println!("  scoring: trained classifier + LM lexicon, event-conditioned (SESTM not trained yet — `latte news train`)"),
+        }
     }
     let show = |rows: &[ScoredItem], label: &str, agg: f64| {
         if rows.is_empty() {
@@ -976,10 +1032,33 @@ mod tests {
     }
 
     #[test]
-    fn relevance_separates_direct_macro_and_noise() {
+    fn relevance_is_causal_not_lexical() {
+        // direct mention: full weight
         assert_eq!(relevance("Bitcoin holds $61K", "btc"), 1.0);
-        assert_eq!(relevance("Fed signals rate cuts ahead", "btc"), 0.6);
+        assert_eq!(relevance("Treasury yields jump after the auction", "bonds"), 1.0);
+        // causal transmission WITHOUT the asset named: a Fed decision reaches both desks
+        let fed = "Fed holds rates steady, signals patience";
+        assert!((relevance(fed, "bonds") - 1.0).abs() < 1e-9);
+        assert!((relevance(fed, "btc") - 0.7).abs() < 1e-9);
+        // an auction/deficit story reaches bonds, not bitcoin (below the floor's echo)
+        let auction = "Weak auction raises deficit financing concerns";
+        assert!((relevance(auction, "bonds") - 1.0).abs() < 1e-9);
+        assert!(relevance(auction, "btc") <= 0.35, "auction->btc = {}", relevance(auction, "btc"));
+        // a hack reaches crypto and is DROPPED by the bond desk
+        let hack = "Major exchange hacked, $40M drained";
+        assert!(relevance(hack, "btc") > 0.8);
+        assert_eq!(relevance(hack, "bonds"), 0.0);
+        // sector term without the asset name
+        assert!((relevance("Stablecoin rules clear the committee", "btc") - 0.8).abs() < 1e-9);
+        // sibling spillover: a story about another coin, with no recognized event class,
+        // is diluted evidence about btc (the 0.4 floor)…
+        assert!((relevance("Solana network congestion eases", "btc") - 0.4).abs() < 1e-9);
+        // …but the event transmission is never reduced by the sibling naming: an
+        // Ethereum protocol story still reaches btc at the tech channel's strength
+        assert!((relevance("Ethereum upgrade ships on schedule", "btc") - 0.6).abs() < 1e-9);
+        // no narrative, no mention: dropped everywhere
         assert_eq!(relevance("Local team wins the cup", "btc"), 0.0);
+        assert_eq!(relevance("Local team wins the cup", "bonds"), 0.0);
     }
 
     #[test]

@@ -441,11 +441,22 @@ latte eval "(ablate 0)"     # -> [ test_with_M2  test_without_M2  baseline ]
 latte trade --market bonds  # the advisor: model edge + regime + news + sizing
 ```
 
+The model's DATA goes live when a FRED fetch is cached (`latte fetch --bonds`,
+or the six-hour TTL auto-refresh): DGS2/5/10 month-ended + M2SL as YoY growth,
+passed to the `_on` arms (`badvice_on`, `bdrivers_on`, `bvol_on`) so training
+and the current-month prediction run on today's actual curve — the report's
+`data:` line names the source, and the embedded teaching anchors remain the
+no-network fallback.
+
 The **bond advisor** fuses the trained model (60%) with **bond-scored news**
-(40%): the same sentiment engine and the same `news/` document stream the crypto
-advisor reads, through `bond_polarity` — a hawkish/dovish policy lexicon fused
-with the general financial score entering *negated*, because risk-off news is a
-Treasury bid and "stocks rally on strong growth" is bearish for bond prices.
+(40%): the newswire routed through the BONDS causal universe (a Fed decision, a
+Treasury auction, a bank failure, or a risk-off tape reaches this desk whether
+or not a headline says "bond" — and hacks, ETF flows, and moon-posts do not; see
+docs/newswire.md, "Causal routing"), plus the same `news/` document stream the
+crypto advisor reads, all through `bond_polarity` — a hawkish/dovish policy
+lexicon fused with the general financial score entering *negated*, because
+risk-off news is a Treasury bid and "stocks rally on strong growth" is bearish
+for bond prices.
 `--news FILE` scores a fresh report directly; `--sentiment S` overrides the
 aggregate. Sizing is fractional Kelly on the measured edge, **volatility-
 targeted** against the model's own return series (`bvol`), the same discipline

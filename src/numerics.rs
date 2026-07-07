@@ -1593,22 +1593,58 @@ pub(crate) fn eval_native_or_interp(expr: &str, libs: &[&str]) -> Result<N, Stri
 pub fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Option<f64>, news_text: Option<&str>) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let _ = writeln!(out, "trade - bond-market advisor: the monetary-policy duration model + the money-supply regime\n");
+    // (the report header is written by advice_text, the single entry point)
     let libs = latte::all_libs();
     let refs: Vec<&str> = libs.iter().map(|s| s.as_str()).collect();
     // Train once and read the live regime in a single evaluation:
     //   [ train_mag test_mag base_mag signal us_m2 cross_avg n_easing vol_mag ]
     // accuracies are fixed-point fractions x1000; m2/avg are hundredths of a percent;
     // vol is the annualized bond-return volatility x1000 (finbond.bvol).
-    let expr = "(let r=(breport 0), md=(fm_load 0), dv=(bdrivers 4000 150) in \
+    //
+    // THE VALUES WIRE: when live FRED data is cached (DGS2/5/10 month-ended + M2 YoY,
+    // auto-refreshed on a six-hour TTL — src/marketdata.rs `bond_series`), the four
+    // series are passed as literals to the model's `_on` arms, so training AND the
+    // current-month prediction run on today's actual curve. No data, no network?
+    // The embedded teaching anchors serve, exactly as before, and the report says so.
+    let live_bonds = crate::marketdata::bond_series(false);
+    let (series_note, model_calls) = match &live_bonds {
+        Some((table, note)) => {
+            // hundredths (signed) -> signed fixed-point x1000 literal, e.g. 430 -> [0 4300]
+            let sf = |h: i64| format!("[{} {}]", if h < 0 { 1 } else { 0 }, h.abs() * 10);
+            let lit = |idx: usize| {
+                table.iter().rev().fold(String::from("0"), |acc, (_, v)| {
+                    format!("[ {} {} ]", sf(v[idx]), acc)
+                })
+            };
+            // train on the same 150 months the embedded pipeline uses; the live table
+            // (2007-01 onward) has the same monthly grid, just real observations
+            (
+                note.clone(),
+                format!(
+                    "v2={}, v5={}, v10={}, vm={}, r=(badvice_on v2 v5 v10 vm 4000 150), \
+                     dv=(bdrivers_on v2 v5 v10 vm 4000 150), vv=(bvol_on v2 v5 v10 vm)",
+                    lit(0), lit(1), lit(2), lit(3)
+                ),
+            )
+        }
+        None => (
+            "embedded teaching anchors (run `latte fetch --bonds` for live FRED)".to_string(),
+            "r=(breport 0), dv=(bdrivers 4000 150), vv=(bvol 0)".to_string(),
+        ),
+    };
+    let expr = format!(
+        "(let {}, md=(fm_load 0) in \
         [ (tail (head r)) [ (tail (head (tail r))) [ (tail (head (tail (tail r)))) \
         [ (head (tail (tail (tail r)))) \
         [ (db_field (tail (fm_bank md %us)) 2) [ (fm_avg md) \
-        [ (db_count (fm_easing md (fm_avg md))) [ (tail (bvol 0)) \
+        [ (db_count (fm_easing md (fm_avg md))) [ (tail vv) \
         [ (head (nth dv 0)) [ (head (tail (nth dv 0))) [ (tail (tail (nth dv 0))) \
         [ (head (nth dv 1)) [ (head (tail (nth dv 1))) [ (tail (tail (nth dv 1))) \
         [ (head (nth dv 2)) [ (head (tail (nth dv 2))) [ (tail (tail (nth dv 2))) 0 \
-        ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ])";
+        ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ] ])",
+        model_calls
+    );
+    let expr = expr.as_str();
     let vals = match eval_native_or_interp(expr, &refs) {
         Ok(n) => flat_atoms(&n),
         Err(e) => { let _ = writeln!(out, "  bond model error: {}", e); return out; }
@@ -1625,6 +1661,7 @@ pub fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Opt
     let has_edge = test > base;
 
     let _ = writeln!(out, "  market            : US Treasuries (10y constant maturity)");
+    let _ = writeln!(out, "  data              : {}", series_note);
     let _ = writeln!(out, "  -- model edge (lib/finbond.lat, trained through the db->tensor bridge) --");
     let _ = writeln!(out, "    features          : level, slope, curvature, yield-momentum, M2-growth,");
     let _ = writeln!(out, "                        carry+roll-down, forward-rate momentum, M2 acceleration,");
@@ -1666,12 +1703,13 @@ pub fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Opt
     let direct = news_text.map(|t| crate::sentiment::score_document_bond(t).0);
     let docs_pair = docs_stream_bond();
     let stream = docs_pair.as_ref().map(|(_, agg)| *agg);
-    // the LIVE WIRE, bond-scored: macro/rates stories carry their event weights (the
-    // macro-rates class matters most here), press and social both, through bond_polarity.
-    // "btc" names the wire's default relevance universe — macro terms score 0.6 there,
-    // which is exactly the slice the duration desk wants.
+    // the LIVE WIRE, scored for the BONDS universe: causal routing (events::causal) means
+    // Fed decisions, CPI prints, Treasury auctions, banking stress, and geopolitics reach
+    // this desk whether or not a headline says "bond" — and crypto-native stories (hacks,
+    // protocol tech, retail buzz) do not. Polarity runs through bond_polarity (hawk/dove;
+    // risk-off = Treasury bid).
     let (wire_press_b, wire_pagg_b, wire_social_b, wire_sagg_b, wire_note_b) =
-        crate::newswire::market_wire("btc", false, true);
+        crate::newswire::market_wire("bonds", false, true);
     let wire_leg: Option<f64> = if wire_press_b.is_empty() && wire_social_b.is_empty() {
         None
     } else if wire_social_b.is_empty() {
@@ -1972,6 +2010,19 @@ pub fn cmd_fetch(args: &[String]) {
                 i += 1;
             }
             "--all" => all = true,
+            "--bonds" => {
+                // the bond model's VALUES: FRED DGS2/5/10 + M2SL, month-ended, cached
+                println!("fetch — FRED bond-market series (DGS2, DGS5, DGS10, M2SL)\n");
+                match crate::marketdata::fetch_live_bonds() {
+                    Ok(t) => {
+                        let last = t.last().map(|(m, _)| m.clone()).unwrap_or_default();
+                        println!("  cached {} aligned monthly rows (2007-01 .. {})", t.len(), last);
+                        println!("  `latte trade --market bonds` now predicts on this curve.");
+                    }
+                    Err(e) => println!("  {} — the embedded teaching anchors keep serving", e),
+                }
+                return;
+            }
             "--news" if i + 1 < args.len() => {
                 // fetch a document into the news/ advice stream: curl the URL,
                 // strip nothing (plain text/markdown expected), date-prefix the

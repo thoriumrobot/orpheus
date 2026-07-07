@@ -313,7 +313,10 @@ pub fn closes_market(sym: &str, live: bool) -> Result<(Vec<i64>, (String, String
             }
         }
     } else {
-        cached_live_market(sym).map(|r| (r, "cached Coin Metrics fetch"))
+        let frag = ensure_fresh_market(sym); // the VALUES wire: TTL auto-refresh
+        cached_live_market(sym).map(|r| {
+            (r, if frag.starts_with("auto") { "auto-refreshed Coin Metrics fetch" } else { "cached Coin Metrics fetch" })
+        })
     };
     match fetched {
         Some((rows, what)) => {
@@ -340,7 +343,13 @@ pub fn closes(live: bool) -> (Vec<i64>, (String, String), String) {
             }
         }
     } else {
-        cached_live().map(|r| (r, "cached Coin Metrics fetch"))
+        // the VALUES wire: refresh the cache automatically when it has gone stale
+        // (ORPHEUS_DATA_AUTO=0 disables; never under tests), so predictions run on
+        // fresh numbers without anyone typing --live
+        let frag = ensure_fresh_market("btc");
+        cached_live().map(|r| {
+            (r, if frag.starts_with("auto") { "auto-refreshed Coin Metrics fetch" } else { "cached Coin Metrics fetch" })
+        })
     };
     match fetched {
         Some((rows, what)) => {
@@ -395,6 +404,239 @@ fn embedded_days_after(d: &str) -> usize {
     }
 }
 
+// ===========================================================================
+// AUTOMATIC FRESHNESS — the VALUES wire. The newswire keeps the TEXT leg fresh
+// with a TTL; this section gives the models' NUMBERS the same discipline: any
+// consumer that reads a cached series first refreshes it when it is older than
+// DATA_TTL_SECS (daily data; six hours is plenty), soft-failing to whatever is
+// cached or embedded. `ORPHEUS_DATA_AUTO=0` disables; never under `cargo test`.
+// ===========================================================================
+
+/// Six hours: the series are daily (Coin Metrics EOD, FRED daily/monthly), so
+/// anything fresher than this cannot have new observations worth a fetch.
+pub const DATA_TTL_SECS: i64 = 6 * 3600;
+
+fn data_auto_enabled() -> bool {
+    !cfg!(test) && !std::env::var("ORPHEUS_DATA_AUTO").map(|v| v == "0").unwrap_or(false)
+}
+
+fn file_age_secs(path: &std::path::Path) -> Option<i64> {
+    let m = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(m.elapsed().map(|d| d.as_secs() as i64).unwrap_or(0))
+}
+
+/// Refresh a market's cached series when it is stale. Returns a provenance
+/// fragment: "auto-refreshed" (fetched now), "cached, Nh old" (fresh enough or
+/// auto off), or "" (no cache at all and no fetch made/possible).
+pub fn ensure_fresh_market(sym: &str) -> String {
+    let path = market_cache_file(sym);
+    let age = file_age_secs(&path);
+    let stale = age.map(|a| a >= DATA_TTL_SECS).unwrap_or(true);
+    if data_auto_enabled() && stale {
+        return match fetch_live_market(sym) {
+            Ok(_) => "auto-refreshed".into(),
+            Err(_) => match age {
+                Some(a) => format!("cached, {}h old (refresh failed)", a / 3600),
+                None => String::new(),
+            },
+        };
+    }
+    match age {
+        Some(a) => format!("cached, {}h old", a / 3600),
+        None => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE BOND MARKET'S LIVE VALUES — FRED (St. Louis Fed), keyless CSV endpoints.
+// finbond.lat's header always named the live source: DGS2 / DGS5 / DGS10 (daily
+// constant-maturity Treasury yields) and M2SL (money stock, monthly). This is
+// the promised `fetch`-style refresh: the dailies are downsampled to month-end,
+// M2 becomes year-over-year growth, and the aligned monthly table (from 2007-01,
+// the embedded anchors' origin) is cached and handed to the model's `_on` arms —
+// so `latte trade --market bonds` PREDICTS ON FRESH YIELDS. The embedded
+// teaching anchors remain the fallback, exactly like the crypto series.
+// ---------------------------------------------------------------------------
+
+fn bonds_cache_file() -> std::path::PathBuf {
+    cache_dir().join("bonds.tsv")
+}
+
+/// Parse a fredgraph CSV: header `DATE,<ID>` (or `observation_date,<ID>`),
+/// rows `YYYY-MM-DD,value`, missing values printed as ".".
+pub fn parse_fred_csv(text: &str) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for l in text.lines().skip(1) {
+        let mut it = l.split(',');
+        let (d, v) = match (it.next(), it.next()) {
+            (Some(d), Some(v)) => (d.trim(), v.trim()),
+            _ => continue,
+        };
+        if d.len() != 10 || v.is_empty() || v == "." {
+            continue;
+        }
+        if let Ok(x) = v.parse::<f64>() {
+            out.push((d.to_string(), x));
+        }
+    }
+    out
+}
+
+/// Downsample a daily (or monthly) series to one value per month — the LAST
+/// observation of each month, keyed "YYYY-MM".
+pub fn month_end(rows: &[(String, f64)]) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for (d, v) in rows {
+        let m = d[..7].to_string();
+        match out.last_mut() {
+            Some((lm, lv)) if *lm == m => *lv = *v,
+            _ => out.push((m, *v)),
+        }
+    }
+    out
+}
+
+/// One monthly bond-market row: (YYYY-MM, [y2, y5, y10, m2yoy]) in HUNDREDTHS
+/// (4.30% = 430), signed — the exact unit finbond.lat's `pc`/`nc` anchors use.
+pub type BondRow = (String, [i64; 4]);
+
+/// Assemble the aligned monthly table from the four FRED series (already
+/// month-ended), starting at `from` (YYYY-MM): a month enters only when all
+/// three yields exist and M2 twelve months earlier exists (for the YoY growth).
+pub fn align_bond_months(
+    y2: &[(String, f64)], y5: &[(String, f64)], y10: &[(String, f64)],
+    m2: &[(String, f64)], from: &str,
+) -> Vec<BondRow> {
+    use std::collections::HashMap;
+    let idx = |v: &[(String, f64)]| -> HashMap<String, f64> {
+        v.iter().map(|(d, x)| (d.clone(), *x)).collect()
+    };
+    let (i2, i5, i10, im) = (idx(y2), idx(y5), idx(y10), idx(m2));
+    let prev_year = |m: &str| -> Option<String> {
+        let y: i64 = m.get(..4)?.parse().ok()?;
+        Some(format!("{:04}-{}", y - 1, m.get(5..7)?))
+    };
+    let hund = |x: f64| (x * 100.0).round() as i64;
+    let mut out = Vec::new();
+    for (m, v10) in y10 {
+        if m.as_str() < from {
+            continue;
+        }
+        let (v2, v5) = match (i2.get(m), i5.get(m)) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => continue,
+        };
+        let yoy = match (im.get(m), prev_year(m).and_then(|p| im.get(&p).copied())) {
+            (Some(now), Some(prev)) if prev > 0.0 => (now / prev - 1.0) * 100.0,
+            _ => continue,
+        };
+        let _ = i10; // v10 comes from the iteration itself
+        out.push((m.clone(), [hund(v2), hund(v5), hund(*v10), hund(yoy)]));
+    }
+    out
+}
+
+/// Fetch the four FRED series and cache the aligned monthly table. Keyless
+/// endpoints; `curl`, the usual trust model; every failure is a soft error.
+pub fn fetch_live_bonds() -> Result<Vec<BondRow>, String> {
+    let get = |id: &str, cosd: &str| -> Result<Vec<(String, f64)>, String> {
+        let url = format!("https://fred.stlouisfed.org/graph/fredgraph.csv?id={}&cosd={}", id, cosd);
+        let out = std::process::Command::new("curl")
+            .args(["-sSL", "--max-time", "60", &url])
+            .output()
+            .map_err(|e| format!("curl not available ({})", e))?;
+        if !out.status.success() {
+            return Err(format!("curl exited with {} for {}", out.status, id));
+        }
+        let rows = parse_fred_csv(&String::from_utf8_lossy(&out.stdout));
+        if rows.len() < 24 {
+            return Err(format!("{}: too few rows parsed", id));
+        }
+        Ok(rows)
+    };
+    // yields from a month before the anchors' origin; M2 a year earlier for YoY
+    let y2 = month_end(&get("DGS2", "2006-12-01")?);
+    let y5 = month_end(&get("DGS5", "2006-12-01")?);
+    let y10 = month_end(&get("DGS10", "2006-12-01")?);
+    let m2 = month_end(&get("M2SL", "2006-01-01")?);
+    let table = align_bond_months(&y2, &y5, &y10, &m2, "2007-01");
+    if table.len() < 180 {
+        return Err(format!("aligned bond table too short ({} months)", table.len()));
+    }
+    let _ = std::fs::create_dir_all(cache_dir());
+    let mut s = String::from("month\ty2\ty5\ty10\tm2yoy\n");
+    for (m, v) in &table {
+        s.push_str(&format!("{}\t{}\t{}\t{}\t{}\n", m, v[0], v[1], v[2], v[3]));
+    }
+    let _ = std::fs::write(bonds_cache_file(), s);
+    Ok(table)
+}
+
+/// Read the cached bond table, if a previous fetch stored one.
+pub fn cached_bonds() -> Option<Vec<BondRow>> {
+    let text = std::fs::read_to_string(bonds_cache_file()).ok()?;
+    let mut out = Vec::new();
+    for l in text.lines().skip(1) {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() != 5 {
+            continue;
+        }
+        let vals: Option<Vec<i64>> = f[1..5].iter().map(|x| x.parse().ok()).collect();
+        if let Some(v) = vals {
+            out.push((f[0].to_string(), [v[0], v[1], v[2], v[3]]));
+        }
+    }
+    if out.len() < 180 { None } else { Some(out) }
+}
+
+/// The bond model's data, freshest first: `live` forces a fetch; otherwise the
+/// cache serves, auto-refreshed when older than the TTL. `None` means "use the
+/// embedded teaching anchors" — the model always runs.
+pub fn bond_series(live: bool) -> Option<(Vec<BondRow>, String)> {
+    if live {
+        match fetch_live_bonds() {
+            Ok(t) => {
+                let n = t.len();
+                let last = t.last().map(|(m, _)| m.clone()).unwrap_or_default();
+                return Some((t, format!("live FRED fetch (DGS2/5/10 + M2SL, {} months to {})", n, last)));
+            }
+            Err(e) => eprintln!("  fetch bonds: {} — trying the cache", e),
+        }
+    } else {
+        let frag = {
+            let path = bonds_cache_file();
+            let age = file_age_secs(&path);
+            let stale = age.map(|a| a >= DATA_TTL_SECS).unwrap_or(true);
+            if data_auto_enabled() && stale {
+                match fetch_live_bonds() {
+                    Ok(_) => "auto-refreshed FRED".to_string(),
+                    Err(_) => match age {
+                        Some(a) => format!("cached FRED, {}h old (refresh failed)", a / 3600),
+                        None => String::new(),
+                    },
+                }
+            } else {
+                match age {
+                    Some(a) => format!("cached FRED, {}h old", a / 3600),
+                    None => String::new(),
+                }
+            }
+        };
+        if let Some(t) = cached_bonds() {
+            let n = t.len();
+            let last = t.last().map(|(m, _)| m.clone()).unwrap_or_default();
+            let what = if frag.is_empty() { "cached FRED".to_string() } else { frag };
+            return Some((t, format!("{} (DGS2/5/10 + M2SL, {} months to {})", what, n, last)));
+        }
+        return None;
+    }
+    cached_bonds().map(|t| {
+        let n = t.len();
+        let last = t.last().map(|(m, _)| m.clone()).unwrap_or_default();
+        (t, format!("cached FRED (DGS2/5/10 + M2SL, {} months to {})", n, last))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +649,56 @@ mod tests {
         let n = MARKET_CLOSE_X100.len();
         assert_eq!(MARKET_CLOSE_X100[n - 1], 6153100); // 2026-06-10 (Fortune)
         assert_eq!(MARKET_CLOSE_X100[n - 7], 6368300); // 2026-06-04 (Fortune)
+    }
+
+    #[test]
+    fn fred_csv_parses_and_skips_missing() {
+        let rows = parse_fred_csv("DATE,DGS10\n2026-06-29,4.31\n2026-06-30,.\n2026-07-01,4.28\njunk\n");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("2026-06-29".into(), 4.31));
+    }
+
+    #[test]
+    fn month_end_takes_the_last_observation() {
+        let daily = vec![
+            ("2026-05-28".to_string(), 4.40), ("2026-05-29".to_string(), 4.35),
+            ("2026-06-01".to_string(), 4.30), ("2026-06-30".to_string(), 4.25),
+        ];
+        let m = month_end(&daily);
+        assert_eq!(m, vec![("2026-05".to_string(), 4.35), ("2026-06".to_string(), 4.25)]);
+    }
+
+    #[test]
+    fn bond_months_align_and_m2_becomes_yoy() {
+        // two aligned months a year apart; M2 grows 21000 -> 22050 = +5.0% YoY
+        let y = |v: f64| vec![("2025-06".to_string(), v - 0.5), ("2026-06".to_string(), v)];
+        let m2 = vec![("2025-06".to_string(), 21000.0), ("2026-06".to_string(), 22050.0)];
+        let t = align_bond_months(&y(3.9), &y(4.1), &y(4.3), &m2, "2026-01");
+        assert_eq!(t.len(), 1, "only the month with a YoY base enters");
+        let (m, v) = &t[0];
+        assert_eq!(m, "2026-06");
+        assert_eq!(v[..3], [390, 410, 430]);
+        assert_eq!(v[3], 500, "M2 YoY in hundredths of a percent");
+    }
+
+    #[test]
+    fn bond_cache_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("orpheus-bonds-test-{}", std::process::id()));
+        std::env::set_var("ORPHEUS_CACHE", &dir);
+        let table: Vec<BondRow> = (0..200)
+            .map(|i| (format!("{:04}-{:02}", 2007 + i / 12, i % 12 + 1), [100 + i as i64, 150, 200, -50]))
+            .collect();
+        let _ = std::fs::create_dir_all(cache_dir());
+        let mut s = String::from("month\ty2\ty5\ty10\tm2yoy\n");
+        for (m, v) in &table {
+            s.push_str(&format!("{}\t{}\t{}\t{}\t{}\n", m, v[0], v[1], v[2], v[3]));
+        }
+        std::fs::write(bonds_cache_file(), s).unwrap();
+        let back = cached_bonds().expect("cache loads");
+        assert_eq!(back.len(), 200);
+        assert_eq!(back[0].1[3], -50, "signed values survive");
+        std::env::remove_var("ORPHEUS_CACHE");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
