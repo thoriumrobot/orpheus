@@ -491,8 +491,12 @@ Metrics BTC/USD series (cached; the embedded press-anchored recent days splice o
 `latte ta [--live]` computes five classical indicators **in Latte** (`lib/ta.lat`: SMA,
 EMA, ROC, RSI, MACD, Bollinger %B) with a composite vote, `latte chart market --live`
 charts the series with SMA overlays, and `latte trade [--live] [--news FILE]` fuses the
-TA composite (60%) with Loughran-McDonald **news sentiment** over real dated headlines
-(40%), sized by fractional Kelly × volatility targeting. `lib/nn.lat` now spans the
+TA composite (60%) with **event-aware news sentiment** (40%) — fed by the NEWSWIRE
+(`latte news`): press RSS and social streams fetched automatically, weighted by trust,
+engagement, relevance, event impact, and recency, scored by the trained classifier +
+LM lexicon and, once `latte news train` has enough wire history, Ke–Kelly–Xiu's
+return-supervised **SESTM** (docs/newswire.md) — sized by fractional Kelly × volatility
+targeting. `lib/nn.lat` now spans the
 modern architectures — sigmoid/softmax/layernorm/conv1d, single-head **self-attention**,
 and seeded **transformer blocks** — all as composable data. Charts embed into GUI-written
 reports as ```` ```chart ```` blocks.

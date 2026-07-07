@@ -46,6 +46,9 @@ fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>, chess: Opt
         println!("  WYSIWYG editor at  http://{}/editor   (live Facet preview, save/load)", listen);
     }
     println!("  keep-alive · ETag/304 · Range/206 · fonts · SCArs-powered Facet pages");
+    // the NEWSWIRE's background refresher: an open dashboard stays fed with fresh press
+    // and social items (30-min cycle; ORPHEUS_NEWS_AUTO=0 disables; never under tests)
+    crate::newswire::spawn_refresher();
     let handler = HymnHandler { root: root.to_string(), editor, chess };
     if let Err(e) = httpd::serve(listen, std::sync::Arc::new(handler)) {
         eprintln!("Hymn: cannot bind {}: {}", listen, e);
@@ -1164,12 +1167,23 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                             r.date, r.polarity, html_escape(&r.headline), html_escape(&r.source)
                         ));
                     }
-                    news.push_str(&format!("<tr><td><b>aggregate</b></td><td><b>{:+.2}</b></td><td>recency-weighted (half-life 3 days){}</td></tr></table>",
+                    news.push_str(&format!("<tr><td><b>aggregate</b></td><td><b>{:+.2}</b></td><td>event-aware weights (trust &times; engagement &times; impact &times; decay){}</td></tr></table>",
                         a.news_sentiment,
-                        if a.sentiment != Some(a.news_sentiment) { format!(" &mdash; overridden to {:+.2}", a.sentiment.unwrap_or(0.0)) } else { String::new() }));
+                        if a.sentiment != Some(a.news_sentiment) { format!(" &mdash; news leg blended to {:+.2}", a.sentiment.unwrap_or(0.0)) } else { String::new() }));
+                    news.push_str(&format!("<p style='color:#777;margin:4px 0'>{}</p>", html_escape(&a.wire_note)));
+                    if let Some(ss) = a.social_sentiment {
+                        news.push_str("<h3 style='margin:10px 0 4px'>Social pulse (reddit / HN / bluesky &mdash; log-engagement weights, 12h half-life)</h3><table class='m'>");
+                        for r in a.social.iter().take(8) {
+                            news.push_str(&format!(
+                                "<tr><td>{}</td><td>{:+.2}</td><td>{} <span style='color:#777'>&mdash; {}</span></td></tr>",
+                                r.date, r.polarity, html_escape(&r.headline), html_escape(&r.source)
+                            ));
+                        }
+                        news.push_str(&format!("<tr><td><b>aggregate</b></td><td><b>{:+.2}</b></td><td>15% of the news leg</td></tr></table>", ss));
+                    }
                     format!(
                         "<h3 style='margin:4px 0'>Technical analysis (lib/ta.lat, computed on Loom)</h3>{}\
-                         <h3 style='margin:10px 0 4px'>News sentiment (Loughran-McDonald, lib/sentiment.lat)</h3>{}\
+                         <h3 style='margin:10px 0 4px'>News sentiment (the live wire &mdash; event-aware; classifier + lexicon + SESTM when trained)</h3>{}\
                          <h3 style='margin:10px 0 4px'>Verdict</h3>\
                          <table class='m'>\
                          <tr><td>market</td><td>{} &nbsp; last ${:.0} &nbsp; <span style='color:#777'>{} ({} .. {})</span></td></tr>\
@@ -1351,23 +1365,61 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             json.push_str("]}");
             simple(200, "application/json; charset=utf-8", json.into_bytes())
         }
-        // the bundled real-news corpus, scored: JSON [{date,source,headline,polarity}..]
+        // THE NEWSWIRE, scored: fresh press + social items with event labels and weights,
+        // the embedded corpus as the fallback when the wire is empty. Query parameters:
+        // ?market=SYM (default btc), ?fresh=1 forces a fetch now.
+        // JSON {wire, press_aggregate, social_aggregate?, aggregate, items:[{date,source,kind,
+        //       headline,polarity,weight,labels}..]}
         ("GET", "/api/news") => {
-            let items: Vec<(String, String, String)> = crate::marketdata::MARKET_NEWS
-                .iter()
-                .map(|(d, s, h)| (d.to_string(), s.to_string(), h.to_string()))
-                .collect();
-            let (rows, agg) = crate::numerics::score_news(&items);
-            let mut json = String::from("{\"aggregate\":");
-            json.push_str(&format!("{:.3},\"items\":[", agg));
-            for (i, r) in rows.iter().enumerate() {
-                if i > 0 { json.push(','); }
-                json.push_str(&format!(
-                    "{{\"date\":\"{}\",\"source\":\"{}\",\"headline\":\"{}\",\"polarity\":{:.3}}}",
-                    r.date, json_escape(&r.source), json_escape(&r.headline), r.polarity
-                ));
+            let market = query_param(&req.query, "market").unwrap_or_else(|| "btc".into());
+            let force = req.query.split('&').any(|p| p == "fresh=1");
+            let (press, pagg, social, sagg, note) = crate::newswire::market_wire(&market, force, false);
+            let mut json = String::from("{");
+            let item_json = |r: &crate::newswire::ScoredItem, kind: &str| {
+                let labels: Vec<String> = r.labels.iter().map(|l| format!("\"{}\"", l)).collect();
+                format!(
+                    "{{\"date\":\"{}\",\"source\":\"{}\",\"kind\":\"{}\",\"headline\":\"{}\",\"polarity\":{:.3},\"weight\":{:.3},\"labels\":[{}]}}",
+                    r.item.date, json_escape(&r.item.source), kind,
+                    json_escape(&r.item.headline), r.polarity, r.weight, labels.join(",")
+                )
+            };
+            if press.is_empty() && social.is_empty() {
+                // the embedded corpus: the wire's floor, so the endpoint always answers
+                let items: Vec<(String, String, String)> = crate::marketdata::MARKET_NEWS
+                    .iter()
+                    .map(|(d, s, h)| (d.to_string(), s.to_string(), h.to_string()))
+                    .collect();
+                let (rows, agg) = crate::numerics::score_news(&items);
+                json.push_str(&format!("\"wire\":\"{}\",\"aggregate\":{:.3},\"items\":[",
+                    json_escape(&format!("embedded corpus ({})", note)), agg));
+                for (i, r) in rows.iter().enumerate() {
+                    if i > 0 { json.push(','); }
+                    json.push_str(&format!(
+                        "{{\"date\":\"{}\",\"source\":\"{}\",\"kind\":\"press\",\"headline\":\"{}\",\"polarity\":{:.3},\"weight\":{:.3},\"labels\":[]}}",
+                        r.date, json_escape(&r.source), json_escape(&r.headline), r.polarity, r.weight
+                    ));
+                }
+                json.push_str("]}");
+            } else {
+                let agg = if social.is_empty() { pagg } else { (0.6 * pagg + 0.15 * sagg) / 0.75 };
+                json.push_str(&format!("\"wire\":\"{}\",\"press_aggregate\":{:.3},", json_escape(&note), pagg));
+                if !social.is_empty() {
+                    json.push_str(&format!("\"social_aggregate\":{:.3},", sagg));
+                }
+                json.push_str(&format!("\"aggregate\":{:.3},\"items\":[", agg));
+                let mut first = true;
+                for r in &press {
+                    if !first { json.push(','); }
+                    first = false;
+                    json.push_str(&item_json(r, "press"));
+                }
+                for r in &social {
+                    if !first { json.push(','); }
+                    first = false;
+                    json.push_str(&item_json(r, "social"));
+                }
+                json.push_str("]}");
             }
-            json.push_str("]}");
             simple(200, "application/json; charset=utf-8", json.into_bytes())
         }
         // sentiment scoring: body is the text (a headline OR a whole document/report);

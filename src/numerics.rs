@@ -911,10 +911,13 @@ pub struct TradeAdvice {
     pub ta_rows: Vec<TaRow>,       // per-indicator verdicts (lib/ta.lat)
     pub ta_score: i32,             // sum of votes, in [-5, +5]
     pub ta_signal: f64,            // score/5 in [-1, 1]
-    pub news: Vec<NewsRow>,        // the scored headlines
+    pub news: Vec<NewsRow>,        // the scored headlines (the LIVE WIRE's press leg when fresh)
     pub docs: Vec<DocAdvice>,      // the scored DOCUMENTS from news/ (the advice stream)
     pub docs_sentiment: Option<f64>, // their recency-weighted aggregate
-    pub news_sentiment: f64,       // recency-weighted aggregate polarity
+    pub news_sentiment: f64,       // the press leg's weighted aggregate polarity
+    pub social: Vec<NewsRow>,      // the wire's SOCIAL PULSE (reddit/HN/bluesky), scored
+    pub social_sentiment: Option<f64>, // its aggregate (None when the wire has no social items)
+    pub wire_note: String,         // wire provenance (freshness, counts, or the embedded fallback)
     pub combined: f64,             // 0.6*ta_signal + 0.4*news_sentiment
     pub data_note: String,         // where the price series came from
     pub span: (String, String),    // first/last date of the series
@@ -1413,27 +1416,66 @@ pub fn trade_advice_market(
     let (ta_rows, ta_score) = ta_votes(&closes_x100, 120)?;
     let ta_signal = ta_score as f64 / 5.0;
 
-    // --- NEWS SENTIMENT: Loughran-McDonald over real recent headlines ------------
-    let items: Vec<(String, String, String)> = match news_text {
-        Some(t) => parse_news_file(t),
-        None => crate::marketdata::MARKET_NEWS
-            .iter()
-            .map(|(d, s, h)| (d.to_string(), s.to_string(), h.to_string()))
-            .collect(),
+    // --- NEWS SENTIMENT: the live wire first, the embedded corpus as the floor ---
+    // Precedence for the press leg: an explicit --news FILE > the NEWSWIRE's fresh
+    // press items (auto-fetched, event-aware weights) > the embedded corpus. The wire
+    // additionally contributes a SOCIAL PULSE leg (reddit/HN/bluesky, log-engagement
+    // weights, half-day half-life) that the embedded corpus never had.
+    let (wire_press, wire_pagg, wire_social, wire_sagg, wire_note0) =
+        crate::newswire::market_wire(market, live, false);
+    let to_row = |r: &crate::newswire::ScoredItem| NewsRow {
+        date: r.item.date.clone(),
+        source: if r.labels.is_empty() { r.item.source.clone() }
+                else { format!("{} [{}]", r.item.source, r.labels.join(" ")) },
+        headline: r.item.headline.clone(),
+        polarity: r.polarity,
+        weight: r.weight,
     };
-    let (news, news_sentiment) = score_news(&items);
+    let (news, news_sentiment, wire_note) = match news_text {
+        Some(t) => {
+            let (rows, agg) = score_news(&parse_news_file(t));
+            (rows, agg, "press: --news file".to_string())
+        }
+        None if !wire_press.is_empty() => (
+            wire_press.iter().map(to_row).collect(),
+            wire_pagg,
+            format!("press: live wire ({})", wire_note0),
+        ),
+        None => {
+            let items: Vec<(String, String, String)> = crate::marketdata::MARKET_NEWS
+                .iter()
+                .map(|(d, s, h)| (d.to_string(), s.to_string(), h.to_string()))
+                .collect();
+            let (rows, agg) = score_news(&items);
+            (rows, agg, format!("press: embedded corpus ({})", wire_note0))
+        }
+    };
+    let (social, social_sentiment) = if wire_social.is_empty() {
+        (Vec::new(), None)
+    } else {
+        (wire_social.iter().map(to_row).collect::<Vec<_>>(), Some(wire_sagg))
+    };
     // the DOCUMENT advice stream: reports dropped in news/ are scored whole
-    // (sentence-level, recency-weighted) and blended with the headline corpus —
-    // headlines 60%, documents 40% when any documents exist
+    // (sentence-level, recency-weighted) and blended in
     let docs_pair = docs_stream();
     let (docs, docs_sentiment) = match docs_pair {
         Some((rows, agg)) => (rows, Some(agg)),
         None => (Vec::new(), None),
     };
-    let blended = match docs_sentiment {
-        Some(d) => 0.6 * news_sentiment + 0.4 * d,
-        None => news_sentiment,
-    };
+    // --- the news leg's composition: press 60%, documents 25%, social 15% --------
+    // (renormalized over the legs that exist). Press dominates because reporting is
+    // the highest-precision text stream; documents age slowest; social is capped low
+    // because buzz is the noisiest leg (its per-item log-engagement and half-day
+    // half-life already discount it item-by-item — this is the leg-level discount).
+    let mut legs: Vec<(f64, f64)> = vec![(0.60, news_sentiment)];
+    if let Some(d) = docs_sentiment {
+        legs.push((0.25, d));
+    }
+    if let Some(s) = social_sentiment {
+        legs.push((0.15, s));
+    }
+    let wsum: f64 = legs.iter().map(|(w, _)| w).sum();
+    let blended = legs.iter().map(|(w, v)| w * v).sum::<f64>() / wsum;
     let used_sentiment = sentiment_override.unwrap_or(blended);
 
     // --- the COMBINED lean: TA carries 60%, news 40% ------------------------------
@@ -1507,6 +1549,9 @@ pub fn trade_advice_market(
         docs,
         docs_sentiment,
         news_sentiment,
+        social,
+        social_sentiment,
+        wire_note,
         combined,
         data_note,
         span,
@@ -1621,14 +1666,47 @@ pub fn trade_advice_bonds(account: f64, kelly_frac: f64, sentiment_override: Opt
     let direct = news_text.map(|t| crate::sentiment::score_document_bond(t).0);
     let docs_pair = docs_stream_bond();
     let stream = docs_pair.as_ref().map(|(_, agg)| *agg);
-    let blended = match (direct, stream) {
-        (Some(d), Some(s)) => 0.6 * d + 0.4 * s, // fresh text outweighs the standing stream
-        (Some(d), None) => d,
-        (None, Some(s)) => s,
-        (None, None) => 0.0,
+    // the LIVE WIRE, bond-scored: macro/rates stories carry their event weights (the
+    // macro-rates class matters most here), press and social both, through bond_polarity.
+    // "btc" names the wire's default relevance universe — macro terms score 0.6 there,
+    // which is exactly the slice the duration desk wants.
+    let (wire_press_b, wire_pagg_b, wire_social_b, wire_sagg_b, wire_note_b) =
+        crate::newswire::market_wire("btc", false, true);
+    let wire_leg: Option<f64> = if wire_press_b.is_empty() && wire_social_b.is_empty() {
+        None
+    } else if wire_social_b.is_empty() {
+        Some(wire_pagg_b)
+    } else if wire_press_b.is_empty() {
+        Some(wire_sagg_b)
+    } else {
+        Some(0.8 * wire_pagg_b + 0.2 * wire_sagg_b)
+    };
+    // fresh --news text outweighs everything; then wire 45% / documents 25% of the
+    // remaining legs (renormalized over what exists)
+    let mut legs_b: Vec<(f64, f64)> = Vec::new();
+    if let Some(d) = direct { legs_b.push((0.6, d)); }
+    if let Some(w) = wire_leg { legs_b.push((0.45, w)); }
+    if let Some(s) = stream { legs_b.push((0.25, s)); }
+    let blended = if legs_b.is_empty() {
+        0.0
+    } else {
+        let ws: f64 = legs_b.iter().map(|(w, _)| w).sum();
+        legs_b.iter().map(|(w, v)| w * v).sum::<f64>() / ws
     };
     let used_sentiment = sentiment_override.unwrap_or(blended);
     let _ = writeln!(out, "  -- news sentiment, scored for BONDS (hawk/dove axis; risk-off = Treasury bid) --");
+    if let Some(w) = wire_leg {
+        let _ = writeln!(out, "    live wire         : {:+.2} across {} press + {} social item(s)  ({})",
+            w, wire_press_b.len(), wire_social_b.len(), wire_note_b);
+        for r in wire_press_b.iter().take(3) {
+            let tags = if r.labels.is_empty() { String::new() } else { format!(" [{}]", r.labels.join(" ")) };
+            let mut h = r.item.headline.clone();
+            if h.len() > 64 { h.truncate(63); h.push('…'); }
+            let _ = writeln!(out, "      {:>10}  {:+.2}  {}{}", r.item.date, r.polarity, h, tags);
+        }
+    } else {
+        let _ = writeln!(out, "    live wire         : empty ({}) — `latte news fetch` to fill it", wire_note_b);
+    }
     if let Some((rows, agg)) = &docs_pair {
         let _ = writeln!(out, "    news/ documents   : {} scored, recency-weighted aggregate {:+.2}", rows.len(), agg);
         for r in rows.iter().take(3) {
@@ -1703,15 +1781,26 @@ pub fn render_market_advice(a: &TradeAdvice) -> String {
                 let _ = writeln!(out, "    {}   -> {}", what, v);
             }
             let _ = writeln!(out, "    composite TA score: {:+}  (of -5..+5)  ->  signal {:+.2}", a.ta_score, a.ta_signal);
-            let _ = writeln!(out, "  -- news sentiment (Loughran-McDonald, lib/sentiment.lat) --");
+            let _ = writeln!(out, "  -- news sentiment (event-aware; classifier + lexicon + SESTM when trained) --");
+            let _ = writeln!(out, "    {}", a.wire_note);
             for r in a.news.iter().take(6) {
                 let _ = writeln!(out, "    {} [{:+.2}] {} — {}", r.date, r.polarity, r.source, truncate(&r.headline, 76));
             }
             if a.news.len() > 6 {
                 let _ = writeln!(out, "    … and {} more headlines", a.news.len() - 6);
             }
-            let _ = writeln!(out, "    recency-weighted sentiment: {:+.2}{}", a.news_sentiment,
-                if a.sentiment != Some(a.news_sentiment) { "  (overridden by --sentiment)" } else { "" });
+            let _ = writeln!(out, "    press aggregate: {:+.2}{}", a.news_sentiment,
+                if a.sentiment != Some(a.news_sentiment) { "  (news leg; see the blend below)" } else { "" });
+            if let Some(ss) = a.social_sentiment {
+                let _ = writeln!(out, "  -- the SOCIAL PULSE (reddit/HN/bluesky; log-engagement weights, 12h half-life) --");
+                for r in a.social.iter().take(5) {
+                    let _ = writeln!(out, "    {} [{:+.2} w{:.2}] {} — {}", r.date, r.polarity, r.weight, r.source, truncate(&r.headline, 68));
+                }
+                if a.social.len() > 5 {
+                    let _ = writeln!(out, "    … and {} more posts", a.social.len() - 5);
+                }
+                let _ = writeln!(out, "    social pulse aggregate: {:+.2}  (15% of the news leg)", ss);
+            }
             if let Some(ds) = a.docs_sentiment {
                 let _ = writeln!(out, "  -- the DOCUMENT advice stream (news/ — whole reports, scored sentence-by-sentence) --");
                 for d in a.docs.iter().take(5) {
@@ -1722,7 +1811,7 @@ pub fn render_market_advice(a: &TradeAdvice) -> String {
                 if a.docs.len() > 5 {
                     let _ = writeln!(out, "    … and {} more documents", a.docs.len() - 5);
                 }
-                let _ = writeln!(out, "    document stream aggregate: {:+.2}  (blended 40% with headlines 60%)", ds);
+                let _ = writeln!(out, "    document stream aggregate: {:+.2}  (news leg: press 60% · docs 25% · social 15%, renormalized)", ds);
             }
             let _ = writeln!(out, "  -- the combined signal --------------------");
             let _ = writeln!(out, "  combined lean     : {:+.2}   (= 0.6*TA {:+.2} + 0.4*news {:+.2}) -> {}",

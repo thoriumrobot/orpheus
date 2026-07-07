@@ -15,4 +15,13 @@ core sentiment
   :: a tiny reference lexicon as data (the full Loughran-McDonald lists live in the host).
   poswords = fn [_] -> [ %rally [ %rebound [ %surge [ %gain [ %strong [ %higher 0 ] ] ] ] ] ]
   negwords = fn [_] -> [ %selloff [ %plunge [ %decline [ %risk [ %weak [ %fear 0 ] ] ] ] ] ]
+
+  :: the NEWSWIRE's fusion arithmetic: weighted aggregate over a list of [w p] pairs
+  :: (weight and polarity both signed fixed-point) — sum(w*p)/sum(w), [0 0] when the
+  :: weights vanish. The host (src/newswire.rs) builds the pair list from trust,
+  :: engagement, relevance, event impact, and recency decay; the RATIO runs here on Loom,
+  :: the same in-the-loop discipline as `polarity` above.
+  wagg = fn [pairs] ->
+    let acc = (foldl (fn [nd wp] -> [ (nadd (head nd) (nmul (head wp) (tail wp))) (nadd (tail nd) (head wp)) ]) [ [0 0] [0 0] ] pairs) in
+    if ((tail (tail acc)) == 0) then [ 0 0 ] else (ndiv (head acc) (tail acc))
 end

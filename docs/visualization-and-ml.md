@@ -571,9 +571,12 @@ when the community file lags, the embedded press-anchored tail is spliced on so 
 real closes are never lost. No network, no curl? The embedded series serves, and everything
 still works.
 
-A bundled corpus of **real, dated headlines** about the market (`MARKET_NEWS`, gathered
-2026-06-10 with sources) feeds the sentiment side; `--news FILE` substitutes today's headlines
-(one per line, optionally `YYYY-MM-DD<TAB>Source<TAB>headline`).
+The sentiment side feeds from the **NEWSWIRE** (`docs/newswire.md`): press RSS feeds and
+social streams fetched automatically with a 30-minute TTL, deduplicated, and scored with
+event-aware weights — `latte news` shows the pulse, `latte news fetch` pulls now. A bundled
+corpus of real, dated headlines (`MARKET_NEWS`, gathered 2026-06-10 with sources) remains the
+fallback floor when the wire is empty; `--news FILE` outranks both (one headline per line,
+optionally `YYYY-MM-DD<TAB>Source<TAB>headline`).
 
 ## Technical analysis in Latte (`lib/ta.lat`, `latte ta`)
 
@@ -595,11 +598,15 @@ or in the System GUI (`ta` embeds the table in the Log) and over HTTP (`POST /ap
 The advisor **fuses two kinds of evidence** and sizes the position with the volatility model:
 
 1. **Technical analysis (60%)** — `ta.lat`'s composite vote, normalized to a signal in [−1, +1].
-2. **News sentiment (40%)** — every bundled (or `--news`-supplied) headline is scored by the
-   FUSED scorer: 0.65 × the trained classifier (see "The trained text classifier" below) +
-   0.35 × the Loughran-McDonald lexicon (whose polarity arithmetic runs in
-   `lib/sentiment.lat` on Loom), aggregated with a 3-day-half-life recency weight;
-   `--sentiment S` overrides.
+2. **News sentiment (40%)** — the news leg composes the live wire's press items (60%),
+   the `news/` document stream (25%), and the wire's SOCIAL PULSE (15%), renormalized over
+   what exists. Each item is scored by the FUSED scorer — 0.65 × the trained classifier
+   (see "The trained text classifier" below) + 0.35 × the Loughran-McDonald lexicon (whose
+   polarity arithmetic runs in `lib/sentiment.lat` on Loom) — blended half-and-half with
+   **SESTM** once `latte news train` has fitted the return-supervised model, and weighted
+   by trust × engagement × relevance × event impact × recency (press 3-day half-life,
+   social 12 hours; event classes set their own decay — see `docs/newswire.md`).
+   `--news FILE` supplies the press leg directly; `--sentiment S` overrides the aggregate.
 3. **The combined lean** `0.6·TA + 0.4·news` decides direction: above +0.1 → long candidate;
    below −0.1 → bearish → **FLAT** (no shorting in this demo); in between → no edge, FLAT.
 4. **Sizing** — **fractional Kelly** from the *measured* out-of-sample momentum hit rate (the
@@ -607,8 +614,9 @@ The advisor **fuses two kinds of evidence** and sizes the position with the vola
    **volatility targeting** against the volatility model's regime call (the dependable edge),
    capped at 2× leverage. The volatility model trains once per process and is cached.
 
-The report shows its evidence: the five-indicator table, every scored headline with its date and
-polarity, the fusion arithmetic, the measured reliabilities, and the sizing chain. Flags:
+The report shows its evidence: the five-indicator table, every scored headline with its date,
+polarity, and event tags, the social pulse with its weights, the wire's provenance line, the
+fusion arithmetic, the measured reliabilities, and the sizing chain. Flags:
 `--account N --kelly F --live --news FILE --sentiment S`. The `/trade` GUI page renders the same
 evidence; `trade` in the System GUI embeds it in the Log. Every output carries an explicit
 disclaimer: this is a research demonstration, not financial advice.
@@ -642,7 +650,12 @@ latte sentiment --doc visualization-and-ml                      # score a docs/ 
 
 `POST /api/sentiment` returns the per-sentence JSON; in the System GUI, `System.Sentiment
 <text>` scores in place and **`Doc.Score <name>`** opens a whole document's evidence table in
-its own viewer. The advisor's news leg uses the fused score everywhere.
+its own viewer. The advisor's news leg uses the fused score everywhere — and once the wire
+has accumulated ≥ 60 dated items, `latte news train` fits **SESTM** (Ke–Kelly–Xiu's
+return-supervised screening + topic model, the white-box method that beat RavenPack) on the
+market's own price responses, and wire items score 0.5·SESTM + 0.5·fused from then on. The
+whole chain stays inspectable: `docs/newswire.md` documents the taxonomy, the weights, and
+the training procedure.
 
 ## Many markets, one pipeline — and an honest model registry
 
