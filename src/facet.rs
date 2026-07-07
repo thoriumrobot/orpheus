@@ -1975,6 +1975,70 @@ fn tool_lang_trace(args: &[Val]) -> Result<Val, String> {
     )))
 }
 
+// ---------------------------------------------------------------------------
+// Draw.* — COLLABORATIVE DRAWING: a drawing document (kind d) holds one gfx
+// shape EXPRESSION per block — `(rect 20 20 120 80 (red 0))`, `(circle 200
+// 90 40 (rgb 50 90 200))`, anything lib/gfx.lat can build, coordinates
+// computed in Latte if you like. The converged blocks form the scene, in
+// block order (later blocks paint on top); tombstoning a shape removes it;
+// the history slider replays the drawing's construction stroke by stroke.
+// This is the text-block sibling of the freehand /draw page: same SVG
+// renderer (src/gfx.rs), one shared vocabulary (lib/gfx.lat).
+// ---------------------------------------------------------------------------
+
+fn tool_draw_render(args: &[Val]) -> Result<Val, String> {
+    let id = arg_text(args, 0)?;
+    let text = doc_text(&id)?;
+    let (mut w, mut h) = (480u128, 320u128);
+    let mut shapes: Vec<String> = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("::") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("size ") {
+            let mut it = rest.split_whitespace();
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                w = a.parse().map_err(|_| format!("size line {}: width '{}' is not a number", i + 1, a))?;
+                h = b.parse().map_err(|_| format!("size line {}: height '{}' is not a number", i + 1, b))?;
+                w = w.clamp(16, 2000);
+                h = h.clamp(16, 2000);
+            }
+            continue;
+        }
+        if !line.starts_with('(') {
+            return Err(format!(
+                "block {} ('{}') is not a shape — blocks are gfx expressions like (rect 20 20 120 80 (red 0)), or `size W H`",
+                i + 1, line
+            ));
+        }
+        shapes.push(line.to_string());
+    }
+    if shapes.is_empty() {
+        return Ok(Val::Text(
+            "<span class=\"feat\">no shapes yet — add blocks like (rect 20 20 120 80 (red 0)) · (circle 200 90 40 (rgb 50 90 200)) · (text 30 40 \"hello\" (black 0)) · optional `size 640 400`</span>"
+                .into(),
+        ));
+    }
+    // the scene: the blocks folded into a Latte list literal, in block order
+    let mut scene = String::from("0");
+    for sh in shapes.iter().rev() {
+        scene = format!("[ {} {} ]", sh, scene);
+    }
+    let libs_owned = crate::latte::all_libs();
+    let refs: Vec<&str> = libs_owned.iter().map(|x| x.as_str()).collect();
+    let scene_noun = crate::latte::run_with_libs(&scene, &refs)
+        .map_err(|e| format!("the shared shapes do not evaluate: {} (each block is one gfx expression — lib/gfx.lat)", e))?;
+    let svg = crate::gfx::render_scene(&scene_noun, w, h);
+    Ok(Val::Text(format!(
+        "<div class=\"feat\">{} shape(s) from the converged document, painted in block order ({}×{})</div>{}",
+        shapes.len(),
+        w,
+        h,
+        svg
+    )))
+}
+
 fn tool_live_watch(args: &[Val]) -> Result<Val, String> {
     let expr = arg_text(args, 0)?;
     let fields: &[Val] = match args.get(1) {
@@ -2522,6 +2586,13 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             handler: tool_code_load,
         },
         ToolSpec {
+            module: "Draw",
+            proc: "render",
+            sig: "Draw.render(id)",
+            summary: "render a SHARED drawing: each block is one gfx expression — (rect …), (circle …), computed coordinates welcome — painted in block order from the converged document",
+            handler: tool_draw_render,
+        },
+        ToolSpec {
             module: "Lang",
             proc: "evolve",
             sig: "Lang.evolve(id)",
@@ -2785,6 +2856,7 @@ pub fn module_specs() -> &'static [ModuleSpec] {
         ModuleSpec { name: "Acplan", summary: "collaborative accountable planning: quadratic ballots gathered across instances" },
         ModuleSpec { name: "Code", summary: "collaborative code: shared Latte modules, compile-checked, loaded live, run anywhere" },
         ModuleSpec { name: "Lang", summary: "collaborative conlanging: a shared rules+lexicon document, evolved by SCArs" },
+        ModuleSpec { name: "Draw", summary: "collaborative drawing: gfx shape expressions as blocks, rendered from the converged scene" },
     ]
 }
 
@@ -3495,6 +3567,24 @@ mod tests {
         crate::notes::del_block(&sid, &first_rule).unwrap();
         let out = tool_lang_evolve(&[Val::Text(sid)]).unwrap().to_text();
         assert!(out.contains("→ koso"), "without k>g, kasa evolves to koso: {}", out);
+
+        // collaborative drawing: shapes as blocks, painted in block order,
+        // coordinates computed in Latte, tombstones erase
+        let did = crate::notes::create_kind("d", "team sketch").unwrap();
+        crate::notes::append_block(&did, "ada", "size 200 100").unwrap();
+        crate::notes::append_block(&did, "ada", "(rect 10 10 80 50 (red 0))").unwrap();
+        let circle_bid = crate::notes::append_block(&did, "bob", "(circle (add 100 40) 50 30 (rgb 50 90 200))").unwrap();
+        let out = tool_draw_render(&[Val::Text(did.clone())]).unwrap().to_text();
+        assert!(out.contains("<svg"), "{}", out);
+        assert!(out.contains("<rect") && out.contains("<circle"), "both contributors' shapes: {}", out);
+        assert!(out.contains("width='200'"), "the size directive applies: {}", out);
+        assert!(out.contains("140"), "computed coordinate (add 100 40) evaluates: {}", out);
+        crate::notes::del_block(&did, &circle_bid).unwrap();
+        let out = tool_draw_render(&[Val::Text(did.clone())]).unwrap().to_text();
+        assert!(!out.contains("<circle"), "tombstoned shape leaves the render: {}", out);
+        // a non-shape block reports itself by number
+        crate::notes::append_block(&did, "eve", "not a shape").unwrap();
+        assert!(tool_draw_render(&[Val::Text(did)]).is_err());
     }
 
     #[test]

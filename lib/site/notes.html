@@ -63,6 +63,7 @@ Kinds: <b>note</b> prose · <b>plan</b> an economy spec the planner solves ·
     <option value="v">votes</option>
     <option value="c">code</option>
     <option value="s">language</option>
+    <option value="d">drawing</option>
   </select>
   <button onclick="createNote()">＋ Create</button>
   <button onclick="connectPeer()" title="dial another instance's notes port (9601 by default) — documents reconcile automatically">⇄ Connect peer…</button>
@@ -155,7 +156,7 @@ function connectPeer(){
 }
 
 // ------------------------------ the document --------------------------------
-function kindOf(id){ return {n:'note', p:'plan', v:'votes', c:'code', s:'language'}[(id||'n')[0]] || 'note'; }
+function kindOf(id){ return {n:'note', p:'plan', v:'votes', c:'code', s:'language', d:'drawing'}[(id||'n')[0]] || 'note'; }
 
 // the kind-specific action panel: the shared document put to WORK — solve the
 // converged plan, compute the accountable plan from everyone's ballots, or
@@ -181,6 +182,10 @@ function kindPanel(id){
       + '<input id="s_word" size="10" placeholder="kasa">'
       + '<button onclick="act(\'Lang.trace \'+q(noteId)+\' \'+q($(\'s_word\').value||\'kasa\'))">Trace word</button>'
       + '<span class="hint">lines with <b>&gt;</b> are sound-change rules (applied top to bottom): <b>k &gt; g / _a</b>; other lines are lexicon entries: <b>kasa house</b>. Grow the lexicon from one instance while a peer refines the sound laws — evolve runs on the converged language</span>';
+  } else if(k === 'drawing'){
+    bar.innerHTML = '<button onclick="act(\'Draw.render \'+q(noteId))">🎨 Render</button>'
+      + '<label><input type="checkbox" id="d_auto" checked> auto-render on changes</label>'
+      + '<span class="hint">one gfx expression per block: <b>(rect 20 20 120 80 (red 0))</b> · <b>(circle 200 90 40 (rgb 50 90 200))</b> · <b>(text 30 40 "hi" (black 0))</b> · optional <b>size 640 400</b>. Later blocks paint on top; delete a block to erase its shape; peers\' shapes land in the preview as they arrive</span>';
   } else if(k === 'code'){
     bar.innerHTML = '<input id="c_expr" size="22" placeholder="(myarm 21)">'
       + '<button onclick="act(\'Code.run \'+q(noteId)+\' \'+q($(\'c_expr\').value))">▶ Run</button>'
@@ -190,16 +195,23 @@ function kindPanel(id){
   }
 }
 
+// action results come back as HTML from /api/tool (the same registry as
+// /api/run, tags intact) — plan reports keep their layout, accountable-plan
+// tables render, drawings PAINT.
+function apiTool(cmd, cb){
+  var x = new XMLHttpRequest();
+  x.open('POST', '/api/tool');
+  x.onload = function(){ cb(null, x.responseText); };
+  x.onerror = function(){ cb('network error'); };
+  x.send(cmd);
+}
 function act(cmd){
   var r = $('result');
   r.style.display = 'block';
   r.innerHTML = '<span style="color:#8a8064">working…</span>';
-  api(cmd, function(err, body){
+  apiTool(cmd, function(err, body){
     if(err){ r.textContent = err; return; }
-    var pre = document.createElement('pre');
-    pre.textContent = body;
-    r.innerHTML = '';
-    r.appendChild(pre);
+    r.innerHTML = body;
   });
 }
 
@@ -264,6 +276,21 @@ function render(body){
   var any = box.querySelector('.blk');
   if(empty) empty.style.display = any ? 'none' : '';
   status(atEvent ? '' : 'synced · ' + new Date().toLocaleTimeString());
+  // drawings repaint themselves as the converged scene changes (peers included)
+  if(kindOf(noteId) === 'drawing'){
+    var auto = $('d_auto');
+    if(!auto || auto.checked) actQuiet('Draw.render ' + q(noteId));
+  }
+}
+
+// act() without the "working…" flash — for auto-refreshing previews
+function actQuiet(cmd){
+  apiTool(cmd, function(err, body){
+    if(err) return;
+    var r = $('result');
+    r.style.display = 'block';
+    r.innerHTML = body;
+  });
 }
 
 function mkBlock(bid){

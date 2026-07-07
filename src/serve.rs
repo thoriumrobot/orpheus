@@ -260,6 +260,23 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             let cmd = String::from_utf8_lossy(&req.body);
             simple(200, "text/plain; charset=utf-8", run_tool(cmd.trim()).into_bytes())
         }
+        // the same registry, RAW: host-tool output as HTML, tags intact — for
+        // clients that render results (the /notes editor's plan reports,
+        // accountable-plan tables, and drawing previews). Host tools only.
+        ("POST", "/api/tool") => {
+            let cmd = String::from_utf8_lossy(&req.body);
+            let cmd = cmd.trim();
+            let (head, rest) = match cmd.split_once(char::is_whitespace) {
+                Some((h, r)) => (h, r.trim()),
+                None => (cmd, ""),
+            };
+            let out = match crate::facet::run_host_tool(head, rest) {
+                Some(Ok(html)) => html,
+                Some(Err(e)) => format!("<span class=\"feat\">{} error: {}</span>", head, e),
+                None => format!("<span class=\"feat\">no host tool '{}'</span>", head),
+            };
+            simple(200, "text/html; charset=utf-8", out.into_bytes())
+        }
         // Oberon-style in-system compilation: compile a Latte module and load it.
         ("POST", "/api/compile") => {
             let body = String::from_utf8_lossy(&req.body).into_owned();

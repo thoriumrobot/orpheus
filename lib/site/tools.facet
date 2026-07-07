@@ -395,7 +395,7 @@ deterministic per request.</p>
     X" holds its place even when X is deleted concurrently. The same tools work from the
     <a href="/notes">/notes editor</a>, these widgets, and the System console.</p>
     {{ Live.view("Note.info()", [["_", "0"]]) }}
-    {{ Live.form("Note.create(title, kind)", [["title", "meeting minutes"], ["kind", "n", "n", "p", "v", "c", "s"]]) }}
+    {{ Live.form("Note.create(title, kind)", [["title", "meeting minutes"], ["kind", "n", "n", "p", "v", "c", "s", "d"]]) }}
     {{ Live.watch("Note.list()", [], 5) }}
     {{ Live.box("Note.index()", [["_", "0"]]) }}
     {{ Live.view("Note.read(id)", [["id", ""]]) }}
@@ -468,6 +468,22 @@ deterministic per request.</p>
     both as buttons on language documents.</p>
     {{ Live.form("Lang.evolve(id)", [["id", ""]]) }}
     {{ Live.form("Lang.trace(id, word)", [["id", ""], ["word", "kasa"]]) }}
+  </div>
+</div>
+
+<!-- ===================== Draw (collaborative) ===================== -->
+<div class="panel">
+  <div class="t">Draw — collaborative drawing (gfx expressions as blocks, one converged scene)</div>
+  <div class="b">
+    <p class="lede">A <b>drawing</b> document (kind d) holds one gfx shape expression per block —
+    <code>(rect 20 20 120 80 (red 0))</code>, <code>(circle 200 90 40 (rgb 50 90 200))</code>,
+    <code>(text 30 40 "hello" (black 0))</code>, coordinates computed in Latte if you like, and
+    an optional <code>size 640 400</code> block. Contributors add shapes from their own
+    instances; <code>Draw.render</code> paints the CONVERGED scene in block order (later blocks
+    on top), tombstoning a block erases its shape, and the history slider replays the drawing's
+    construction. The same renderer and vocabulary as the freehand <a href="/draw">Draw
+    page</a> (lib/gfx.lat) — this is its collaborative, text-block sibling.</p>
+    {{ Live.form("Draw.render(id)", [["id", ""]]) }}
   </div>
 </div>
 
