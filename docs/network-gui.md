@@ -47,8 +47,10 @@ round-trips, no conflict dialogs. The state table on every connected
 instance's page updates within a few seconds of any put, anywhere.
 
 Because the log *is* the state, history is free: the **time-travel slider**
-(`Kv.at(k)`) replays the shared state as of any prefix of events, and
-`Kv.log(n)` shows who did what in the agreed order.
+(`Kv.at(k)`) replays the shared state — `k` counts back from now (0 = the
+present), so a fixed slider always reaches the latest state however long the
+log grows — and `Kv.log(n)` shows who did what in the agreed order.
+`Note.history` counts the same way.
 
 Values are stored self-describing (`[%n 42]` for numbers, `[%t "…"]` for
 text), so what you type is exactly what every peer displays. Raw values
@@ -83,6 +85,10 @@ same commands — `Kv.state`, `Net.workers`, `Net.train 3 300 demo`,
 flattened to console text. And the CLI drives the same machinery:
 `latte node`, `latte worker`, `latte workers`, `latte ml linear --store DIR`.
 A page, a console text, and a shell are three surfaces of one system.
+(Programs are a fourth: `POST /api/run` returns any command's result as
+console text, and `POST /api/tool` returns the same registry's output as
+raw HTML — tables, reports, SVG — which is how the /notes editor renders
+plan reports and drawing previews.)
 
 ## Live.watch — pages that follow the network
 

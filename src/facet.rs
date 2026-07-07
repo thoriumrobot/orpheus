@@ -1799,9 +1799,12 @@ fn tool_note_read(args: &[Val]) -> Result<Val, String> {
 }
 
 fn tool_note_history(args: &[Val]) -> Result<Val, String> {
+    // k counts BACK from the present (0 = now) — like Kv.at, so a fixed
+    // slider always reaches the latest version however long the log grows
     let id = arg_text(args, 0)?;
-    let k = arg_num_or(args, 1, u128::MAX) as usize;
-    note_html(id.trim(), k.max(1)).map(Val::Text)
+    let back = arg_num_or(args, 1, 0) as usize;
+    let total = crate::notes::event_count();
+    note_html(id.trim(), total.saturating_sub(back).max(1)).map(Val::Text)
 }
 
 fn tool_note_blocks(args: &[Val]) -> Result<Val, String> {
@@ -2533,7 +2536,7 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             module: "Note",
             proc: "history",
             sig: "Note.history(id, k)",
-            summary: "TIME TRAVEL: the note as of the first k events — every past version of the shared document, free",
+            summary: "TIME TRAVEL: the document k events AGO (0 = present) — every past version of the shared document, free",
             handler: tool_note_history,
         },
         ToolSpec {

@@ -32,7 +32,9 @@ It keeps shared state across machines over the Internet (content-addressed event
 gossip, no blockchain), persists durably with safe upgrades, accelerates with audited
 jets, and ships a working application: a sound-change applier that a hosted web page
 calls to generate conlang vocabulary on the fly. Every release includes **Ubuntu and
-Windows binaries**.
+Windows binaries**, and the repository builds a **static Android (aarch64)
+binary** — a phone in Termux is a full peer: ledger, documents, worker,
+GUI (docs/android.md).
 
 ## Build, test, run
 

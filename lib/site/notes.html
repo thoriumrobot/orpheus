@@ -276,8 +276,10 @@ function render(body){
   var any = box.querySelector('.blk');
   if(empty) empty.style.display = any ? 'none' : '';
   status(atEvent ? '' : 'synced · ' + new Date().toLocaleTimeString());
-  // drawings repaint themselves as the converged scene changes (peers included)
-  if(kindOf(noteId) === 'drawing'){
+  // drawings repaint themselves as the converged scene changes (peers
+  // included) — but not while scrubbing history: the renderer paints the
+  // PRESENT scene, and a preview that contradicts the scrubbed blocks lies
+  if(kindOf(noteId) === 'drawing' && atEvent === 0){
     var auto = $('d_auto');
     if(!auto || auto.checked) actQuiet('Draw.render ' + q(noteId));
   }

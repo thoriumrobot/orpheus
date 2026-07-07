@@ -120,7 +120,14 @@ Note.connect 203.0.113.7:9601
 
 (The console splits arguments quote-aware; the machine-form tools the editor
 polls — `Note.index`, `Note.blocks(id, at)` — are in the registry too, so
-anything can build on them.)
+anything can build on them. A headless `latte node --agent notes` can drive
+the document lifecycle directly — `--do "mknote nID meeting minutes"`,
+`--do "title nID minutes, v2"`, `--do "rmnote nID"` — while block-level
+edits need minted block ids, the host's job: scripts drive those through
+`POST /api/run` / `/api/tool` against a GUI instance. The plain kv node
+grew the same courtesy: `--do "put greeting hello world"` now stores the
+ledger's self-describing text form, displayed exactly as typed on every
+peer's page.)
 
 ## The pieces
 
@@ -136,9 +143,11 @@ The notes node shares the ledger's trust model: the port is unauthenticated
 by design — LAN, VPN, or tunnel it (docs/network-gui.md, "The trust model").
 Known limits, stated plainly: blocks are the merge granularity (two people
 typing in the *same* paragraph concurrently keep the later version, not a
-character-merge); the console surface's quote grammar has no escape, so the
-editor transmits `"` as `″`; and removed notes (`Note.rmnote` has no tool —
-deliberately) would need the same tombstone treatment blocks get.
+character-merge — and the editor tells you when a peer deleted the block you
+were typing in, showing your words rather than losing them silently); the
+console surface's quote grammar has no escape, so the editor transmits `"`
+as `″`; and `Note.remove` drops a whole document from the live view while
+the log keeps its past — the history slider still replays it.
 
 
 ## Which modules got collaboration, and which didn't (the survey)

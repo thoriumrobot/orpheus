@@ -57,3 +57,23 @@ words** (the set landed on a tombstone): the editor now says so and shows
 your text so nothing is lost silently. One suspected issue proved already
 handled: repeated `Code.run` does not churn the library generation, because
 runtime registration skips identical source.
+
+## The inadequacies round
+
+Four more found, fixed, and documented. **The headless node was mute on
+words and documents**: `--do "put k hello"` failed outright (numeric values
+only) and the notes agent had no CLI verbs at all — `put` now stores text
+as the ledger's self-describing form (numeric puts unchanged, so every
+existing script keeps working), and `mknote` / `title` / `rmnote` drive the
+document lifecycle from a bare `latte node --agent notes`; block-level
+edits remain the host's job (minted ids) via the HTTP registry, and the
+docs say so. **`Note.history` still indexed forward** — the same slider
+stranding `Kv.at` was cured of — and now counts back from the present
+(0 = now), consistently. **The drawing preview lied in history mode**,
+painting the present scene beneath scrubbed blocks; it now pauses while
+scrubbing. And **five documentation passages had gone stale** — the
+prefix-of-events time-travel wording, the "rmnote has no tool" limits
+paragraph (Note.remove exists), the volatile-tool list (Note.* joined
+Kv./Net., and the document-consuming tools are deliberately memoised),
+the missing /api/tool mention, and the README/android pages' silence on
+the Android peer and the editor riding along. All brought current.

@@ -278,11 +278,76 @@ pub fn parse_action(line: &str) -> Option<N> {
         "add" => Some(act_add(it.next()?.parse().ok()?)),
         "put" => {
             let k = it.next()?;
-            let v: u128 = it.next()?.parse().ok()?;
-            Some(act_put(k, v))
+            let rest: Vec<&str> = it.collect();
+            if rest.is_empty() {
+                return None;
+            }
+            // numeric values stay RAW (compatible with every existing script
+            // and test); anything else becomes the ledger's self-describing
+            // text form [%t cord], so a headless node can put words the GUI
+            // displays exactly as typed
+            match rest[0].parse::<u128>() {
+                Ok(v) if rest.len() == 1 => Some(act_put(k, v)),
+                _ => Some(crate::knot::cell(
+                    crate::knot::cord("put"),
+                    crate::knot::cell(
+                        crate::knot::cord(k),
+                        crate::knot::cell(crate::knot::cord("t"), crate::knot::cord(&rest.join(" "))),
+                    ),
+                )),
+            }
         }
         "del" => Some(act_del(it.next()?)),
+        // notes-agent verbs (lib/notes.lat): create, retitle, and remove
+        // documents from a headless node. Block-level edits need minted block
+        // ids — that is the host's job (the GUI, src/notes.rs); scripts drive
+        // those through the HTTP tool registry instead.
+        "mknote" => {
+            let id = it.next()?;
+            let title: Vec<&str> = it.collect();
+            if title.is_empty() {
+                return None;
+            }
+            Some(crate::knot::cell(
+                crate::knot::cord("mknote"),
+                crate::knot::cell(crate::knot::cord(id), crate::knot::cord(&title.join(" "))),
+            ))
+        }
+        "title" => {
+            let id = it.next()?;
+            let title: Vec<&str> = it.collect();
+            if title.is_empty() {
+                return None;
+            }
+            Some(crate::knot::cell(
+                crate::knot::cord("title"),
+                crate::knot::cell(crate::knot::cord(id), crate::knot::cord(&title.join(" "))),
+            ))
+        }
+        "rmnote" => Some(crate::knot::cell(crate::knot::cord("rmnote"), crate::knot::cord(it.next()?))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod parse_action_tests {
+    use super::*;
+
+    #[test]
+    fn cli_actions_cover_text_puts_and_note_lifecycle() {
+        // numeric put unchanged (every existing script keeps working)
+        assert_eq!(parse_action("put a 5"), Some(act_put("a", 5)));
+        // text put produces the ledger's tagged form
+        let n = parse_action("put greeting hello world").unwrap();
+        assert_eq!(format!("{:?}", n), format!("{:?}", crate::knot::cell(
+            crate::knot::cord("put"),
+            crate::knot::cell(crate::knot::cord("greeting"),
+                crate::knot::cell(crate::knot::cord("t"), crate::knot::cord("hello world"))))));
+        // notes lifecycle from a headless node
+        assert!(parse_action("mknote n1-aa meeting minutes").is_some());
+        assert!(parse_action("title n1-aa minutes, v2").is_some());
+        assert!(parse_action("rmnote n1-aa").is_some());
+        assert!(parse_action("mknote onlyid").is_none(), "a title is required");
     }
 }
 

@@ -78,7 +78,11 @@ already and carries a mobile viewport.
 The GUI's **/network page** (docs/network-gui.md) works identically on a
 phone: the ledger it hosts converges with any PC's, the connect/put/time-travel
 forms are touch widgets, and the whole page refreshes itself as gossiped
-events arrive — verified cross-architecture in this repository's tests.
+events arrive — verified cross-architecture in this repository's tests. The
+**/notes editor** (docs/collaborative-notes.md) rides along: shared notes,
+plans, ballots, code, conlangs, and drawings, edited from the phone and
+converging with every connected instance — the cross-architecture ledger
+test's sibling was run against the notes node too.
 
 The wire protocols — gossip (`latte node`) and evaluation tasks
 (`latte worker`) — are architecture-independent (length-framed jammed nouns;

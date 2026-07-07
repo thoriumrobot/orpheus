@@ -150,11 +150,14 @@ network" in the-system.md).
 `secs` seconds (clamped 1–60) with no user action — made for state that changes *behind the
 page's back*: gossiped ledger events, a worker coming alive, a peer link appearing. Its field
 list may be empty (a pure display). The `Kv.*` tools surface the GUI's **ledger** — the
-persistent, gossiped key-value node behind `/network` — and `Net.*` the distributed-execution
-layer (workers, distribution-aware eval, FedAvg training, persisted models); both are marked
-volatile, so their results are never served from the render memo, and the ledger's generation
-stamp keys that memo, so a gossiped event from a peer invalidates exactly the pages that show
-ledger state (see docs/network-gui.md).
+persistent, gossiped key-value node behind `/network` — `Net.*` the distributed-execution
+layer (workers, distribution-aware eval, FedAvg training, persisted models), and `Note.*` the
+shared documents behind `/notes`; all three are marked volatile, so their results are never
+served from the render memo, and the ledger's and notes node's generation stamps key that
+memo, so a gossiped event from a peer invalidates exactly the pages that show shared state.
+The document-consuming tools (`Plan.solve`, `Acplan.solve`, `Code.*`, `Lang.*`,
+`Draw.render`) stay memoised — the generation stamps in the key give them freshness for
+free (see docs/network-gui.md and docs/collaborative-notes.md).
 
 `Live.box` shows the result as text (escaped); `Live.view` inserts it as raw markup, so chart
 and HTML tools display live. As the reader edits a control, the widget re-evaluates the
