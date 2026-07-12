@@ -66,12 +66,14 @@ pub fn init(store: Option<&str>, listen: &str, peers: &[String], id: Option<u64>
         None => net::Node::new(id, agent),
     };
     let node: net::NodeHandle = Arc::new(Mutex::new(node));
+    let psk = crate::secure::configured_psk(store.map(std::path::Path::new));
     let cfg = Arc::new(net::Config {
         name: "notes".into(),
         listen: listen.to_string(),
         peers: peers.to_vec(),
         verbose: false,
         compact_every: 0,
+        psk,
     });
     let peers_handle = if listen.is_empty() && peers.is_empty() {
         Arc::new(Mutex::new(Vec::new()))
@@ -194,6 +196,9 @@ pub fn create_kind(kind: &str, title: &str) -> Result<String, String> {
 }
 
 /// Create a plain note (kind "n").
+/// Create a plain note (the default document kind). Convenience wrapper over
+/// `create_kind` for callers that only ever make notes.
+#[allow(dead_code)]
 pub fn create(title: &str) -> Result<String, String> {
     create_kind("n", title)
 }
@@ -459,8 +464,8 @@ mod tests {
         let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = la.local_addr().unwrap().to_string();
         drop(la);
-        let cfg_a = Arc::new(net::Config { name: "NA".into(), listen: addr.clone(), peers: vec![], verbose: false, compact_every: 0 });
-        let cfg_b = Arc::new(net::Config { name: "NB".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0 });
+        let cfg_a = Arc::new(net::Config { name: "NA".into(), listen: addr.clone(), peers: vec![], verbose: false, compact_every: 0, psk: None });
+        let cfg_b = Arc::new(net::Config { name: "NB".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0, psk: None });
         let pa = net::start(a.clone(), cfg_a);
         let pb: net::Peers = Arc::new(Mutex::new(Vec::new()));
 

@@ -40,6 +40,45 @@
 <p class="sub">Connect Orpheus instances — over a LAN or the open Internet — and put the shared,
 persistent state to work, all from this page.</p>
 
+<div class="panel">
+  <div class="t">This instance</div>
+  <div class="b">
+    <p class="lede">A live read of what this Orpheus is doing right now — the browser view of
+    <code>latte status</code>. The <b>security</b> row matters before you expose a node: a
+    public bind wants a pre-shared key (gossip) and a token (this web console). See
+    <code>docs/security.md</code>.</p>
+    <table id="statustbl"><tbody>
+      <tr><th>version</th><td id="st-version">…</td></tr>
+      <tr><th>engine</th><td id="st-engine">…</td></tr>
+      <tr><th>native cache</th><td id="st-cache">…</td></tr>
+      <tr><th>news wire</th><td id="st-wire">…</td></tr>
+      <tr><th>security</th><td id="st-sec">…</td></tr>
+      <tr><th>workers</th><td id="st-workers">…</td></tr>
+    </tbody></table>
+    <script>
+    (function(){
+      function set(id,v){ var e=document.getElementById(id); if(e) e.textContent=v; }
+      function load(){
+        fetch('/api/status').then(function(r){return r.json();}).then(function(s){
+          set('st-version', s.version + '  ('+s.engine+')');
+          set('st-engine', s.native ? 'native compiler available — Anvil compiles hot code'
+                                    : 'interpreter + JIT (no rustc; the interpreter is the engine)');
+          set('st-cache', s.cache_programs + ' program(s), ' + s.cache_mib.toFixed(1) + ' MiB');
+          set('st-wire', s.wire_items > 0
+              ? (s.wire_items + ' item(s), last fetch ' + s.wire_age_min + ' min ago')
+              : 'empty — run `latte news fetch`');
+          set('st-sec', 'gossip ' + (s.gossip_psk ? 'PSK set (encrypted)' : 'plaintext')
+                      + ' · web ' + (s.web_token ? 'token required' : 'open (loopback only)'));
+          set('st-workers', s.workers > 0 ? (s.workers + ' registered — distribution on')
+                                          : 'none — local only');
+        }).catch(function(){ set('st-version','(status unavailable)'); });
+      }
+      load(); setInterval(load, 15000);
+    })();
+    </script>
+  </div>
+</div>
+
 <p class="lede">This GUI hosts a <b>ledger</b>: a persistent key-value <b>node</b> on the same
 gossip layer as <code>latte node</code>. Every put below is a durable event in an append-only
 log; peers exchange events continuously and fold them in one agreed total order, so connected

@@ -72,12 +72,14 @@ pub fn init(store: Option<&str>, listen: &str, peers: &[String], id: Option<u64>
         None => net::Node::new(id, agent),
     };
     let node: net::NodeHandle = Arc::new(Mutex::new(node));
+    let psk = crate::secure::configured_psk(store.map(std::path::Path::new));
     let cfg = Arc::new(net::Config {
         name: "ledger".into(),
         listen: listen.to_string(),
         peers: peers.to_vec(),
         verbose: false,
         compact_every: 0,
+        psk,
     });
     // net::start binds the listener (when given), launches the startup peer
     // connectors, and runs the anti-entropy sweep. With an empty listen it

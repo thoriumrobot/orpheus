@@ -100,11 +100,12 @@ kind of story impinges on **crypto** and on the **rates/duration** market:
 | retail-buzz      | 0.50   | 0.00  | moon-boys do not move Treasuries |
 
 An item's relevance to a market is the STRONGEST of: the asset named (1.0), its
-sector named (crypto-wide terms, 0.8, for crypto markets), a sibling coin named
-(0.4 — diluted evidence), or the transmission of any matched event class. Anything
-under 0.2 never reaches the advisor. So `latte news pulse --market bonds` shows the
-auction, the bank failure, the FOMC decision, and the risk-off tape — scored on the
-hawk/dove bond axis (risk-off = Treasury bid) — while the ETF flows, the exchange
+sector named (0.8 — crypto-wide terms for a crypto market, or the fixed-income complex
+"credit spreads", "high yield", "sovereign", etc. for the bond desk), a sibling coin
+named (0.4 — diluted evidence, crypto only), or the transmission of any matched event
+class. Anything under 0.2 never reaches the advisor. So `latte news pulse --market bonds`
+shows the auction, the bank failure, the FOMC decision, and the risk-off tape — scored on
+the hawk/dove bond axis (risk-off = Treasury bid) — while the ETF flows, the exchange
 hack, and the moon posts stay on the crypto desk. Patterns are word-bounded where
 substrings would lie ("war" must not fire on *warning*, "defi" not on *deficit*).
 

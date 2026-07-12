@@ -13,6 +13,7 @@
 mod atom;
 mod knot;
 mod sha3;
+mod secure;
 mod loom;
 mod fmt;
 mod latte;
@@ -25,6 +26,9 @@ mod store;
 mod sca;
 mod facet;
 mod serve;
+mod site;
+mod docs_embed;
+mod cliutil;
 mod mold;
 mod check;
 mod mocha;
@@ -332,7 +336,7 @@ fn cmd_cli() {
     println!("Orpheus command line.  Type a Latte expression, or a meta-command:");
     println!("  :type EXPR   infer a type      :rust EXPR   compile to native Rust and run");
     println!("  def NAME [args] = BODY   define a function for this session (def lists; undef NAME removes)");
-    println!("  :libs        list libraries    :help        this help     :q   quit\n");
+    println!("  :libs        list libraries    :status      instance report   :help  this help   :q  quit\n");
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     print!("orpheus> ");
@@ -351,7 +355,11 @@ fn cmd_cli() {
         if t == ":q" || t == ":quit" || t == ":exit" {
             break;
         } else if t == ":help" {
-            println!(":type EXPR | :rust EXPR | :libs | def NAME [args] = BODY | undef NAME | :q | otherwise evaluate EXPR");
+            println!(":type EXPR | :rust EXPR | :libs | :status | :version | def NAME [args] = BODY | undef NAME | :q | otherwise evaluate EXPR");
+        } else if t == ":status" || t == ":doctor" {
+            print!("{}", cliutil::status_report());
+        } else if t == ":version" {
+            println!("{}", cliutil::version_line());
         } else if t == "def" || t.starts_with("def ") {
             match latte::define_user_arm(t.strip_prefix("def").unwrap_or("")) {
                 Ok(m) | Err(m) => println!("{}", m),
@@ -440,6 +448,26 @@ fn main() {
         return;
     }
     let cmd = args.get(0).map(|s| s.as_str()).unwrap_or("gui");
+    // Usability front matter: version, help, and the status report are answered here so
+    // they work identically as `latte version`, `latte --version`, `-V`, etc.
+    match cmd {
+        "--version" | "-V" | "version" => {
+            println!("{}", cliutil::version_line());
+            return;
+        }
+        "status" | "doctor" | "info" => {
+            print!("{}", cliutil::status_report());
+            return;
+        }
+        "help" | "--help" | "-h" => {
+            match args.get(1).map(|s| s.as_str()) {
+                Some(topic) => print_command_help(topic),
+                None => print_usage(),
+            }
+            return;
+        }
+        _ => {}
+    }
     match cmd {
         "cli" | "console" | "--cli" => cmd_cli(),
         "cache" => cmd_cache(&args[1..]),
@@ -618,27 +646,23 @@ fn main() {
         "rustc" | "build-rust" => cmd_rustc(&args[1..]),
         "icomb" => icomb::cmd_icomb(),
         "serve" => cmd_serve(&args[1..]),
-        _ => {
-            eprintln!(
-                "usage:\n  latte                              start the GUI (default) — open the printed URL
-  latte node ...
-  latte eval \"<expr>\"
-  latte agent | selftest | bench [N]
-  latte sca <word> <rule>..
-  latte evolve <solar-word>..        SCArs: derive Heart Speech via lib/ligurian.sca
-  latte mold                         tour the mold/aura type system
-  latte typecheck <expr>             statically infer an expression's type
-  latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
-  latte plan [--iters N]             planning calc (Towards a New Socialism)
-  latte team --as NAME --share ...   collaborative coding across machines (Forge)
-  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\" | --list  the code profiler: measure both engines + detect distributable shapes; --list the table\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          news sentiment: trained classifier + LM lexicon (+ --bond axis)\n  latte news [pulse|fetch|train|sources]  the NEWSWIRE: fresh press + social feeds, auto-fetched, event-aware weights\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--kv-store D] [--kv-listen ADDR|off] [--kv-peer ADDR] [--notes-store D] [--notes-listen ADDR|off] [--notes-peer ADDR] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess, /network (ledger listens on 9600; --kv-peer links ledgers)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)"
-            );
+        "android" => cmd_android(&args[1..]),
+        other => {
+            let sugg = cliutil::suggest(other, cliutil::COMMANDS);
+            if !sugg.is_empty() {
+                let list = sugg.join(", ");
+                eprintln!("latte: unknown command '{}'. Did you mean: {}?\n", other, list);
+            } else {
+                eprintln!("latte: unknown command '{}'.\n", other);
+            }
+            print_usage();
         }
     }
 }
 
 
 fn cmd_gui(args: &[String]) {
+    println!("{}", cliutil::version_line());
     let mut listen = "127.0.0.1:8088".to_string();
     let mut root = "lib/site".to_string();
     let mut store: Option<String> = None;
@@ -785,6 +809,7 @@ fn build_chess_node(listen: &str, peers: &[String], store: Option<&str>) -> Opti
         peers: peers.to_vec(),
         verbose: false,
         compact_every: 0,
+        psk: crate::secure::configured_psk(None),
     });
     let peers_handle = net::start(node.clone(), cfg);
     Some(serve::Chess::new(node, peers_handle, q))
@@ -845,6 +870,116 @@ fn open_in_window(url: &str) {
         return;
     }
     eprintln!("(no browser found to open {} — open it manually)", url);
+}
+
+/// `latte android` — the phone entry point, for the Termux-free app.
+///
+/// The Android app (see android/) ships this binary inside its APK as
+/// `lib/arm64-v8a/liblatte.so`, the one place Android still extracts a file with the
+/// execute bit set. Its Activity spawns `liblatte.so android` and shows a WebView on the
+/// URL this prints. Everything the GUI needs is INSIDE the executable (the `.lat`
+/// libraries always were; `src/site.rs` now embeds the pages too), so there is no
+/// repository, no Termux, and no writable-exec directory anywhere in the picture.
+///
+/// The command is a thin, honest wrapper: point every cache and store at the app's
+/// private directory (which is what `HOME` already governs), bind loopback ONLY (an
+/// Android app's port would otherwise be reachable from the local network), pick a free
+/// port when 8088 is taken, print the URL on a line the Activity parses, and serve.
+fn cmd_android(args: &[String]) {
+    let mut port: u16 = 8088;
+    let mut home: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--port" => { i += 1; port = args.get(i).and_then(|p| p.parse().ok()).unwrap_or(8088); }
+            "--home" => { i += 1; home = args.get(i).cloned(); }
+            other => { eprintln!("unknown arg {}", other); return; }
+        }
+        i += 1;
+    }
+    // App-private storage: the Activity passes filesDir. Everything derived from HOME
+    // (the market cache, the news wire, the Anvil program cache) then lands inside the
+    // app's sandbox, which is the only place an Android app may write.
+    if let Some(h) = &home {
+        std::env::set_var("HOME", h);
+        let _ = std::fs::create_dir_all(h);
+    }
+    // Loopback only. A phone is usually on someone else's Wi-Fi; the GUI exposes eval and
+    // the ledger, so it must not be reachable from the network. Peers reach this node
+    // through `latte net` with a PSK, never through the web console.
+    let listen = {
+        let mut chosen = format!("127.0.0.1:{}", port);
+        if std::net::TcpListener::bind(&chosen).is_err() {
+            match std::net::TcpListener::bind("127.0.0.1:0") {
+                Ok(l) => {
+                    let p = l.local_addr().map(|a| a.port()).unwrap_or(0);
+                    drop(l);
+                    chosen = format!("127.0.0.1:{}", p);
+                }
+                Err(e) => {
+                    eprintln!("android: cannot bind a local port: {}", e);
+                    return;
+                }
+            }
+        }
+        chosen
+    };
+    // A phone has no rustc; skip the probe so startup never spawns a process (which can
+    // block under some Android sandboxes). The interpreter + JIT is the engine here.
+    std::env::set_var("ORPHEUS_NO_RUSTC", "1");
+    println!("Orpheus on Android — interpreter + JIT (no rustc on this device; that is fine)");
+    println!("  storage: {}", std::env::var("HOME").unwrap_or_else(|_| "<unset>".into()));
+    println!("  native : interpreter + JIT (cached native binaries still run if present)");
+    // The Activity greps for exactly this line to point its WebView.
+    println!("ORPHEUS_URL http://{}/", listen);
+    // The site is embedded, so "lib/site" simply won't exist and serve() falls back.
+    serve::serve(&listen, "lib/site");
+}
+
+/// The top-level usage text (also `latte help`).
+fn print_usage() {
+    eprintln!(
+        "usage:\n  latte                              start the GUI (default) — open the printed URL
+  latte node ...
+  latte eval \"<expr>\"
+  latte agent | selftest | bench [N]
+  latte sca <word> <rule>..
+  latte evolve <solar-word>..        SCArs: derive Heart Speech via lib/ligurian.sca
+  latte mold                         tour the mold/aura type system
+  latte typecheck <expr>             statically infer an expression's type
+  latte mocha --app NAME ...        run a Mocha app (todo, lexicon, forge)
+  latte plan [--iters N]             planning calc (Towards a New Socialism)
+  latte team --as NAME --share ...   collaborative coding across machines (Forge)
+  latte repl                         self-hosting Latte environment (REPL)\n  latte cli                          interactive command line (eval · :type · :rust · :libs)\n  latte cache [path|clear]           manage the compiled-program cache (Anvil)\n  latte profile \"<expr>\" | --list  the code profiler: measure both engines + detect distributable shapes; --list the table\n  latte worker [--listen ADDR]       serve evaluation tasks to connected instances (default 0.0.0.0:9700)\n  latte workers [add|rm|list|clear]  the worker registry: distribution is ON by default once workers are added\n  latte tensor                       n-dimensional tensor demo (lib/tensor.lat)\n  latte ddia [topic]                 data-intensive techniques in Latte: bloom, lsm, btree, vclock, crdt, lamport, chash, quorum, wire, mapred, merkle, mvcc, hll, cms, stream, raft\n  latte ml [linear|perceptron|kmeans|knn] [--iters N]  train a model in Latte (lib/ml.lat)\n  latte chart [bar|line|scatter] N.. data visualization to SVG (lib/plot.lat)\n  latte nn                           neural network with backprop (lib/nn.lat)\n  latte fin [--vol|--dir] [--iters N]  financial ML on Bitcoin: volatility-regime edge (lib/fin.lat)\n  latte gfx                          graphics: draw a scene to SVG (lib/gfx.lat)\n  latte gpu [--dim N]                data-parallel compute, auto-detects GPU (lib/gpu.lat)\n  latte trade [--account N] [--kelly F] [--sentiment S]  automatic trading advisor (sizing)\n  latte sentiment \"<text>\"          news sentiment: trained classifier + LM lexicon (+ --bond axis)\n  latte news [pulse|fetch|train|sources]  the NEWSWIRE: fresh press + social feeds, auto-fetched, event-aware weights\n  latte android [--home DIR]        the phone entry point (loopback GUI, embedded pages; used by the Android app)\n  latte jit \"<expr>\"               run on the JIT vs the interpreter (compare + time)\n  latte game chess [--max N] [--show K]  run a chess match between two machines\n  latte rustc \"<expr>\" [-o f.rs] [--run]  compile a Latte expression to native Rust (Anvil)\n  latte icomb                        interaction-combinator reduction (Lafont γ/δ/ε)\n  latte net \\\"<expr>\\\"               compile +/*/</if to an interaction net and reduce\n  latte gui [--listen ADDR] [--store D] [--kv-store D] [--kv-listen ADDR|off] [--kv-peer ADDR] [--notes-store D] [--notes-listen ADDR|off] [--notes-peer ADDR] [--chess-listen ADDR] [--peer ADDR]  GUI: System, editor, charts, chess, /network (ledger listens on 9600; --kv-peer links ledgers)\n  latte serve [--listen ADDR] [--root DIR]   run Hymn, hosting Facet pages (default lib/site)\n  latte status                       one screen: version, engine, cache, news wire, security, workers (alias: doctor)\n  latte version                      print the version and engine mode\n  latte help [command]               this list, or detailed help for one command"
+    );
+}
+
+/// Per-command help: `latte help <cmd>`. Falls back to a pointer at the full usage and
+/// the docs when a command has no dedicated blurb yet.
+fn print_command_help(topic: &str) {
+    let blurb: Option<&str> = match topic {
+        "news" | "wire" => Some("latte news [pulse|fetch|train|sources] [--market SYM] [--live]\n  The NEWSWIRE: fresh press RSS + social posts, auto-fetched (30-min TTL), scored with\n  event-aware weights and causal routing. `pulse` shows the scored feed for a market;\n  `fetch` pulls now; `train` fits the SESTM return-supervised model; `sources` lists feeds.\n  See docs/newswire.md."),
+        "trade" | "advisor" => Some("latte trade [--market SYM] [--account N] [--kelly F] [--news FILE] [--sentiment S] [--live]\n  The trading advisor: technical composite (60%) fused with event-aware news sentiment\n  (40%), sized by fractional Kelly x volatility targeting. `--market bonds` runs the\n  duration desk on live FRED yields. See docs/visualization-and-ml.md."),
+        "node" => Some("latte node --listen ADDR [--peer ADDR].. [--psk SECRET] [--store DIR] [--do ACTION].. [--run-secs N]\n  Run a gossip node that converges shared state with its peers. With a PSK (flag,\n  ORPHEUS_PSK, or a psk file in --store) every peer link is mutually authenticated and\n  encrypted. See docs/security.md."),
+        "serve" | "gui" | "start" => Some("latte gui | serve [--listen ADDR] [--root DIR]\n  The web console (System, editor, charts, chess, /network, the tools page). Loopback is\n  an open personal console; a public bind requires ORPHEUS_TOKEN (or a derived PSK token)\n  or it is refused. See docs/security.md."),
+        "android" => Some("latte android [--home DIR] [--port N]\n  The phone entry point: binds the GUI to loopback, embeds all pages, prints ORPHEUS_URL\n  for the app WebView. No rustc needed — the interpreter is the engine. See docs/android.md."),
+        "cache" => Some("latte cache [status|metrics|verify [--repair]|log|warm \"<expr>\"|clear]\n  The Anvil compiled-program cache. `status` shows size and location; `warm` prebuilds an\n  expression; `clear` empties it. ORPHEUS_CACHE relocates it."),
+        "eval" => Some("latte eval [--explain] [--lib NAME=PATH].. \"<expr>\"\n  Evaluate a Latte expression with the standard libraries in scope. `--explain` reports\n  the run plan (native vs interpret). ORPHEUS_FUEL=<n> sets the step budget (0 = unlimited)."),
+        "status" | "doctor" => Some("latte status\n  One screen of the instance's state: version, engine mode, cache, news wire, security,\n  and workers. Alias: latte doctor."),
+        _ => None,
+    };
+    match blurb {
+        Some(b) => println!("{}", b),
+        None => {
+            let sugg = cliutil::suggest(topic, cliutil::COMMANDS);
+            if !sugg.is_empty() && sugg[0] != topic {
+                println!("no detailed help for '{}'. Did you mean: {}?\n", topic, sugg.join(", "));
+            } else {
+                println!("no detailed help for '{}' yet — see `latte help` and the docs/ directory.\n", topic);
+            }
+            print_usage();
+        }
+    }
 }
 
 fn cmd_serve(args: &[String]) {
@@ -1246,6 +1381,7 @@ fn cmd_node(args: &[String]) {
     let mut snapshot_every: usize = 32;
     let mut compact_every: usize = 0;
     let mut agent_name = String::from("v1");
+    let mut psk_arg: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -1260,6 +1396,7 @@ fn cmd_node(args: &[String]) {
             "--snapshot-every" => { i += 1; snapshot_every = args[i].parse().unwrap_or(32); }
             "--compact-every" => { i += 1; compact_every = args[i].parse().unwrap_or(0); }
             "--agent" => { i += 1; agent_name = args[i].clone(); }
+            "--psk" => { i += 1; psk_arg = Some(args[i].clone()); }
             "-v" | "--verbose" => { verbose = true; }
             other => { eprintln!("unknown arg {}", other); return; }
         }
@@ -1289,7 +1426,14 @@ fn cmd_node(args: &[String]) {
         None => Node::new(id, agent),
     };
     let node = Arc::new(Mutex::new(node));
-    let cfg = Arc::new(Config { name: name.clone(), listen: listen.clone(), peers: peers.clone(), verbose, compact_every });
+    let psk = match &psk_arg {
+        Some(p) => Some(crate::secure::derive_psk(p)),
+        None => crate::secure::configured_psk(store_dir.as_deref().map(std::path::Path::new)),
+    };
+    if psk.is_some() {
+        println!("[{}] secure transport ENABLED (pre-shared key; peers are mutually authenticated and encrypted)", name);
+    }
+    let cfg = Arc::new(Config { name: name.clone(), listen: listen.clone(), peers: peers.clone(), verbose, compact_every, psk });
     let peers_handle = net::start(node.clone(), cfg);
 
     // perform startup actions after a short delay so links can establish

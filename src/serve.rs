@@ -24,10 +24,79 @@ struct HymnHandler {
     root: String,
     editor: Option<EditorHandle>,
     chess: Option<ChessHandle>,
+    /// When set, every request must present this token — `Authorization: Bearer <tok>`,
+    /// an `X-Orpheus-Token` header, or `?token=` / an `orpheus_token` cookie for plain
+    /// browser navigation. Derived from the same PSK material as the gossip channel, so
+    /// one secret protects both surfaces. `None` → open (the loopback default).
+    token: Option<String>,
+}
+
+/// Compare in constant time and accept the token from any of the places a phone browser
+/// can actually supply it.
+fn request_authorized(req: &Request, token: &str) -> bool {
+    let ok = |v: &str| crate::secure::ct_eq(v.trim().as_bytes(), token.as_bytes());
+    if let Some(h) = req.headers.get("authorization") {
+        if let Some(b) = h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")) {
+            if ok(b) {
+                return true;
+            }
+        }
+    }
+    if let Some(h) = req.headers.get("x-orpheus-token") {
+        if ok(h) {
+            return true;
+        }
+    }
+    for kv in req.query.split('&') {
+        if let Some(v) = kv.strip_prefix("token=") {
+            if ok(v) {
+                return true;
+            }
+        }
+    }
+    if let Some(c) = req.headers.get("cookie") {
+        for part in c.split(';') {
+            if let Some(v) = part.trim().strip_prefix("orpheus_token=") {
+                if ok(v) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 impl httpd::Handler for HymnHandler {
     fn handle(&self, req: &Request) -> Response {
+        // SECURITY GATE: with a token configured, nothing is served without it — not the
+        // API, not the pages. The check runs before routing so no handler can leak state
+        // to an unauthenticated caller. 401 with a hint, never a redirect (which would
+        // leak the token in a Location header).
+        if let Some(tok) = &self.token {
+            if !request_authorized(req, tok) {
+                let mut r = simple(401, "text/plain; charset=utf-8",
+                    b"401 unauthorized \xe2\x80\x94 this Orpheus instance requires a token.\n\
+                      Supply it as `Authorization: Bearer <token>`, `X-Orpheus-Token: <token>`,\n\
+                      or append `?token=<token>` once (the server then sets a cookie).\n".to_vec());
+                r.headers.push(("WWW-Authenticate".into(), "Bearer realm=\"orpheus\"".into()));
+                return r;
+            }
+            // a successful `?token=` navigation plants a cookie so in-page fetches work
+            if req.query.split('&').any(|kv| kv.starts_with("token=")) {
+                let mut r = self.route(req);
+                r.headers.push((
+                    "Set-Cookie".into(),
+                    format!("orpheus_token={}; Path=/; HttpOnly; SameSite=Strict", tok),
+                ));
+                return r;
+            }
+        }
+        self.route(req)
+    }
+}
+
+impl HymnHandler {
+    fn route(&self, req: &Request) -> Response {
         if req.path.starts_with("/api/") {
             api_handle(req, &self.editor, &self.chess, &self.root)
         } else if self.editor.is_some() && req.path == "/" {
@@ -42,17 +111,64 @@ impl httpd::Handler for HymnHandler {
 fn serve_with(listen: &str, root: &str, editor: Option<EditorHandle>, chess: Option<ChessHandle>) {
     println!("Hymn — Orpheus web server (HTTP/1.1)");
     println!("  hosting '{}' at http://{}/", root, listen);
+    if !std::path::Path::new(root).is_dir() && crate::site::available() {
+        println!("  pages: EMBEDDED in the binary ('{}' not found — the single-file path a phone uses)", root);
+    }
     if editor.is_some() {
         println!("  WYSIWYG editor at  http://{}/editor   (live Facet preview, save/load)", listen);
     }
     println!("  keep-alive · ETag/304 · Range/206 · fonts · SCArs-powered Facet pages");
+
+    // SECURITY: the GUI exposes eval, the ledger, the editor, and the trading tools. On
+    // loopback that is a personal console. Bound to anything else it is an Internet
+    // service, so it requires a token. `ORPHEUS_TOKEN` sets one explicitly; otherwise a
+    // PSK (`ORPHEUS_PSK`) derives one deterministically, so a phone that knows the
+    // cluster secret can compute its own access URL. With neither, a public bind is
+    // refused rather than silently exposed.
+    let token = gui_token();
+    let public = !crate::net::is_loopback_addr(listen);
+    if public && token.is_none() {
+        eprintln!(
+            "\n  REFUSING to serve {} without authentication.\n  \
+             This bind is reachable off-box and the GUI exposes eval, the ledger, and the\n  \
+             editor. Set ORPHEUS_TOKEN=<secret> (or ORPHEUS_PSK=<secret>) and retry, or\n  \
+             bind 127.0.0.1 for a local-only console. See docs/security.md.",
+            listen
+        );
+        return;
+    }
+    match &token {
+        Some(t) if public => {
+            println!("  access control: TOKEN required (open http://{}/?token={} once)", listen, t);
+        }
+        Some(_) => println!("  access control: token required (loopback bind)"),
+        None => println!("  access control: none (loopback bind — local console)"),
+    }
+
     // the NEWSWIRE's background refresher: an open dashboard stays fed with fresh press
     // and social items (30-min cycle; ORPHEUS_NEWS_AUTO=0 disables; never under tests)
     crate::newswire::spawn_refresher();
-    let handler = HymnHandler { root: root.to_string(), editor, chess };
+    let handler = HymnHandler { root: root.to_string(), editor, chess, token };
     if let Err(e) = httpd::serve(listen, std::sync::Arc::new(handler)) {
         eprintln!("Hymn: cannot bind {}: {}", listen, e);
     }
+}
+
+/// The GUI access token: `ORPHEUS_TOKEN` verbatim, else derived from the PSK
+/// (`SHAKE256("orpheus-gui-token-v1" ‖ psk)` in hex, 16 bytes) so one shared secret
+/// unlocks both the gossip channel and the web console. None when neither is set.
+fn gui_token() -> Option<String> {
+    if let Ok(t) = std::env::var("ORPHEUS_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let psk = crate::secure::configured_psk(None)?;
+    let mut seed = Vec::new();
+    seed.extend_from_slice(b"orpheus-gui-token-v1");
+    seed.extend_from_slice(&psk);
+    Some(crate::sha3::hex(&crate::sha3::shake256_vec(&seed, 16)))
 }
 
 
@@ -106,23 +222,58 @@ struct Resource {
 // ----- connection loop ------------------------------------------------------
 /// Read one request (request line + headers). Returns None at clean EOF.
 // ----- routing --------------------------------------------------------------
+/// Read a site file: the `--root` directory when the file exists there (so a developer's
+/// edits show up on reload), otherwise the copy EMBEDDED in the binary (`src/site.rs`).
+/// This is what lets a single sideloaded executable serve the whole GUI on a phone, with
+/// no repository checkout beside it.
+fn site_read(root: &str, rel: &str) -> Option<Vec<u8>> {
+    let p = Path::new(root).join(rel);
+    if let Ok(b) = fs::read(&p) {
+        return Some(b);
+    }
+    crate::site::get(rel).map(|b| b.to_vec())
+}
+
+/// Does the site contain this path (on disk or embedded)? Used for the extensionless
+/// `/editor` -> `editor.html` and `/system` -> `system.facet` probes.
+fn site_has(root: &str, rel: &str) -> bool {
+    Path::new(root).join(rel).exists() || crate::site::get(rel).is_some()
+}
+
+/// Last-modified for a real file; None for embedded assets (they are as old as the
+/// binary, and reporting the binary's mtime would be a lie about the asset).
+fn site_mtime(root: &str, rel: &str) -> Option<u64> {
+    fs::metadata(Path::new(root).join(rel))
+        .ok()?
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
 fn resolve(root: &str, path: &str, query: &str) -> Option<Resource> {
     if path.contains("..") {
         return None;
     }
     let rel = path.trim_start_matches('/');
-    let base = Path::new(root);
-    let file = if path.is_empty() || path == "/" || path.ends_with('/') {
-        base.join(rel).join("index.facet")
+    // the site-relative path we're asked for
+    let rel: String = if path.is_empty() || path == "/" || path.ends_with('/') {
+        format!("{}index.facet", rel)
     } else {
-        base.join(rel)
+        rel.to_string()
     };
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = Path::new(&rel).extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
 
     // a Facet page: render it (dynamic, no Last-Modified)
-    if ext == "facet" || (ext.is_empty() && file.with_extension("facet").exists()) {
-        let f = if ext == "facet" { file } else { file.with_extension("facet") };
-        let src = fs::read_to_string(&f).ok()?;
+    let facet_rel = if ext == "facet" {
+        Some(rel.clone())
+    } else if ext.is_empty() && site_has(root, &format!("{}.facet", rel)) {
+        Some(format!("{}.facet", rel))
+    } else {
+        None
+    };
+    if let Some(fr) = facet_rel {
+        let src = String::from_utf8(site_read(root, &fr)?).ok()?;
         // user input: every query parameter is seeded into the page so In.field(name, default) can
         // read it — this is what makes a Facet page an interactive interface.
         let params: Vec<(String, String)> = query
@@ -148,22 +299,17 @@ fn resolve(root: &str, path: &str, query: &str) -> Option<Resource> {
     }
 
     // extensionless path that names a static .html (e.g. /editor -> editor.html)
-    let file = if ext.is_empty() && file.with_extension("html").exists() {
-        file.with_extension("html")
+    let rel = if ext.is_empty() && site_has(root, &format!("{}.html", rel)) {
+        format!("{}.html", rel)
     } else {
-        file
+        rel
     };
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = Path::new(&rel).extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // a static asset
     let (ctype, cacheable) = content_type(ext)?;
-    let meta = fs::metadata(&file).ok()?;
-    let last_modified = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
-    let body = fs::read(&file).ok()?;
+    let body = site_read(root, &rel)?;
+    let last_modified = site_mtime(root, &rel);
     Some(Resource { body, ctype: ctype.to_string(), cacheable, last_modified })
 }
 
@@ -859,6 +1005,13 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
                     }
                 }
             }
+            // fall back to (and union with) the docs EMBEDDED in the binary, so the Docs
+            // index is populated even where no docs/ directory ships — notably Android.
+            for stem in crate::docs_embed::stems() {
+                if !names.iter().any(|n| n == stem) {
+                    names.push(stem.to_string());
+                }
+            }
             names.sort();
             // a friendly default order: language references first
             names.sort_by_key(|n| match n.as_str() {
@@ -877,9 +1030,9 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
         ("GET", "/api/doc") => match safe_doc_name(query_param(&req.query, "name").as_deref()) {
             Some(name) => {
                 let p = docs_dir(root).join(format!("{}.md", name));
-                match std::fs::read(&p) {
-                    Ok(b) => simple(200, "text/markdown; charset=utf-8", b),
-                    Err(_) => simple(404, "text/plain; charset=utf-8", b"no such doc".to_vec()),
+                match std::fs::read(&p).ok().or_else(|| crate::docs_embed::get(&name).map(|b| b.to_vec())) {
+                    Some(b) => simple(200, "text/markdown; charset=utf-8", b),
+                    None => simple(404, "text/plain; charset=utf-8", b"no such doc".to_vec()),
                 }
             }
             None => simple(400, "text/plain; charset=utf-8", b"bad doc name".to_vec()),
@@ -1366,6 +1519,29 @@ fn api_handle(req: &Request, editor: &Option<EditorHandle>, chess: &Option<Chess
             simple(200, "application/json; charset=utf-8", json.into_bytes())
         }
         // THE NEWSWIRE, scored: fresh press + social items with event labels and weights,
+        // instance status as JSON — the same facts as `latte status`, for the GUI's
+        // network/status page and for health checks.
+        ("GET", "/api/status") => {
+            let has_rustc = crate::rustgen::rustc_available();
+            let (n, bytes) = crate::rustgen::cache_stats();
+            let wire_items = crate::newswire::load_wire().len();
+            let wire_age = crate::newswire::wire_age().map(|a| a / 60);
+            let psk = crate::secure::configured_psk(None).is_some();
+            let token = std::env::var("ORPHEUS_TOKEN").is_ok() || psk;
+            let workers = crate::dist::workers().len();
+            let json = format!(
+                "{{\"version\":\"{}\",\"engine\":\"{}\",\"native\":{},\"cache_programs\":{},\
+                 \"cache_mib\":{:.1},\"wire_items\":{},\"wire_age_min\":{},\"gossip_psk\":{},\
+                 \"web_token\":{},\"workers\":{}}}",
+                crate::cliutil::version(),
+                if has_rustc { "adaptive" } else { "interpret-only" },
+                has_rustc, n, bytes as f64 / (1u64 << 20) as f64, wire_items,
+                wire_age.map(|a| a.to_string()).unwrap_or_else(|| "null".into()),
+                psk, token, workers,
+            );
+            simple(200, "application/json; charset=utf-8", json.into_bytes())
+        }
+
         // the embedded corpus as the fallback when the wire is empty. Query parameters:
         // ?market=SYM (default btc), ?fresh=1 forces a fetch now.
         // JSON {wire, press_aggregate, social_aggregate?, aggregate, items:[{date,source,kind,
@@ -2398,6 +2574,65 @@ mod tests {
     }
     fn header<'a>(r: &'a Response, k: &str) -> Option<&'a str> {
         r.headers.iter().find(|(hk, _)| hk.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str())
+    }
+
+    fn req_q(headers: &[(&str, &str)], query: &str) -> Request {
+        let mut r = req("GET", headers);
+        r.query = query.into();
+        r
+    }
+
+    #[test]
+    fn token_gate_accepts_every_channel_a_phone_can_use() {
+        let t = "s3cret";
+        assert!(request_authorized(&req("GET", &[("Authorization", "Bearer s3cret")]), t));
+        assert!(request_authorized(&req("GET", &[("authorization", "bearer s3cret")]), t));
+        assert!(request_authorized(&req("GET", &[("X-Orpheus-Token", "s3cret")]), t));
+        assert!(request_authorized(&req("GET", &[("Cookie", "a=1; orpheus_token=s3cret; b=2")]), t));
+        assert!(request_authorized(&req_q(&[], "token=s3cret"), t));
+        assert!(request_authorized(&req_q(&[], "x=1&token=s3cret&y=2"), t));
+    }
+
+    #[test]
+    fn token_gate_rejects_everything_else() {
+        let t = "s3cret";
+        assert!(!request_authorized(&req("GET", &[]), t));
+        assert!(!request_authorized(&req("GET", &[("Authorization", "Bearer wrong")]), t));
+        assert!(!request_authorized(&req("GET", &[("Authorization", "Basic s3cret")]), t), "wrong scheme");
+        assert!(!request_authorized(&req("GET", &[("Cookie", "orpheus_token=nope")]), t));
+        assert!(!request_authorized(&req_q(&[], "token=s3cre"), t), "prefix is not enough");
+        assert!(!request_authorized(&req_q(&[], "tokenx=s3cret"), t));
+        // surrounding whitespace IS tolerated (headers picked up from a config file)
+        assert!(request_authorized(&req("GET", &[("X-Orpheus-Token", " s3cret ")]), t));
+    }
+
+    #[test]
+    fn the_gui_serves_from_the_embedded_site_when_the_root_is_absent() {
+        // this is the Android case: no repository beside the binary
+        let missing = "/nonexistent-root-for-tests";
+        let r = resolve(missing, "/system", "").expect("system page resolves from the embedded copy");
+        assert_eq!(r.ctype, "text/html; charset=utf-8");
+        assert!(!r.body.is_empty());
+        // an embedded static asset, with no Last-Modified (we will not lie about its age)
+        let f = resolve(missing, "/fonts/ligos-regular.woff2", "").expect("font resolves");
+        assert_eq!(&f.body[..4], b"wOF2");
+        assert!(f.last_modified.is_none(), "embedded assets have no honest mtime");
+        // the index (a Facet page) renders
+        assert!(resolve(missing, "/", "").is_some());
+        // and traversal is still refused
+        assert!(resolve(missing, "/../secret", "").is_none());
+    }
+
+    #[test]
+    fn a_real_root_still_wins_over_the_embedded_copy() {
+        // developers editing lib/site must see their edits, not the baked-in bytes
+        let dir = std::env::temp_dir().join(format!("orpheus-site-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("docs.html"), b"<h1>edited</h1>").unwrap();
+        let r = resolve(dir.to_str().unwrap(), "/docs.html", "").expect("disk copy");
+        assert_eq!(r.body, b"<h1>edited</h1>");
+        assert!(r.last_modified.is_some(), "a real file reports its mtime");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

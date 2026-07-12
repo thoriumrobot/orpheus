@@ -1,0 +1,35 @@
+// The APK is a wrapper: one Activity, one WebView, and the Orpheus binary shipped as a
+// "native library" (the only place Android still extracts an executable file). There is no
+// NDK build here — build-android.sh produces the binary, and `jniLibs` picks it up.
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'org.orpheus.latte'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "org.orpheus.latte"
+        minSdk 24          // WebView + ProcessBuilder from nativeLibraryDir
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        // Only 64-bit ARM: every Android device since 2019 is arm64-v8a, and the static
+        // binary build-android.sh emits targets exactly that.
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    // Do NOT compress or page-align away our executable: it must be extracted verbatim.
+    packagingOptions {
+        jniLibs { useLegacyPackaging true }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}

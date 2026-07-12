@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is permitted ONLY for loopback: the GUI Orpheus serves to its own WebView.
+  Everything else keeps Android's default (HTTPS required), so the news wire's feed
+  fetches and any remote peering are held to the platform's normal TLS policy.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

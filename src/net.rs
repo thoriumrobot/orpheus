@@ -421,7 +421,6 @@ fn decode_baseline(k: &N) -> Option<(Atom, EventKey, N)> {
 
 fn broadcast(peers: &Peers, frame: Vec<u8>) {
     // Send to every live peer, and drop any whose writer thread has died (its
-    // receiver is gone). Keeps the peer set bounded across reconnections — important
     // for long-lived Internet nodes that see peers come and go.
     let mut list = peers.lock().unwrap();
     list.retain(|tx| tx.send(frame.clone()).is_ok());
@@ -433,10 +432,77 @@ pub struct Config {
     pub peers: Vec<String>,
     pub verbose: bool,
     pub compact_every: usize, // GC the log once it exceeds this many events (0 = never)
+    /// The pre-shared key for the AUTHENTICATED, ENCRYPTED transport (src/secure.rs).
+    /// `Some` → every peer connection is mutually authenticated and encrypted; a dialer
+    /// or listener without the matching PSK is refused before the sync loop. `None` →
+    /// legacy plaintext (a trusted-LAN fallback; `start` warns if the listener is not
+    /// loopback-only).
+    pub psk: Option<[u8; 32]>,
+}
+
+/// The SEND side of a connection's framing: legacy plaintext, or an encrypted session
+/// half. Negotiated once at connect time; the writer thread owns it.
+enum SendWire {
+    Plain,
+    Secure(crate::secure::SendHalf),
+}
+impl SendWire {
+    fn send_frame(&mut self, w: &mut impl Write, frame: &[u8]) -> io::Result<()> {
+        match self {
+            SendWire::Plain => write_frame(w, frame),
+            SendWire::Secure(sh) => sh.send(w, frame),
+        }
+    }
+}
+
+/// The RECV side: legacy plaintext, or an encrypted session half. The reader loop owns it.
+enum RecvWire {
+    Plain,
+    Secure(crate::secure::RecvHalf),
+}
+impl RecvWire {
+    fn recv_frame(&mut self, r: &mut impl Read) -> io::Result<Vec<u8>> {
+        match self {
+            RecvWire::Plain => read_frame(r),
+            RecvWire::Secure(rh) => rh.recv(r),
+        }
+    }
+}
+
+/// A Read+Write view over the split TCP halves, so the handshake (which needs both
+/// directions on one object) can run before the writer thread takes the write half.
+struct DuplexRef<'a> {
+    r: &'a mut TcpStream,
+    w: &'a mut TcpStream,
+}
+impl Read for DuplexRef<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.r.read(buf)
+    }
+}
+impl Write for DuplexRef<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.w.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.w.flush()
+    }
 }
 
 /// Start listener, peer connectors, and the anti-entropy sweep. Returns the shared
 /// handles so a CLI can poke the node and read its state.
+/// True when a listen address binds only loopback (127.0.0.0/8, ::1, localhost), where an
+/// unauthenticated plaintext channel is acceptable. Anything else (0.0.0.0, a public IP, a
+/// hostname) is reachable off-box and should carry a PSK.
+pub fn is_loopback_addr(listen: &str) -> bool {
+    let host = match listen.rfind(':') {
+        Some(i) => &listen[..i],
+        None => listen,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "127.0.0.1" || host == "::1" || host == "localhost" || host.starts_with("127.")
+}
+
 pub fn start(node: NodeHandle, cfg: Arc<Config>) -> Peers {
     let peers: Peers = Arc::new(Mutex::new(Vec::new()));
 
@@ -451,13 +517,24 @@ pub fn start(node: NodeHandle, cfg: Arc<Config>) -> Peers {
                 if cfg.verbose {
                     eprintln!("[{}] listening on {}", cfg.name, listen);
                 }
+                // SECURITY: a listener reachable from off-box with no PSK is the dangerous
+                // case — anyone who can route to it can read the log and inject events.
+                // Warn loudly (once), regardless of verbosity.
+                if cfg.psk.is_none() && !is_loopback_addr(&listen) {
+                    eprintln!(
+                        "[{}] WARNING: listening on {} with NO pre-shared key — the gossip \
+                         channel is unauthenticated plaintext. Set ORPHEUS_PSK (or a `psk` \
+                         file, or --psk) so only holders of the key can sync. See docs/security.md.",
+                        cfg.name, listen
+                    );
+                }
                 for stream in l.incoming() {
                     if let Ok(s) = stream {
                         let node = node.clone();
                         let peers = peers.clone();
                         let cfg = cfg.clone();
                         thread::spawn(move || {
-                            let _ = handle_conn(s, node, peers, cfg);
+                            let _ = handle_conn(s, node, peers, cfg, false);
                         });
                     }
                 }
@@ -530,7 +607,7 @@ pub fn connect_peer_cancellable(
                 if cfg.verbose {
                     eprintln!("[{}] connected to {}", cfg.name, addr);
                 }
-                if let Err(e) = handle_conn(s, node.clone(), peers.clone(), cfg.clone()) {
+                if let Err(e) = handle_conn(s, node.clone(), peers.clone(), cfg.clone(), true) {
                     if e.to_string().contains("self-connection") {
                         eprintln!("[{}] {} is this node's own address — dropping the peer entry", cfg.name, addr);
                         return; // pointless to redial yourself
@@ -543,18 +620,65 @@ pub fn connect_peer_cancellable(
     });
 }
 
-fn handle_conn(stream: TcpStream, node: NodeHandle, peers: Peers, cfg: Arc<Config>) -> io::Result<()> {
+fn handle_conn(stream: TcpStream, node: NodeHandle, peers: Peers, cfg: Arc<Config>, dialer: bool) -> io::Result<()> {
     stream.set_nodelay(true).ok();
     let mut reader = stream.try_clone()?;
     let mut writer = stream;
 
-    // per-connection writer thread fed by a channel
+    // --- SECURITY HANDSHAKE ---------------------------------------------------
+    // With a PSK configured, mutually authenticate and derive session keys BEFORE any
+    // gossip. A peer that cannot prove the PSK never reaches the sync loop below, so it
+    // can neither read the log nor inject events. Without a PSK, fall back to plaintext
+    // (trusted-LAN mode; `start` warns for non-loopback listeners). The dialer runs the
+    // client side, the listener the server side, over the raw stream — before the writer
+    // thread is spawned, so the handshake I/O is strictly ordered.
+    //
+    // SLOW-LORIS DEFENCE: bound the handshake with a read/write timeout so a peer that
+    // connects and then stalls (or dribbles bytes) cannot pin a thread indefinitely before
+    // authenticating. The timeout is CLEARED once the session is up, because the steady
+    // gossip loop is legitimately long-lived and idle between events.
+    let handshake_timeout = Some(std::time::Duration::from_secs(15));
+    reader.set_read_timeout(handshake_timeout).ok();
+    writer.set_write_timeout(handshake_timeout).ok();
+    let mut send_wire = SendWire::Plain;
+    let mut recv_wire = RecvWire::Plain;
+    if let Some(psk) = cfg.psk {
+        let sess = if dialer {
+            crate::secure::client_handshake(&mut DuplexRef { r: &mut reader, w: &mut writer }, &psk)
+        } else {
+            crate::secure::server_handshake(&mut DuplexRef { r: &mut reader, w: &mut writer }, &psk)
+        };
+        match sess {
+            Ok(s) => {
+                let (sh, rh) = s.split();
+                send_wire = SendWire::Secure(sh);
+                recv_wire = RecvWire::Secure(rh);
+                if cfg.verbose {
+                    eprintln!("[{}] secure channel established (PSK, encrypted)", cfg.name);
+                }
+            }
+            Err(e) => {
+                let _ = reader.shutdown(std::net::Shutdown::Both);
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                    format!("secure handshake failed: {}", e)));
+            }
+        }
+    }
+
+    // Handshake done (or skipped in plaintext mode). Clear the timeouts: the steady gossip
+    // loop is legitimately long-lived and idle between a peer's events, so a read/write
+    // timeout here would sever healthy quiet connections. The slow-loris window was the
+    // pre-auth handshake, which is now bounded.
+    reader.set_read_timeout(None).ok();
+    writer.set_write_timeout(None).ok();
+
+    // per-connection writer thread fed by a channel; it owns the SEND half of the wire
     let (tx, rx) = channel::<Vec<u8>>();
     {
         let mut w = writer.try_clone()?;
         thread::spawn(move || {
             for frame in rx.iter() {
-                if write_frame(&mut w, &frame).is_err() {
+                if send_wire.send_frame(&mut w, &frame).is_err() {
                     break;
                 }
             }
@@ -577,7 +701,7 @@ fn handle_conn(stream: TcpStream, node: NodeHandle, peers: Peers, cfg: Arc<Confi
     let _ = &mut writer; // writer half owned by writer thread clone
 
     loop {
-        let payload = read_frame(&mut reader)?;
+        let payload = recv_wire.recv_frame(&mut reader)?;
         if payload.is_empty() {
             continue;
         }
@@ -742,7 +866,7 @@ mod tests {
         let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = la.local_addr().unwrap().to_string();
         drop(la);
-        let cfg = Arc::new(Config { name: "S".into(), listen: addr.clone(), peers: vec![], verbose: false, compact_every: 0 });
+        let cfg = Arc::new(Config { name: "S".into(), listen: addr.clone(), peers: vec![], verbose: false, compact_every: 0, psk: None });
         let peers = start(a.clone(), cfg.clone());
         connect_peer(a.clone(), peers.clone(), cfg, addr); // the mistake: dialling our own address
         std::thread::sleep(Duration::from_millis(1500)); // first dial happens, sentinel stops the retry loop
@@ -754,7 +878,118 @@ mod tests {
         submit(&a, &peers, act_add(0));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(a.lock().unwrap().event_count(), 3, "no event duplication or echo loop");
-        assert_eq!(peers.lock().unwrap().len(), 0, "the self-dial connector stopped; all its senders pruned");
+        // The dead self-dial sender is pruned by broadcast()'s retain when its writer thread
+        // has exited (which follows the connection drop asynchronously). Re-run the retain via
+        // a harmless empty broadcast until the set drains — no new events, so event_count
+        // stays 3. This is deterministic where a single fixed sleep was intermittently flaky.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !peers.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline,
+                "the self-dial connector stopped; all its senders should be pruned");
+            broadcast(&peers, Vec::new()); // triggers retain of dead senders; adds no event
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(a.lock().unwrap().event_count(), 3, "prune polling added no events");
+    }
+
+    #[test]
+    fn secure_nodes_converge_over_an_encrypted_channel() {
+        // Two live nodes with the SAME PSK: the handshake must succeed and the gossip
+        // protocol must work identically over the encrypted record layer.
+        let psk = crate::secure::derive_psk("shared-cluster-secret");
+        let a = Arc::new(Mutex::new(mk(41)));
+        let b = Arc::new(Mutex::new(mk(42)));
+        let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr_a = la.local_addr().unwrap().to_string();
+        drop(la);
+        let cfg_a = Arc::new(Config { name: "SA".into(), listen: addr_a.clone(), peers: vec![], verbose: false, compact_every: 0, psk: Some(psk) });
+        let cfg_b = Arc::new(Config { name: "SB".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0, psk: Some(psk) });
+        let peers_a = start(a.clone(), cfg_a);
+        let peers_b: Peers = Arc::new(Mutex::new(Vec::new()));
+        submit(&a, &peers_a, act_add(5));
+        submit(&b, &peers_b, act_add(7));
+        connect_peer(b.clone(), peers_b.clone(), cfg_b, addr_a);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let sa = a.lock().unwrap().state().unwrap();
+            let sb = b.lock().unwrap().state().unwrap();
+            if sa == sb && show_state(&sa) == "12" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline,
+                "secure nodes did not converge: A={} B={}", show_state(&sa), show_state(&sb));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // events keep flowing over the encrypted channel after the handshake
+        submit(&b, &peers_b, act_add(3));
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if show_state(&a.lock().unwrap().state().unwrap()) == "15" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "post-handshake event did not propagate");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn wrong_psk_peer_cannot_sync_or_inject() {
+        // An attacker with the wrong PSK must never reach the sync loop: A's state must
+        // NOT be polluted by the intruder's events, and the intruder must learn nothing.
+        let good = crate::secure::derive_psk("right-key");
+        let bad = crate::secure::derive_psk("attacker-guess");
+        let a = Arc::new(Mutex::new(mk(51)));
+        let evil = Arc::new(Mutex::new(mk(52)));
+        let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr_a = la.local_addr().unwrap().to_string();
+        drop(la);
+        let cfg_a = Arc::new(Config { name: "GOOD".into(), listen: addr_a.clone(), peers: vec![], verbose: false, compact_every: 0, psk: Some(good) });
+        let cfg_e = Arc::new(Config { name: "EVIL".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0, psk: Some(bad) });
+        let peers_a = start(a.clone(), cfg_a);
+        let peers_e: Peers = Arc::new(Mutex::new(Vec::new()));
+        submit(&a, &peers_a, act_add(10)); // A's secret state = 10
+        connect_peer(evil.clone(), peers_e.clone(), cfg_e, addr_a);
+        // the intruder submits events that would corrupt A if they landed
+        submit(&evil, &peers_e, act_add(999));
+        std::thread::sleep(Duration::from_millis(1500)); // ample time for retries to fail
+        assert_eq!(show_state(&a.lock().unwrap().state().unwrap()), "10",
+            "an unauthenticated peer must not inject events");
+        assert_eq!(show_state(&evil.lock().unwrap().state().unwrap()), "999",
+            "the intruder must not learn A's state");
+    }
+
+    #[test]
+    fn plaintext_peer_cannot_sync_with_a_secured_node() {
+        // The legacy plaintext protocol must not silently bypass the PSK: a node with no
+        // PSK dialling a secured listener is refused (its plaintext HELLO is not a valid
+        // handshake), so a downgrade attack fails.
+        let psk = crate::secure::derive_psk("secret");
+        let a = Arc::new(Mutex::new(mk(61)));
+        let plain = Arc::new(Mutex::new(mk(62)));
+        let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr_a = la.local_addr().unwrap().to_string();
+        drop(la);
+        let cfg_a = Arc::new(Config { name: "SEC".into(), listen: addr_a.clone(), peers: vec![], verbose: false, compact_every: 0, psk: Some(psk) });
+        let cfg_p = Arc::new(Config { name: "PLAIN".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0, psk: None });
+        let peers_a = start(a.clone(), cfg_a);
+        let peers_p: Peers = Arc::new(Mutex::new(Vec::new()));
+        submit(&a, &peers_a, act_add(4));
+        connect_peer(plain.clone(), peers_p.clone(), cfg_p, addr_a);
+        submit(&plain, &peers_p, act_add(100));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(show_state(&a.lock().unwrap().state().unwrap()), "4",
+            "a plaintext dialer must not inject into a secured node");
+    }
+
+    #[test]
+    fn loopback_detection_is_correct() {
+        assert!(is_loopback_addr("127.0.0.1:9000"));
+        assert!(is_loopback_addr("localhost:9000"));
+        assert!(is_loopback_addr("[::1]:9000"));
+        assert!(is_loopback_addr("127.5.5.5:1"));
+        assert!(!is_loopback_addr("0.0.0.0:9000"));
+        assert!(!is_loopback_addr("192.168.1.10:9000"));
+        assert!(!is_loopback_addr("example.com:9000"));
     }
 
     #[test]
@@ -767,8 +1002,8 @@ mod tests {
         let la = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr_a = la.local_addr().unwrap().to_string();
         drop(la); // free the port for start() to rebind
-        let cfg_a = Arc::new(Config { name: "A".into(), listen: addr_a.clone(), peers: vec![], verbose: false, compact_every: 0 });
-        let cfg_b = Arc::new(Config { name: "B".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0 });
+        let cfg_a = Arc::new(Config { name: "A".into(), listen: addr_a.clone(), peers: vec![], verbose: false, compact_every: 0, psk: None });
+        let cfg_b = Arc::new(Config { name: "B".into(), listen: String::new(), peers: vec![], verbose: false, compact_every: 0, psk: None });
         let peers_a = start(a.clone(), cfg_a);
         let peers_b: Peers = Arc::new(Mutex::new(Vec::new()));
         submit(&a, &peers_a, act_add(5));

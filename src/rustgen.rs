@@ -1805,6 +1805,13 @@ fn sanitize_component(s: &str) -> String {
 pub fn rustc_available() -> bool {
     static AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAIL.get_or_init(|| {
+        // `ORPHEUS_NO_RUSTC=1` short-circuits the probe entirely: the Android app sets it,
+        // so startup never spawns a process. (On a phone there is no rustc anyway, and
+        // spawning one under some sandboxes/emulators can block — the launcher must not
+        // hang on a banner line.)
+        if std::env::var("ORPHEUS_NO_RUSTC").map(|v| v == "1").unwrap_or(false) {
+            return false;
+        }
         std::process::Command::new("rustc")
             .arg("-vV")
             .stdout(std::process::Stdio::null())

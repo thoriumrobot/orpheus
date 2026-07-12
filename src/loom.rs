@@ -119,11 +119,40 @@ pub enum Crash {
 
 pub type Eval = Result<N, Crash>;
 
-/// Default evaluation step budget (guards against non-termination / `*f f`-style loops).
+/// Baseline evaluation step budget (guards against non-termination / `*f f`-style loops)
+/// on a machine that also has the native compiler to fall back on.
 pub const DEFAULT_FUEL: u64 = 50_000_000;
 
+/// The budget an INTERPRET-ONLY device gets. On a phone (no `rustc`, so Anvil can never
+/// lower a program to native code) the interpreter is not a fallback — it is the engine.
+/// A ceiling tuned to "a native path exists for the heavy work" silently turns the
+/// finance and ML tools into `OutOfFuel` errors there, which is not "interpretation
+/// works". The guard still exists (a runaway `*f f` must not hang the GUI), it is just
+/// sized for the machine that has to do the real work in the interpreter.
+pub const INTERPRETER_FUEL: u64 = 20_000_000_000;
+
+/// The effective step budget for this process, decided once:
+///   * `ORPHEUS_FUEL=<n>` — an explicit budget; `0` means "no limit" (scripts, batch jobs).
+///   * otherwise: `DEFAULT_FUEL` when a `rustc` is present (the native path takes the
+///     heavy programs), `INTERPRETER_FUEL` when it is not (phones, stripped containers).
+pub fn default_fuel() -> u64 {
+    static FUEL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FUEL.get_or_init(|| {
+        if let Ok(v) = std::env::var("ORPHEUS_FUEL") {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                return if n == 0 { u64::MAX } else { n };
+            }
+        }
+        if crate::rustgen::rustc_available() {
+            DEFAULT_FUEL
+        } else {
+            INTERPRETER_FUEL
+        }
+    })
+}
+
 pub fn tar(subject: &N, formula: &N) -> Eval {
-    let mut fuel = DEFAULT_FUEL;
+    let mut fuel = default_fuel();
     run(subject, formula, &mut fuel)
 }
 
@@ -145,7 +174,7 @@ fn run(subject: &N, formula: &N, fuel: &mut u64) -> Eval {
 #[allow(dead_code)]
 /// Force full JIT compilation regardless of hotness (for benchmarking / auditing the compiler).
 pub fn jit_force(subject: &N, formula: &N) -> Eval {
-    let mut fuel = DEFAULT_FUEL;
+    let mut fuel = default_fuel();
     jit::eval(formula, subject, &mut fuel)
 }
 
@@ -153,7 +182,7 @@ pub fn jit_force(subject: &N, formula: &N) -> Eval {
 /// Evaluate strictly with the interpreter (the reference semantics), bypassing the JIT.
 /// Used to audit the compiler against the interpreter.
 pub fn interp(subject: &N, formula: &N) -> Eval {
-    let mut fuel = DEFAULT_FUEL;
+    let mut fuel = default_fuel();
     tar_fuel(subject, formula, &mut fuel, false)
 }
 
@@ -825,6 +854,36 @@ mod jit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpret_only_devices_get_a_generous_fuel_budget() {
+        // the guard still exists, but the ceiling an interpret-only phone gets must be
+        // large enough for the heavy models (which the native path would have absorbed)
+        assert!(INTERPRETER_FUEL > DEFAULT_FUEL * 100,
+            "an interpret-only device must not inherit the native path's ceiling");
+        // and it must still be finite: a runaway `*f f` has to terminate
+        assert!(INTERPRETER_FUEL < u64::MAX);
+    }
+
+    #[test]
+    fn orpheus_fuel_env_overrides_and_zero_means_unlimited() {
+        // default_fuel() memoizes per process, so exercise the decision function directly
+        let decide = |env: Option<&str>, has_rustc: bool| -> u64 {
+            if let Some(v) = env {
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    return if n == 0 { u64::MAX } else { n };
+                }
+            }
+            if has_rustc { DEFAULT_FUEL } else { INTERPRETER_FUEL }
+        };
+        assert_eq!(decide(Some("1234"), true), 1234);
+        assert_eq!(decide(Some("0"), true), u64::MAX, "0 means no limit");
+        assert_eq!(decide(Some(" 99 "), false), 99, "whitespace tolerated");
+        assert_eq!(decide(None, true), DEFAULT_FUEL);
+        assert_eq!(decide(None, false), INTERPRETER_FUEL, "no rustc -> interpreter budget");
+        assert_eq!(decide(Some("not-a-number"), false), INTERPRETER_FUEL, "junk falls back");
+    }
+
     use crate::knot::{cell, num};
 
     #[test]

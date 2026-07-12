@@ -109,9 +109,111 @@ pub fn hex(d: &[u8]) -> String {
     s
 }
 
+// ===========================================================================
+// SHAKE256 — the extendable-output function (FIPS 202) that the secure
+// transport (src/secure.rs) is built from. Same Keccak-f[1600] permutation as
+// SHA3-256, capacity 512 (rate 136), but the XOF domain pad (0x1f) and an
+// arbitrary-length squeeze. From this one primitive we get everything the
+// channel needs without a single external crate: a key-derivation function
+// (squeeze N key bytes from a seed), a keystream (squeeze len(plaintext) bytes
+// and XOR), and — via keyed hashing — a message authentication code.
+// ===========================================================================
+
+/// SHAKE256 XOF: absorb `input`, squeeze `out.len()` bytes into `out`.
+pub fn shake256(input: &[u8], out: &mut [u8]) {
+    const RATE: usize = 136; // capacity 512, same as SHA3-256
+    let mut st = [0u64; 25];
+
+    // absorb
+    let mut offset = 0;
+    while input.len() - offset >= RATE {
+        absorb_block(&mut st, &input[offset..offset + RATE]);
+        keccak_f(&mut st);
+        offset += RATE;
+    }
+    // pad: XOF domain 0x1f ... 0x80
+    let mut block = [0u8; RATE];
+    let rem = &input[offset..];
+    block[..rem.len()].copy_from_slice(rem);
+    block[rem.len()] ^= 0x1f;
+    block[RATE - 1] ^= 0x80;
+    absorb_block(&mut st, &block);
+    keccak_f(&mut st);
+
+    // squeeze
+    let mut produced = 0;
+    while produced < out.len() {
+        // emit up to RATE bytes (17 lanes) from the state
+        let take = (out.len() - produced).min(RATE);
+        let mut buf = [0u8; RATE];
+        for i in 0..17 {
+            buf[i * 8..i * 8 + 8].copy_from_slice(&st[i].to_le_bytes());
+        }
+        out[produced..produced + take].copy_from_slice(&buf[..take]);
+        produced += take;
+        if produced < out.len() {
+            keccak_f(&mut st);
+        }
+    }
+}
+
+/// Convenience: squeeze exactly `n` bytes as a `Vec`.
+pub fn shake256_vec(input: &[u8], n: usize) -> Vec<u8> {
+    let mut out = vec![0u8; n];
+    shake256(input, &mut out);
+    out
+}
+
+/// A 32-byte keyed digest (MAC / KDF leaf): SHAKE256(key ‖ 0x00 ‖ msg) → 32 bytes.
+/// The 0x00 separator keeps `key` and `msg` from running together (the key length
+/// is also folded in by callers that need domain separation). SHAKE is not length-
+/// extendable in the Merkle–Damgård sense, so prefix-keying is sound here; we keep
+/// the construction simple and in one place.
+pub fn keyed256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(key.len() + 1 + msg.len());
+    buf.extend_from_slice(key);
+    buf.push(0x00);
+    buf.extend_from_slice(msg);
+    let mut out = [0u8; 32];
+    shake256(&buf, &mut out);
+    out
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shake256_kat_empty() {
+        // FIPS 202 / NIST test vector: SHAKE256("") first 32 bytes.
+        let mut out = [0u8; 32];
+        shake256(b"", &mut out);
+        assert_eq!(
+            hex(&out),
+            "46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f"
+        );
+    }
+
+    #[test]
+    fn shake256_is_a_prefix_stream() {
+        // Squeezing N bytes then M>N must agree on the first N (streaming property).
+        let short = shake256_vec(b"orpheus", 32);
+        let long = shake256_vec(b"orpheus", 200);
+        assert_eq!(short[..], long[..32]);
+        // and it crosses the 136-byte rate boundary correctly (non-trivial squeeze)
+        assert_ne!(long[135], long[136]);
+    }
+
+    #[test]
+    fn keyed256_separates_key_and_message() {
+        // changing the key changes the tag; splitting the same bytes differently too
+        let a = keyed256(b"key1", b"message");
+        let b = keyed256(b"key2", b"message");
+        let c = keyed256(b"keymes", b"sage"); // same concatenation, different split
+        assert_ne!(a, b);
+        assert_ne!(a, c, "the 0x00 separator prevents key/message sliding");
+    }
 
     #[test]
     fn kat_empty() {

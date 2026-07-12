@@ -224,7 +224,7 @@ pub fn parse_feed_date(s: &str) -> Option<i64> {
         let (y, mo, d) = (s.get(0..4)?.parse::<i64>().ok()?, s.get(5..7)?.parse::<i64>().ok()?, s.get(8..10)?.parse::<i64>().ok()?);
         let (h, mi, sec) = (s.get(11..13)?.parse::<i64>().ok()?, s.get(14..16)?.parse::<i64>().ok()?, s.get(17..19)?.parse::<i64>().ok()?);
         let mut off = 0i64;
-        let rest = &s[19..];
+        let rest = s.get(19..).unwrap_or("");
         let tz = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
         if let Some(sign) = tz.chars().next() {
             if sign == '+' || sign == '-' {
@@ -321,16 +321,32 @@ fn json_str_after(hay: &str, key: &str, from: usize) -> Option<(String, usize)> 
                         }
                         i += 4;
                     }
-                    c => s.push(c as char),
+                    // an escaped ASCII byte (\" \\ \/ etc). A backslash before a
+                    // multibyte character is malformed JSON; treat the backslash as a
+                    // no-op and let the following bytes be decoded normally below.
+                    c if c < 0x80 => s.push(c as char),
+                    _ => { i -= 1; } // not a real escape — reprocess this byte as text
                 }
+                i += 1;
+            }
+            c if c < 0x80 => {
+                s.push(c as char);
+                i += 1;
             }
             _ => {
-                let ch = rest[i..].chars().next().unwrap();
-                s.push(ch);
-                i += ch.len_utf8() - 1;
+                // a multibyte UTF-8 sequence starting at i: copy the whole char, advancing
+                // by its byte length so `i` never lands inside a character (which would
+                // panic when slicing). `rest[i..]` is safe here because `i` is always on a
+                // char boundary at the top of the loop.
+                match rest[i..].chars().next() {
+                    Some(ch) => {
+                        s.push(ch);
+                        i += ch.len_utf8();
+                    }
+                    None => i += 1, // unreachable given i < len, but never slice-panic
+                }
             }
         }
-        i += 1;
     }
     None
 }
@@ -503,7 +519,17 @@ fn save_wire(items: &[Item]) {
             sanitize(&it.headline)
         ));
     }
-    let _ = std::fs::write(wire_path(), s);
+    // Atomic replace: write a temp file then rename over the store, so a concurrent
+    // reader (market_wire, /api/news, or another fetcher) never sees a half-written
+    // wire.tsv — the same temp-then-rename discipline as store.rs and dbservice.rs.
+    let final_path = wire_path();
+    let tmp = dir.join(format!("wire.tsv.tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, &s).is_ok() {
+        if std::fs::rename(&tmp, &final_path).is_err() {
+            let _ = std::fs::write(&final_path, &s); // fallback if rename is unsupported
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 }
 
 /// One `curl` fetch. A descriptive User-Agent is required by Reddit and polite everywhere.
@@ -522,6 +548,14 @@ fn curl(url: &str) -> Result<String, String> {
 /// time. Returns per-source notes for the report; the store is updated even when some
 /// sources fail — freshness is best-effort by design.
 pub fn fetch_all() -> Vec<String> {
+    // One fetch at a time per process: the background refresher thread and an on-demand
+    // market_wire() call must not interleave their load→merge→save cycles, or the second
+    // save would clobber the first's new items (last-write-wins on the whole file). This
+    // mutex makes the read-modify-write atomic within the process; the temp-then-rename in
+    // save_wire covers cross-process readers.
+    use std::sync::{Mutex, OnceLock};
+    static FETCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = FETCH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
     let now = now_epoch();
     let mut notes = Vec::new();
     let mut wire = load_wire();
@@ -647,6 +681,13 @@ fn market_class(market: &str) -> crate::events::MarketClass {
 const CRYPTO_SECTOR: &[&str] = &["crypto", "blockchain", "digital asset", "altcoin", "defi ",
                                  "stablecoin", "token", "web3", "mining", "miner"];
 
+/// Fixed-income sector terms: not a specific instrument by name, but the rates/credit
+/// complex a bond desk trades — a story about "credit spreads" or "fixed-income flows"
+/// impinges on the duration book even without saying "treasury".
+const BOND_SECTOR: &[&str] = &["fixed income", "fixed-income", "credit spread", "credit market",
+                               "sovereign", "coupon", "duration", "investment grade",
+                               "high yield", "junk bond", "corporate debt", "bond market"];
+
 /// Below this, an item does not reach a market's advisor at all.
 const RELEVANCE_FLOOR: f64 = 0.2;
 
@@ -682,6 +723,11 @@ fn relevance(headline: &str, market: &str) -> f64 {
                 r = r.max(0.4);
             }
         }
+    } else if class == crate::events::MarketClass::Bonds
+        && BOND_SECTOR.iter().any(|t| low.contains(t))
+    {
+        // the fixed-income complex named without a specific instrument
+        r = r.max(0.8);
     }
     if r < RELEVANCE_FLOOR {
         0.0
@@ -973,6 +1019,14 @@ mod tests {
     }
 
     #[test]
+    fn feed_date_survives_malformed_multibyte() {
+        // a 19+ byte timestamp whose byte 19 is inside a multibyte char must not panic
+        assert_eq!(parse_feed_date("2026-01-01T00:00:\u{20ac}x"), None);
+        // and a normal fractional/offset date still parses
+        assert!(parse_feed_date("2026-07-06T12:00:00.5+02:00").is_some());
+    }
+
+    #[test]
     fn feed_dates_cover_both_conventions() {
         let a = parse_feed_date("Mon, 06 Jul 2026 12:00:00 +0000").unwrap();
         let b = parse_feed_date("2026-07-06T12:00:00Z").unwrap();
@@ -1003,6 +1057,21 @@ mod tests {
         let b = parse_bsky(bsky);
         assert_eq!(b.len(), 1);
         assert!(b[0].2.starts_with("bitcoin looking strong"));
+    }
+
+    #[test]
+    fn json_parser_survives_adversarial_multibyte() {
+        // a backslash immediately before a multibyte char (malformed JSON) must not panic;
+        // parsing untrusted feed data, robustness matters more than strict correctness
+        let j = "{\"title\":\"a\\\u{20ac}b crash\",\"score\":1,\"created_utc\":1751700000}";
+        let r = parse_reddit(j);
+        // must return something (or nothing) — the point is it does not panic
+        let _ = r;
+        // a lone multibyte value parses cleanly
+        let j2 = "{\"title\":\"caf\u{e9} \u{20ac}100 rally\",\"score\":5,\"created_utc\":1751700000}";
+        let r2 = parse_reddit(j2);
+        assert_eq!(r2.len(), 1);
+        assert!(r2[0].2.contains('\u{20ac}'));
     }
 
     #[test]
@@ -1050,6 +1119,9 @@ mod tests {
         assert_eq!(relevance(hack, "bonds"), 0.0);
         // sector term without the asset name
         assert!((relevance("Stablecoin rules clear the committee", "btc") - 0.8).abs() < 1e-9);
+        // the fixed-income sector, named without a specific instrument, reaches the bond desk
+        assert!((relevance("Credit spreads widen as high yield sells off", "bonds") - 0.8).abs() < 1e-9);
+        assert!((relevance("Fixed-income funds see record inflows", "bonds") - 0.8).abs() < 1e-9);
         // sibling spillover: a story about another coin, with no recognized event class,
         // is diluted evidence about btc (the 0.4 floor)…
         assert!((relevance("Solana network congestion eases", "btc") - 0.4).abs() < 1e-9);

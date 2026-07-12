@@ -136,6 +136,24 @@ On Windows, Anvil compiles to `latte`-built `.exe` programs and caches them unde
 
 ---
 
+## Getting your bearings
+
+Three commands orient you without reading source or docs:
+
+- `latte --version` (also `-V`, `latte version`) — the version and which engine is active
+  (native-compiler-available or interpret-only).
+- `latte status` (alias `latte doctor`) — one screen of the instance's live state: engine
+  mode and step budget, the compiled-program cache size and location, the news-wire store
+  and freshness, the security posture (gossip PSK, web token), the storage roots, and any
+  registered workers. The same facts are available as JSON at `GET /api/status`, and the
+  GUI's `/network` page shows them in an "This instance" panel that refreshes live.
+- `latte help` lists every command; `latte help <command>` gives a focused blurb for the
+  common ones (news, trade, node, serve, android, cache, eval, status).
+
+Mistype a command and Orpheus suggests the nearest matches rather than dumping the whole
+usage — `latte tarde` → "Did you mean: trade?". The interactive `latte cli` has the same
+help as meta-commands: `:status`, `:version`, `:help`.
+
 ## Compiled-program cache (both platforms)
 
 When Anvil is the engine, each distinct expression is compiled **once** and the resulting native

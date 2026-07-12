@@ -7,9 +7,52 @@ over HTTP to the phone's own browser), the gossip layer, and the distributed
 execution layer. A phone is a full peer: it can host persistent nodes, serve
 as a worker, and coordinate work running on PCs — and vice versa.
 
-## Getting it onto a phone
+## The app: tap an icon, no Termux
 
-**Termux (recommended).** Install [Termux](https://f-droid.org/packages/com.termux/)
+```sh
+./build-apk.sh                # builds the aarch64 binary, stages it, assembles the APK
+adb install orpheus.apk       # tap to launch; the GUI opens inside the app
+```
+
+`android/` is the whole app: one Activity, one WebView, no Android-specific logic beyond
+starting a process and showing a view.
+
+**How it runs a binary at all.** Android has forbidden executing files from an app's
+writable data directory since API 29 (W^X). The one place the platform still puts an
+executable file is `nativeLibraryDir`: the installer extracts everything the APK ships
+under `lib/<abi>/` there, *with the execute bit*, into a directory the app cannot write.
+So Orpheus ships as `lib/arm64-v8a/liblatte.so` — not a shared object, but the ELF
+executable wearing the name the packager requires. The installer extracts and marks it
+executable; `MainActivity` runs it with `ProcessBuilder`. Nothing is ever written to a
+writable-executable location: this is policy-compliant, not a workaround, and it needs no
+root, no Termux, and no toolchain on the device.
+
+`latte android` then prints one line — `ORPHEUS_URL http://127.0.0.1:8088/` — and the
+Activity points its WebView at it.
+
+**Storage, ports, permissions.**
+
+- The app passes `--home <filesDir>/orpheus`. `HOME` already governs every cache Orpheus
+  keeps (market series, news wire, Anvil program cache, node store), so all of it lands
+  inside the sandbox and no storage permission is needed.
+- `latte android` binds **loopback only** and picks a free port if 8088 is taken. A phone
+  is usually on someone else's Wi-Fi and the GUI exposes `eval` and the ledger, so nothing
+  on the network can reach it. Peers reach the node through `latte net` with a pre-shared
+  key (`docs/security.md`), never through the web console.
+- The manifest declares **no permissions**. Add `INTERNET` only if you want the news wire to
+  fetch feeds or the node to gossip with remote peers — and read `docs/security.md` first.
+  `network_security_config.xml` permits cleartext to `127.0.0.1` only.
+
+**Why an APK is possible now.** The `.lat` libraries were always compiled into the binary;
+`src/site.rs` embeds the GUI's pages and `src/docs_embed.rs` embeds the documentation, so
+the **Docs** index in the GUI is fully populated on the phone too (with no `docs/` directory
+beside the executable it falls back to the embedded copies). The executable is the entire
+system, so there is nothing to install beside it. (`serve` still prefers a real `--root` /
+`docs/` directory when one exists, so editing a page and reloading works exactly as before.)
+
+## Getting it onto a phone, the other ways
+
+**Termux (still supported).** Install [Termux](https://f-droid.org/packages/com.termux/)
 from F-Droid, then build on the device — Termux's rustc targets Android
 natively and Orpheus has no other dependencies:
 
@@ -35,14 +78,16 @@ Termux. On a bare `adb shell`, set `HOME` (and `TMPDIR`) to a writable
 directory such as `/data/local/tmp` — Orpheus falls back to the temp dir for
 its caches when `$HOME` is not writable.
 
-The CLI, workers, and nodes need only the binary. The **GUI additionally
-serves the `lib/site` directory from disk**, so push it alongside and run
-from that directory (a Termux source build has it already):
+The binary is everything — the GUI's pages are embedded (`src/site.rs`), so nothing needs
+to be pushed alongside it:
 
 ```sh
-adb push lib/site /data/local/tmp/lib/site
-adb shell 'cd /data/local/tmp && HOME=$PWD ./latte gui'
+adb shell 'cd /data/local/tmp && HOME=$PWD ./latte android'
+adb forward tcp:8088 tcp:8088     # then open http://127.0.0.1:8088/ on the PC
 ```
+
+(A `lib/site` directory beside the binary still wins when present, which is what makes
+editing a page and reloading work during development.)
 
 **PC with the Android NDK.** `export ANDROID_NDK_HOME=…`,
 `rustup target add aarch64-linux-android`, then `./build-android.sh` builds a
@@ -99,7 +144,8 @@ pc$    latte ml linear --store /tmp/model      # rounds now train on the phone t
 pc$    latte worker --listen 0.0.0.0:9700
 phone$ ORPHEUS_WORKERS=<pc-ip>:9700 latte eval '(dmap (fn [x] -> (mul x x)) [ 1 [ 2 [ 3 0 ] ] ])'
 
-# a persistent node on each, converging over gossip:
+# a persistent node on each, converging over gossip (set ORPHEUS_PSK first if
+# these cross the Internet rather than one Wi-Fi — see docs/security.md):
 pc$    latte node --listen 0.0.0.0:9000 --agent kv --store ~/pcstore
 phone$ latte node --listen 0.0.0.0:9000 --peer <pc-ip>:9000 --agent kv --store ~/phonestore
 ```
@@ -124,6 +170,24 @@ interpreter + JIT (pure Rust closures — any CPU) answer everything.
 ```
 native      — (no rustc on this device; the interpreter + JIT is the engine)
 ```
+
+One thing *did* have to change for that to be true in practice. The evaluator's step budget
+guards against a runaway `*f f`, and it was sized for a machine where anything heavy gets
+handed to the native compiler. On an interpret-only device the interpreter **is** the heavy
+path, so that ceiling silently turned the finance and ML tools into `OutOfFuel` errors.
+`src/loom.rs` now decides the budget by asking whether a `rustc` exists:
+
+| device | budget | why |
+|---|---|---|
+| has `rustc` | `DEFAULT_FUEL` (50M) | the native path absorbs the heavy programs |
+| no `rustc` (a phone) | `INTERPRETER_FUEL` (20G) | the interpreter must finish the work itself |
+| `ORPHEUS_FUEL=<n>` | `n` (`0` = unlimited) | explicit control for scripts and batch jobs |
+
+The guard stays finite, so a non-terminating program still stops rather than hanging the
+GUI. Verified on real aarch64 under emulation with `rustc` hidden and no `lib/` directory:
+the bond model's `(breport 0)` returns exactly what the native path returns —
+`[[0 986] [[0 696] [[0 633] [1 0]]]]` (98.6% train / 69.6% out-of-sample / 63.3% baseline)
+— in about a minute rather than two seconds. Slower, identical, correct.
 
 In Termux with `pkg install rust`, the native engine works exactly as on a
 PC, building aarch64 binaries into the on-device cache.

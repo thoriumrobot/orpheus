@@ -242,7 +242,7 @@ pub fn cmd_mocha(args: &[String]) {
     if let Some(addr) = listen {
         // distributed: pokes become gossiped events; peeks read the converged state
         let handle: net::NodeHandle = Arc::new(Mutex::new(node));
-        let cfg = Arc::new(Config { name: app.clone(), listen: addr, peers, verbose, compact_every: 0 });
+        let cfg = Arc::new(Config { name: app.clone(), listen: addr, peers, verbose, compact_every: 0, psk: None });
         let peers_handle = net::start(handle.clone(), cfg);
         std::thread::sleep(Duration::from_millis(800)); // let links settle
         for p in &pokes {

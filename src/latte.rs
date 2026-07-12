@@ -1526,7 +1526,7 @@ pub fn compile_library_program(libs: &[&str]) -> Result<(N, Vec<(String, u128)>)
 
 /// Invoke arm `name` of a compiled program on the argument tuple `args`.
 pub fn call_arm(core: &N, axes: &[(String, u128)], name: &str, args: N) -> Result<N, String> {
-    call_arm_fuel(core, axes, name, args, crate::loom::DEFAULT_FUEL)
+    call_arm_fuel(core, axes, name, args, crate::loom::default_fuel())
 }
 
 /// Like `call_arm`, but with an explicit fuel budget (the SCArs Latte pipeline

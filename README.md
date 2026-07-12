@@ -33,8 +33,10 @@ gossip, no blockchain), persists durably with safe upgrades, accelerates with au
 jets, and ships a working application: a sound-change applier that a hosted web page
 calls to generate conlang vocabulary on the fly. Every release includes **Ubuntu and
 Windows binaries**, and the repository builds a **static Android (aarch64)
-binary** — a phone in Termux is a full peer: ledger, documents, worker,
-GUI (docs/android.md).
+binary** and a **Termux-free Android app** (`./build-apk.sh`) — a phone is a
+full peer: ledger, documents, worker, GUI (docs/android.md). Instances that
+federate over the Internet get a mutually-authenticated, encrypted channel
+from one pre-shared key (docs/security.md).
 
 ## Build, test, run
 
@@ -215,21 +217,33 @@ own browser), persistent gossiped nodes, and distributed execution — a phone
 can be a worker for a PC, coordinate work running on PCs, or both at once.
 
 ```sh
-# on the phone (Termux, from F-Droid):
-pkg install rust binutils && ./build-android.sh    # native on-device build
-latte gui                                          # → http://127.0.0.1:8088 in Chrome
+# the app — no Termux, no toolchain, tap an icon:
+./build-apk.sh && adb install orpheus.apk
 
-# or sideload a fully static aarch64 binary built on a PC:
+# or sideload the bare binary (the GUI is embedded, so this is a complete Orpheus):
 ./build-android.sh --static                        # -Z build-std cross build
 adb push target-static/aarch64-unknown-linux-gnu/release/latte /data/local/tmp/
+adb shell 'chmod +x /data/local/tmp/latte && HOME=/data/local/tmp /data/local/tmp/latte android'
+
+# or build on the phone in Termux, as before:
+pkg install rust binutils && ./build-android.sh
 ```
+
+The APK ships the binary as `lib/arm64-v8a/liblatte.so` — the one place Android
+still extracts a file with the execute bit — so nothing ever lives in a
+writable-executable directory. It works because the binary is *everything*: the
+`.lat` libraries were always compiled in, and the GUI's pages are embedded too
+(`src/site.rs`), so a single 4.8 MB file serves the whole console.
 
 The System GUI adapts to touch: **long-press a command line to run it** (the
 middle-click of phones), **▶ Run** in the header for the caret line, pointer-
 gesture drags for separators and title bars (hold a title bar to lift a
 viewer into move mode), and a stacked single-column layout on narrow screens.
 Without a rustc on the device, the native engine stands down cleanly and the
-interpreter + JIT answer everything — same results, reported honestly by
+interpreter + JIT answer everything — and the evaluator's step budget now
+adapts, so the heavy finance/ML models finish on a phone instead of hitting
+`OutOfFuel` (identical answers, ~a minute instead of ~2s). Same results,
+reported honestly by
 `latte profile`.
 
 PC↔phone connectivity is exercised by `xarch_test.sh`: an x86-64 instance and
